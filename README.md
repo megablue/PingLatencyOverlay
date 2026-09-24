@@ -14,6 +14,8 @@ From `src-tauri/`:
 ```powershell
 cargo run
 cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
 The release executable is written to:
@@ -25,6 +27,11 @@ src-tauri/target/release/ping-latency-overlay.exe
 The app starts in tray mode. Left-click the tray icon to open Config; right-click
 for Start/Pause, Config, and Exit. For development, `cargo run -- --show-config`
 opens Config immediately.
+
+The config editor is the only egui window. Overlays are independent native
+Win32 layered windows, so their alpha is composited by Windows rather than by a
+second GPU renderer. This keeps transparent/partial backgrounds reliable and
+avoids allocating a renderer for every overlay.
 
 ## Installer
 

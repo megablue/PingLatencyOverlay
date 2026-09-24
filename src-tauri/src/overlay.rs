@@ -142,6 +142,7 @@ mod win {
         pub fn MonitorFromPoint(point: POINT, dwflags: DWORD) -> HANDLE;
         pub fn GetDpiForSystem() -> u32;
         pub fn SetProcessDpiAwarenessContext(value: HANDLE) -> BOOL;
+        pub fn ValidateRect(hwnd: HWND, rect: *const RECT) -> BOOL;
     }
 
     #[link(name = "gdi32")]
@@ -177,9 +178,9 @@ use win::{
     CreateCompatibleDC, CreateDIBSection, CreateWindowExW, DefWindowProcW, DeleteDC, DeleteObject,
     DestroyWindow, GetDC, GetDpiForSystem, GetModuleHandleW, GetMonitorInfoW, GetStockObject,
     MonitorFromPoint, RegisterClassW, ReleaseDC, SelectObject, SetProcessDpiAwarenessContext,
-    SetWindowPos, ShowWindow, UnregisterClassW, UpdateLayeredWindow, UpdateWindow, BITMAPINFO,
-    BLENDFUNCTION, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, POINT, RECT, SIZE, UINT,
-    WNDCLASSW, WPARAM,
+    SetWindowPos, ShowWindow, UnregisterClassW, UpdateLayeredWindow, UpdateWindow, ValidateRect,
+    BITMAPINFO, BLENDFUNCTION, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, POINT, RECT,
+    SIZE, UINT, WNDCLASSW, WPARAM,
 };
 
 #[cfg(windows)]
@@ -214,6 +215,10 @@ const DIB_RGB_COLORS: u32 = 0;
 const CS_HREDRAW: u32 = 0x0002;
 #[cfg(windows)]
 const CS_VREDRAW: u32 = 0x0001;
+#[cfg(windows)]
+const WM_PAINT: u32 = 0x000F;
+#[cfg(windows)]
+const WM_ERASEBKGND: u32 = 0x0014;
 #[cfg(windows)]
 const WM_MOUSEACTIVATE: u32 = 0x0021;
 #[cfg(windows)]
@@ -309,26 +314,26 @@ impl OverlayManager {
 
         let dpi = dpi_scale();
         for overlay in config.overlays.iter().filter(|overlay| overlay.enabled) {
-            let sample_generation = samples
-                .lock()
-                .unwrap()
-                .get(&overlay.id)
-                .map(|buffer| buffer.generation)
-                .unwrap_or(0);
-            let samples_changed = self
-                .windows
-                .get(&overlay.id)
-                .map(|window| window.sample_generation != sample_generation)
-                .unwrap_or(true);
-            let sample_buffer = if samples_changed {
-                samples
-                    .lock()
-                    .unwrap()
+            let (sample_generation, samples_changed, sample_buffer) = {
+                let store = samples.lock().unwrap();
+                let generation = store
                     .get(&overlay.id)
-                    .map(|buffer| buffer.values.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
+                    .map(|buffer| buffer.generation)
+                    .unwrap_or(0);
+                let changed = self
+                    .windows
+                    .get(&overlay.id)
+                    .map(|window| window.sample_generation != generation)
+                    .unwrap_or(true);
+                let buffer = if changed {
+                    store
+                        .get(&overlay.id)
+                        .map(|buffer| buffer.values.iter().copied().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                (generation, changed, buffer)
             };
             let (size, position) = layout_for(overlay, dpi);
 
@@ -476,6 +481,11 @@ unsafe extern "system" fn overlay_wnd_proc(
     match msg {
         WM_NCHITTEST => HTTRANSPARENT,
         WM_MOUSEACTIVATE => MA_NOACTIVATE,
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            ValidateRect(hwnd, ptr::null());
+            0
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
