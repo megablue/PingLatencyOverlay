@@ -12,6 +12,7 @@ use crate::probes::ProbeManager;
 use crate::tray::{self, TrayAction, TrayState};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
+const STATUS_BAR_HEIGHT: f32 = 32.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct PingApp {
@@ -324,11 +325,6 @@ impl PingApp {
             if save_clicked {
                 self.save_edits();
             }
-            if !self.status.is_empty() {
-                ui.vertical_centered_justified(|ui| {
-                    ui.colored_label(Color32::from_rgb(148, 163, 184), &self.status);
-                });
-            }
         });
     }
 
@@ -381,16 +377,48 @@ impl PingApp {
             .fill(Color32::from_rgb(15, 23, 42))
             .inner_margin(egui::Margin::same(12));
         frame.show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, ui.available_height()), |ui| {
-                    self.show_sidebar(ui);
+            ui.vertical(|ui| {
+                let content_height = (ui.available_height() - STATUS_BAR_HEIGHT - 8.0).max(160.0);
+                ui.horizontal_top(|ui| {
+                    ui.set_height(content_height);
+                    ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
+                        self.show_sidebar(ui);
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.set_height(content_height);
+                        self.show_editor(ui);
+                    });
                 });
-                ui.separator();
-                ui.vertical(|ui| {
-                    ui.set_min_width(ui.available_width());
-                    self.show_editor(ui);
-                });
+                ui.add_space(4.0);
+                self.show_status_area(ui);
             });
+        });
+    }
+
+    fn show_status_area(&mut self, ui: &mut Ui) {
+        let message = if self.status.is_empty() {
+            "Ready"
+        } else {
+            self.status.as_str()
+        };
+        ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
+            egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(30, 41, 59))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_min_height(STATUS_BAR_HEIGHT - 12.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Status")
+                                .strong()
+                                .color(Color32::from_rgb(125, 211, 252)),
+                        );
+                        ui.separator();
+                        ui.label(RichText::new(message).color(Color32::from_rgb(203, 213, 225)));
+                    });
+                });
         });
     }
 }
