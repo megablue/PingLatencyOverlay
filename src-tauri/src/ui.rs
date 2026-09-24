@@ -12,6 +12,7 @@ use crate::probes::ProbeManager;
 use crate::tray::{self, TrayAction, TrayState};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
+const SIDEBAR_CONTROLS_HEIGHT: f32 = 116.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -181,7 +182,7 @@ impl PingApp {
 
     fn show_sidebar(&mut self, ui: &mut Ui) {
         let available = ui.available_size();
-        let list_height = (available.y - 150.0).max(100.0);
+        let list_height = (available.y - SIDEBAR_CONTROLS_HEIGHT).max(100.0);
         let row_width = SIDEBAR_WIDTH - 20.0;
 
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
@@ -378,7 +379,7 @@ impl PingApp {
             .inner_margin(egui::Margin::same(12));
         frame.show(ui, |ui| {
             ui.vertical(|ui| {
-                let content_height = (ui.available_height() - STATUS_BAR_HEIGHT - 8.0).max(160.0);
+                let content_height = (ui.available_height() - STATUS_BAR_HEIGHT).max(160.0);
                 ui.horizontal_top(|ui| {
                     ui.set_height(content_height);
                     ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
@@ -391,7 +392,6 @@ impl PingApp {
                         self.show_editor(ui);
                     });
                 });
-                ui.add_space(4.0);
                 self.show_status_area(ui);
             });
         });
