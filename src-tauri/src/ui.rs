@@ -12,7 +12,7 @@ use crate::probes::ProbeManager;
 use crate::tray::{self, TrayAction, TrayState};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
-const STATUS_BAR_HEIGHT: f32 = 32.0;
+const STATUS_BAR_HEIGHT: f32 = 24.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct PingApp {
@@ -400,13 +400,7 @@ impl PingApp {
     fn show_status_area(&mut self, ui: &mut Ui) {
         let message = self.status.as_str();
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
-            egui::Frame::group(ui.style())
-                .fill(Color32::from_rgb(30, 41, 59))
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.set_min_height(STATUS_BAR_HEIGHT - 12.0);
-                    ui.add(egui::Label::new(RichText::new(message)).truncate());
-                });
+            ui.add(egui::Label::new(message).truncate());
         });
     }
 }
