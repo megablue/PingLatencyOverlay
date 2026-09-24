@@ -398,26 +398,14 @@ impl PingApp {
     }
 
     fn show_status_area(&mut self, ui: &mut Ui) {
-        let message = if self.status.is_empty() {
-            "Ready"
-        } else {
-            self.status.as_str()
-        };
+        let message = self.status.as_str();
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
             egui::Frame::group(ui.style())
                 .fill(Color32::from_rgb(30, 41, 59))
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.set_min_height(STATUS_BAR_HEIGHT - 12.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Status")
-                                .strong()
-                                .color(Color32::from_rgb(125, 211, 252)),
-                        );
-                        ui.separator();
-                        ui.label(RichText::new(message).color(Color32::from_rgb(203, 213, 225)));
-                    });
+                    ui.add(egui::Label::new(RichText::new(message)).truncate());
                 });
         });
     }
