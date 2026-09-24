@@ -16,6 +16,82 @@ const SIDEBAR_CONTROLS_HEIGHT: f32 = 116.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
+// Windows 11 Explorer-inspired dark palette.
+const UI_BACKGROUND: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
+const UI_SURFACE: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
+const UI_SURFACE_ALT: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
+const UI_SURFACE_HOVER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
+const UI_INPUT_BACKGROUND: Color32 = Color32::from_rgb(0x0f, 0x0f, 0x0f);
+const UI_BORDER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+const UI_TEXT: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf2);
+const UI_TEXT_SECONDARY: Color32 = Color32::from_rgb(0xc5, 0xc5, 0xc5);
+const UI_ACCENT: Color32 = Color32::from_rgb(0x60, 0xcd, 0xff);
+const UI_ACCENT_STRONG: Color32 = Color32::from_rgb(0x2f, 0x6f, 0x9f);
+const UI_SELECTION: Color32 = Color32::from_rgb(0x2d, 0x4f, 0x6d);
+const UI_DANGER: Color32 = Color32::from_rgb(0xf4, 0x87, 0x71);
+const UI_DANGER_STRONG: Color32 = Color32::from_rgb(0x9e, 0x2b, 0x2b);
+
+fn explorer_dark_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    let border = egui::Stroke::new(1.0, UI_BORDER);
+    let text = egui::Stroke::new(1.0, UI_TEXT);
+    let accent_text = egui::Stroke::new(1.0, UI_ACCENT);
+    let radius = egui::CornerRadius::same(4);
+
+    visuals.override_text_color = Some(UI_TEXT);
+    visuals.weak_text_color = Some(UI_TEXT_SECONDARY);
+    visuals.panel_fill = UI_BACKGROUND;
+    visuals.window_fill = UI_BACKGROUND;
+    visuals.faint_bg_color = UI_SURFACE;
+    visuals.extreme_bg_color = UI_INPUT_BACKGROUND;
+    visuals.text_edit_bg_color = Some(UI_INPUT_BACKGROUND);
+    visuals.hyperlink_color = UI_ACCENT;
+    visuals.warn_fg_color = UI_DANGER;
+    visuals.error_fg_color = UI_DANGER;
+    visuals.selection.bg_fill = UI_SELECTION;
+    visuals.selection.stroke = accent_text;
+    visuals.window_stroke = border;
+    visuals.window_corner_radius = egui::CornerRadius::same(6);
+    visuals.menu_corner_radius = radius;
+    visuals.text_cursor.stroke = accent_text;
+    visuals.button_frame = true;
+    visuals.striped = false;
+    visuals.slider_trailing_fill = true;
+    visuals.disabled_alpha = 0.45;
+
+    visuals.widgets.noninteractive.bg_fill = UI_SURFACE;
+    visuals.widgets.noninteractive.weak_bg_fill = UI_SURFACE;
+    visuals.widgets.noninteractive.bg_stroke = border;
+    visuals.widgets.noninteractive.fg_stroke = text;
+    visuals.widgets.noninteractive.corner_radius = radius;
+
+    visuals.widgets.inactive.bg_fill = UI_SURFACE_ALT;
+    visuals.widgets.inactive.weak_bg_fill = UI_SURFACE_ALT;
+    visuals.widgets.inactive.bg_stroke = border;
+    visuals.widgets.inactive.fg_stroke = text;
+    visuals.widgets.inactive.corner_radius = radius;
+
+    visuals.widgets.hovered.bg_fill = UI_SURFACE_HOVER;
+    visuals.widgets.hovered.weak_bg_fill = UI_SURFACE_HOVER;
+    visuals.widgets.hovered.bg_stroke = border;
+    visuals.widgets.hovered.fg_stroke = text;
+    visuals.widgets.hovered.corner_radius = radius;
+
+    visuals.widgets.active.bg_fill = UI_SELECTION;
+    visuals.widgets.active.weak_bg_fill = UI_SELECTION;
+    visuals.widgets.active.bg_stroke = accent_text;
+    visuals.widgets.active.fg_stroke = text;
+    visuals.widgets.active.corner_radius = radius;
+
+    visuals.widgets.open.bg_fill = UI_SURFACE_HOVER;
+    visuals.widgets.open.weak_bg_fill = UI_SURFACE_HOVER;
+    visuals.widgets.open.bg_stroke = accent_text;
+    visuals.widgets.open.fg_stroke = text;
+    visuals.widgets.open.corner_radius = radius;
+
+    visuals
+}
+
 pub struct PingApp {
     config: Config,
     selected_id: Option<String>,
@@ -32,6 +108,7 @@ pub struct PingApp {
 
 impl PingApp {
     pub fn new(cc: &CreationContext<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        cc.egui_ctx.set_visuals(explorer_dark_visuals());
         let config = config::load();
         let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
@@ -193,7 +270,7 @@ impl PingApp {
                         if self.config.overlays.is_empty() {
                             ui.label(
                                 RichText::new("No overlays yet. Add one to get started.")
-                                    .color(Color32::from_rgb(148, 163, 184)),
+                                    .color(UI_TEXT_SECONDARY),
                             );
                         }
                         let rows: Vec<(String, String, bool)> = self
@@ -215,11 +292,7 @@ impl PingApp {
 
                         for (id, name, enabled) in rows {
                             let active = self.selected_id.as_deref() == Some(id.as_str());
-                            let background = if active {
-                                Color32::from_rgb(30, 64, 100)
-                            } else {
-                                Color32::from_rgb(30, 41, 59)
-                            };
+                            let background = if active { UI_SELECTION } else { UI_SURFACE_ALT };
                             egui::Frame::group(ui.style())
                                 .fill(background)
                                 .inner_margin(egui::Margin::same(4))
@@ -228,15 +301,15 @@ impl PingApp {
                                         ui.horizontal(|ui| {
                                             ui.label(
                                                 RichText::new(format!("Delete \"{name}\"?"))
-                                                    .color(Color32::from_rgb(252, 165, 165)),
+                                                    .color(UI_DANGER),
                                             );
                                             if ui
                                                 .add_sized(
                                                     [36.0, 26.0],
                                                     egui::Button::new(
-                                                        RichText::new("OK").color(Color32::WHITE),
+                                                        RichText::new("OK").color(UI_TEXT),
                                                     )
-                                                    .fill(Color32::from_rgb(185, 28, 28)),
+                                                    .fill(UI_DANGER_STRONG),
                                                 )
                                                 .clicked()
                                             {
@@ -266,9 +339,7 @@ impl PingApp {
                                                 .add_sized(
                                                     [28.0, 28.0],
                                                     egui::Button::new(
-                                                        RichText::new("X").color(
-                                                            Color32::from_rgb(248, 113, 113),
-                                                        ),
+                                                        RichText::new("X").color(UI_DANGER),
                                                     ),
                                                 )
                                                 .clicked()
@@ -316,7 +387,7 @@ impl PingApp {
                 self.toggle_running();
             }
             let save_button = egui::Button::new("Save")
-                .fill(Color32::from_rgb(37, 99, 235))
+                .fill(UI_ACCENT_STRONG)
                 .min_size(egui::vec2(row_width, 34.0));
             let mut save_clicked = false;
             ui.add_enabled_ui(self.dirty, |ui| {
@@ -360,7 +431,7 @@ impl PingApp {
                         &self.config.overlays[index].name
                     })
                     .heading()
-                    .color(Color32::from_rgb(226, 232, 240)),
+                    .color(UI_TEXT),
                 );
                 ui.add_space(8.0);
                 let mut changed = false;
@@ -374,7 +445,7 @@ impl PingApp {
 
     fn config_ui(&mut self, ui: &mut Ui) {
         let frame = Frame::central_panel(ui.style())
-            .fill(Color32::from_rgb(15, 23, 42))
+            .fill(UI_BACKGROUND)
             .inner_margin(egui::Margin {
                 left: 12,
                 right: 12,
@@ -422,7 +493,7 @@ impl App for PingApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        Color32::from_rgb(15, 23, 42).to_normalized_gamma_f32()
+        UI_BACKGROUND.to_normalized_gamma_f32()
     }
 }
 
@@ -698,7 +769,7 @@ fn section(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.label(
         RichText::new(title.to_uppercase())
             .strong()
-            .color(Color32::from_rgb(125, 211, 252)),
+            .color(UI_ACCENT),
     );
     ui.separator();
     add_contents(ui);
