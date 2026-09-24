@@ -64,9 +64,9 @@ Installer (run from the repository root):
   allocate one renderer or surface per overlay.
 - The graph uses actual physical window dimensions. Do not assume
   `windowSeconds * scale` is the drawable size under Windows DPI/text scaling.
-- Right-panel edits are staged until Save. Sidebar add/enable/delete and
-  Pause/Resume apply immediately. Delete uses an inline confirmation because
-  native script dialogs are not used.
+- Right-panel edits and Add overlay are staged until Save. Sidebar enable/delete
+  and Pause/Resume apply immediately. Delete uses an inline confirmation
+  because native script dialogs are not used.
 - `src-tauri/Cargo.toml` uses eframe with the `glow` renderer for the one config
   window and `tiny-skia` only for software overlay pixels. Do not add WebView2 or
   Tauri back into the native branch.

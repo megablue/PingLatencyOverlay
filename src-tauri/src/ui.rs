@@ -218,7 +218,8 @@ impl PingApp {
         let overlay = OverlayConfig::new();
         self.selected_id = Some(overlay.id.clone());
         self.config.overlays.push(overlay);
-        let _ = self.persist_current();
+        self.dirty = true;
+        self.status.clear();
     }
 
     fn toggle_overlay(&mut self, id: &str) {
