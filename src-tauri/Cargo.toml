@@ -10,6 +10,9 @@ rust-version = "1.88"
 name = "ping_latency_overlay_lib"
 crate-type = ["rlib"]
 
+[build-dependencies]
+winresource = "0.1.17"
+
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.25.1"
