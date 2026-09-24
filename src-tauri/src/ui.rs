@@ -375,7 +375,12 @@ impl PingApp {
     fn config_ui(&mut self, ui: &mut Ui) {
         let frame = Frame::central_panel(ui.style())
             .fill(Color32::from_rgb(15, 23, 42))
-            .inner_margin(egui::Margin::same(12));
+            .inner_margin(egui::Margin {
+                left: 12,
+                right: 12,
+                top: 12,
+                bottom: 0,
+            });
         frame.show(ui, |ui| {
             ui.vertical(|ui| {
                 let content_height = (ui.available_height() - STATUS_BAR_HEIGHT).max(160.0);
@@ -520,6 +525,54 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
+                ui.label("Sampling (sec)");
+                let mut window_seconds = overlay.window_seconds as i64;
+                if ui
+                    .add(egui::DragValue::new(&mut window_seconds).range(30..=86_400))
+                    .changed()
+                {
+                    overlay.window_seconds = window_seconds.clamp(30, 86_400) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("X axis scale");
+                let mut scale = overlay.scale.min(config::MAX_SCALE) as i64;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut scale, 1..=config::MAX_SCALE as i64)
+                            .suffix("x")
+                            .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    overlay.scale = scale.clamp(1, config::MAX_SCALE as i64) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Y axis height");
+                let mut graph_height = overlay.graph_height_px.max(10) as i64;
+                if ui
+                    .add(egui::DragValue::new(&mut graph_height).range(10..=10_000))
+                    .changed()
+                {
+                    overlay.graph_height_px = graph_height.clamp(10, 10_000) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Latency Ceiling");
+                let mut max_y = overlay.max_y_ms.max(1) as i64;
+                if ui
+                    .add(egui::DragValue::new(&mut max_y).range(1..=1_000_000))
+                    .changed()
+                {
+                    overlay.max_y_ms = max_y.clamp(1, 1_000_000) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
                 ui.label("Position");
                 let mut position = position_name(overlay.position).to_string();
                 ComboBox::from_id_salt("position")
@@ -544,43 +597,6 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
                         overlay.position = anchor;
                         *changed = true;
                     }
-                }
-                ui.end_row();
-
-                ui.label("Margin (px)");
-                let mut margin = overlay.margin_px as i64;
-                if ui
-                    .add(egui::DragValue::new(&mut margin).range(0..=10_000))
-                    .changed()
-                {
-                    overlay.margin_px = margin.clamp(0, 10_000) as u32;
-                    *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Window (seconds, min 30)");
-                let mut window_seconds = overlay.window_seconds as i64;
-                if ui
-                    .add(egui::DragValue::new(&mut window_seconds).range(30..=86_400))
-                    .changed()
-                {
-                    overlay.window_seconds = window_seconds.clamp(30, 86_400) as u32;
-                    *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Visual scale");
-                let mut scale = overlay.scale.min(config::MAX_SCALE) as i64;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut scale, 1..=config::MAX_SCALE as i64)
-                            .suffix("x")
-                            .step_by(1.0),
-                    )
-                    .changed()
-                {
-                    overlay.scale = scale.clamp(1, config::MAX_SCALE as i64) as u32;
-                    *changed = true;
                 }
                 ui.end_row();
 
@@ -612,24 +628,13 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
                 });
                 ui.end_row();
 
-                ui.label("Graph height (px)");
-                let mut graph_height = overlay.graph_height_px.max(10) as i64;
+                ui.label("Margin (px)");
+                let mut margin = overlay.margin_px as i64;
                 if ui
-                    .add(egui::DragValue::new(&mut graph_height).range(10..=10_000))
+                    .add(egui::DragValue::new(&mut margin).range(0..=10_000))
                     .changed()
                 {
-                    overlay.graph_height_px = graph_height.clamp(10, 10_000) as u32;
-                    *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Latency ceiling (ms)");
-                let mut max_y = overlay.max_y_ms.max(1) as i64;
-                if ui
-                    .add(egui::DragValue::new(&mut max_y).range(1..=1_000_000))
-                    .changed()
-                {
-                    overlay.max_y_ms = max_y.clamp(1, 1_000_000) as u32;
+                    overlay.margin_px = margin.clamp(0, 10_000) as u32;
                     *changed = true;
                 }
                 ui.end_row();
