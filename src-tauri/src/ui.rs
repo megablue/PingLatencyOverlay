@@ -274,7 +274,7 @@ impl PingApp {
                                     .color(UI_TEXT_SECONDARY),
                             );
                         }
-                        let rows: Vec<(String, String, bool)> = self
+                        let rows: Vec<(String, String, &'static str, bool)> = self
                             .config
                             .overlays
                             .iter()
@@ -286,12 +286,13 @@ impl PingApp {
                                     } else {
                                         overlay.name.clone()
                                     },
+                                    position_indicator(overlay.position),
                                     overlay.enabled,
                                 )
                             })
                             .collect();
 
-                        for (id, name, enabled) in rows {
+                        for (id, name, indicator, enabled) in rows {
                             let active = self.selected_id.as_deref() == Some(id.as_str());
                             let background = if active { UI_SELECTION } else { UI_SURFACE_ALT };
                             egui::Frame::group(ui.style())
@@ -326,15 +327,27 @@ impl PingApp {
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
-                                            if ui
-                                                .add_sized(
-                                                    [row_width - 80.0, 28.0],
-                                                    egui::Button::new(name.clone())
-                                                        .selected(active)
-                                                        .frame(false),
+                                            let tab_label = (
+                                                RichText::new(indicator).color(UI_ACCENT),
+                                                RichText::new(name.clone()),
+                                            );
+                                            let name_clicked = ui
+                                                .allocate_ui_with_layout(
+                                                    egui::vec2(row_width - 80.0, 28.0),
+                                                    Layout::left_to_right(Align::Min),
+                                                    |ui| {
+                                                        ui.add_sized(
+                                                            [row_width - 80.0, 28.0],
+                                                            egui::Button::new(tab_label)
+                                                                .selected(active)
+                                                                .frame(false)
+                                                                .gap(6.0),
+                                                        )
+                                                        .clicked()
+                                                    },
                                                 )
-                                                .clicked()
-                                            {
+                                                .inner;
+                                            if name_clicked {
                                                 self.selected_id = Some(id.clone());
                                             }
                                             if ui
@@ -806,6 +819,20 @@ fn parse_color(value: &str) -> Color32 {
 fn color_to_hex(color: Color32) -> String {
     let value = color.to_array();
     format!("#{:02x}{:02x}{:02x}", value[0], value[1], value[2])
+}
+
+fn position_indicator(anchor: Anchor) -> &'static str {
+    match anchor {
+        Anchor::TopLeft => "↖",
+        Anchor::TopCenter => "↑",
+        Anchor::TopRight => "↗",
+        Anchor::CenterLeft => "←",
+        Anchor::Center => "⊚",
+        Anchor::CenterRight => "→",
+        Anchor::BottomLeft => "↙",
+        Anchor::BottomCenter => "↓",
+        Anchor::BottomRight => "↘",
+    }
 }
 
 fn position_name(anchor: Anchor) -> &'static str {
