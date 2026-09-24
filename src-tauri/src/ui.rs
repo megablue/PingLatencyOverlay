@@ -317,11 +317,17 @@ impl PingApp {
             let save_button = egui::Button::new("Save")
                 .fill(Color32::from_rgb(37, 99, 235))
                 .min_size(egui::vec2(row_width, 34.0));
-            if ui.add_enabled(self.dirty, save_button).clicked() {
+            let mut save_clicked = false;
+            ui.add_enabled_ui(self.dirty, |ui| {
+                save_clicked = ui.add_sized([row_width, 34.0], save_button).clicked();
+            });
+            if save_clicked {
                 self.save_edits();
             }
             if !self.status.is_empty() {
-                ui.colored_label(Color32::from_rgb(148, 163, 184), &self.status);
+                ui.vertical_centered_justified(|ui| {
+                    ui.colored_label(Color32::from_rgb(148, 163, 184), &self.status);
+                });
             }
         });
     }
