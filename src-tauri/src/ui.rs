@@ -385,7 +385,7 @@ impl PingApp {
                     ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
                         self.show_sidebar(ui);
                     });
-                    ui.separator();
+                    ui.add_space(4.0);
                     ui.vertical(|ui| {
                         ui.set_min_width(ui.available_width());
                         ui.set_height(content_height);
