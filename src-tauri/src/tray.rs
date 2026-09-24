@@ -1,58 +1,94 @@
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
-};
+use std::error::Error;
 
-use crate::state::AppState;
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-/// Show and focus the config window.
-fn show_config(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("config") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayAction {
+    ToggleRunning,
+    Config,
+    Exit,
+}
+
+/// Owns the tray icon and its mutable Start/Pause item.
+pub struct TrayState {
+    _tray: TrayIcon,
+    toggle_item: MenuItem,
+}
+
+impl TrayState {
+    pub fn set_running(&self, running: bool) {
+        self.toggle_item
+            .set_text(if running { "Pause" } else { "Resume" });
     }
 }
 
-/// Build the system tray icon and its menu.
-pub fn create(app: &AppHandle) -> tauri::Result<()> {
-    let toggle_i = MenuItem::with_id(app, "toggle", "Pause", true, None::<&str>)?;
-    let config_i = MenuItem::with_id(app, "config", "Config", true, None::<&str>)?;
-    let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle_i, &config_i, &quit_i])?;
+/// Load the bundled artwork for the native window and taskbar.
+pub fn app_icon() -> eframe::egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../icons/icon.png"))
+        .expect("bundled icon must be valid")
+        .to_rgba8();
+    let width = image.width();
+    let height = image.height();
+    eframe::egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
 
-    TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("PingLatencyOverlay")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| match event.id.as_ref() {
-            "toggle" => {
-                let state = app.state::<AppState>();
-                let now_running = !state.is_running();
-                state.set_running(now_running);
-                let _ = toggle_i.set_text(if now_running { "Pause" } else { "Resume" });
-            }
-            "config" => show_config(app),
-            "quit" => {
-                app.state::<AppState>().begin_quit();
-                app.exit(0);
-            }
+pub fn create() -> Result<TrayState, Box<dyn Error + Send + Sync>> {
+    let menu = Menu::new();
+    let toggle_item = MenuItem::with_id("toggle", "Pause", true, None);
+    let config_item = MenuItem::with_id("config", "Config", true, None);
+    let exit_item = MenuItem::with_id("exit", "Exit", true, None);
+    menu.append(&toggle_item)?;
+    menu.append(&config_item)?;
+    menu.append(&exit_item)?;
+
+    let image = image::load_from_memory(include_bytes!("../icons/icon.png"))?.to_rgba8();
+    let width = image.width();
+    let height = image.height();
+    let icon = Icon::from_rgba(image.into_raw(), width, height)?;
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .with_menu_on_right_click(true)
+        .with_tooltip("PingLatencyOverlay")
+        .with_icon(icon)
+        .build()?;
+
+    Ok(TrayState {
+        _tray: tray,
+        toggle_item,
+    })
+}
+
+/// Drain tray menu and icon events without blocking the egui event loop.
+pub fn poll() -> Vec<TrayAction> {
+    let mut actions = Vec::new();
+
+    while let Ok(event) = MenuEvent::receiver().try_recv() {
+        match event.id().as_ref() {
+            "toggle" => actions.push(TrayAction::ToggleRunning),
+            "config" => actions.push(TrayAction::Config),
+            "exit" => actions.push(TrayAction::Exit),
             _ => {}
-        })
-        // Single left click opens the config window; the menu stays on right click.
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        }
+    }
+
+    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+        if matches!(
+            event,
+            TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
-                show_config(tray.app_handle());
             }
-        })
-        .build(app)?;
+        ) {
+            actions.push(TrayAction::Config);
+        }
+    }
 
-    Ok(())
+    actions
 }

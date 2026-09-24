@@ -56,5 +56,5 @@
 
 ## Packaging
 - Target architectures: x64 and ARM64.
-- Installer: NSIS (`-setup.exe`), one per architecture.
-- MSI is not used (no ARM64 support in Tauri's WiX bundler).
+- Installer: native NSIS (`-setup.exe`), one per architecture.
+- The application is a standalone Rust executable and does not require WebView2.

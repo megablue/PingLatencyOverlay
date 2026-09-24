@@ -4,19 +4,15 @@ version = "0.1.0"
 description = "Windows overlay showing live network latency"
 authors = ["you"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 
 [lib]
 name = "ping_latency_overlay_lib"
-# Desktop-only app: rlib only. `staticlib`/`cdylib` exist for mobile targets and
-# add ~1 GB to the debug build (a giant .lib/.dll + extra PDBs).
 crate-type = ["rlib"]
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+tray-icon = "0.25.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
@@ -24,6 +20,8 @@ ping-rs = "0.1"
 dirs = "5"
 log = "0.4"
 env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tiny-skia = "0.11.4"
 
 [profile.release]
 codegen-units = 1

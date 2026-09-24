@@ -1,14 +1,6 @@
-# Dependencies
-node_modules/
-
-# Frontend build
-dist/
-*.tsbuildinfo
-
-# Rust / Tauri build artifacts
+# Rust build artifacts
 src-tauri/target/
-src-tauri/gen/
 
-# Logs / local files
+# Local/generated files
 *.log
 .DS_Store

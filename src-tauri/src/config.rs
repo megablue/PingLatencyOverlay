@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,14 +25,14 @@ pub const DEFAULT_BG_COLOR: &str = "#0f172a";
 /// Default overlay background opacity (0 = fully transparent).
 pub const DEFAULT_BG_OPACITY: u32 = 0;
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     #[serde(default)]
     pub overlays: Vec<OverlayConfig>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayConfig {
     pub id: String,
@@ -79,11 +81,66 @@ pub struct OverlayConfig {
     pub bg_opacity: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "protocol", rename_all = "camelCase")]
 pub enum ProbeConfig {
     Icmp { host: String },
     Tcp { host: String, port: u16 },
+}
+
+impl ProbeConfig {
+    pub fn host(&self) -> &str {
+        match self {
+            Self::Icmp { host } | Self::Tcp { host, .. } => host,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::Icmp { .. } => 0,
+            Self::Tcp { port, .. } => *port,
+        }
+    }
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OverlayConfig {
+    /// A sensible starting point for a newly added overlay.
+    pub fn new() -> Self {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+        let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            id: format!("{millis}-{sequence}"),
+            name: "New overlay".to_string(),
+            enabled: true,
+            probe: ProbeConfig::Icmp {
+                host: "1.1.1.1".to_string(),
+            },
+            orientation: 0,
+            mirrored: false,
+            line_color: default_line_color(),
+            timeout_color: default_timeout_color(),
+            position: Anchor::TopRight,
+            window_seconds: default_window_seconds(),
+            scale: default_scale(),
+            timeout_ms: default_timeout_ms(),
+            graph_height_px: default_graph_height_px(),
+            max_y_ms: default_max_y_ms(),
+            margin_px: default_margin_px(),
+            bg_color: default_bg_color(),
+            bg_opacity: default_bg_opacity(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -189,4 +246,47 @@ pub fn save(cfg: &Config) -> io::Result<()> {
     fs::create_dir_all(config_dir())?;
     let json = serde_json::to_string_pretty(cfg).map_err(io::Error::other)?;
     fs::write(config_path(), json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_overlay_uses_documented_defaults() {
+        let overlay = OverlayConfig::new();
+        assert_eq!(overlay.name, "New overlay");
+        assert!(overlay.enabled);
+        assert_eq!(overlay.scale, 2);
+        assert_eq!(overlay.timeout_ms, 1_000);
+        assert_eq!(overlay.graph_height_px, 60);
+        assert_eq!(overlay.max_y_ms, 1_000);
+        assert_eq!(overlay.margin_px, 20);
+        assert_eq!(overlay.bg_opacity, 0);
+    }
+
+    #[test]
+    fn normalize_clamps_invalid_values() {
+        let mut config = Config {
+            overlays: vec![OverlayConfig {
+                window_seconds: 1,
+                scale: 99,
+                timeout_ms: 0,
+                graph_height_px: 1,
+                max_y_ms: 0,
+                orientation: 45,
+                bg_opacity: 200,
+                ..OverlayConfig::new()
+            }],
+        };
+        config.normalize();
+        let overlay = &config.overlays[0];
+        assert_eq!(overlay.window_seconds, MIN_WINDOW_SECONDS);
+        assert_eq!(overlay.scale, MAX_SCALE);
+        assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
+        assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);
+        assert_eq!(overlay.orientation, 0);
+        assert_eq!(overlay.bg_opacity, 100);
+    }
 }

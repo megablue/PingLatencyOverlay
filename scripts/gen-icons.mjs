@@ -1,4 +1,4 @@
-// Generates the Tauri app icons without any external dependencies.
+// Generates the native app icons without any external dependencies.
 // Run with: npm run icons
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
