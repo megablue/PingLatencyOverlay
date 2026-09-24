@@ -330,7 +330,8 @@ impl PingApp {
                                                 .add_sized(
                                                     [row_width - 80.0, 28.0],
                                                     egui::Button::new(name.clone())
-                                                        .selected(active),
+                                                        .selected(active)
+                                                        .frame(false),
                                                 )
                                                 .clicked()
                                             {
