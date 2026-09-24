@@ -39,12 +39,14 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !define MUI_ICON "${APP_ICON}"
 !define MUI_UNICON "${APP_ICON}"
 !define MUI_ABORTWARNING
+!define MUI_COMPONENTS_PAGE
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION LaunchApplication
 !define MUI_FINISHPAGE_RUN_TEXT "Launch PingLatencyOverlay"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -71,10 +73,15 @@ Section "Install"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
 SectionEnd
 
+Section "Desktop shortcut" SEC_DESKTOP_SHORTCUT
+  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay.exe"
+SectionEnd
+
 Section "Uninstall"
   Delete "$INSTDIR\ping-latency-overlay.exe"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+  Delete "$DESKTOP\${PRODUCTNAME}.lnk"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "${UNINSTKEY}"
 SectionEnd
