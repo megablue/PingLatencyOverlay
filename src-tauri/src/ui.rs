@@ -296,7 +296,6 @@ impl PingApp {
             });
 
             ui.add_space(6.0);
-            ui.separator();
             if ui
                 .add_sized([row_width, 32.0], egui::Button::new("Add overlay"))
                 .clicked()
