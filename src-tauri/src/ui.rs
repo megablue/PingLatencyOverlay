@@ -537,16 +537,31 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
                 ui.end_row();
 
                 ui.label("X axis scale");
-                let mut scale = overlay.scale.min(config::MAX_SCALE) as i64;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut scale, 1..=config::MAX_SCALE as i64)
-                            .suffix("x")
-                            .step_by(1.0),
-                    )
-                    .changed()
-                {
-                    overlay.scale = scale.clamp(1, config::MAX_SCALE as i64) as u32;
+                let mut scale = overlay.scale.max(1) as i64;
+                let mut slider_scale = scale.clamp(1, config::MAX_SCALE as i64);
+                let mut scale_changed = false;
+                ui.horizontal(|ui| {
+                    let slider_changed = ui
+                        .add(
+                            egui::Slider::new(&mut slider_scale, 1..=config::MAX_SCALE as i64)
+                                .suffix("x")
+                                .step_by(1.0),
+                        )
+                        .changed();
+                    let input_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut scale)
+                                .range(1..=config::MAX_SCALE_INPUT as i64)
+                                .suffix("x"),
+                        )
+                        .changed();
+                    if slider_changed {
+                        scale = slider_scale;
+                    }
+                    scale_changed = slider_changed || input_changed;
+                });
+                if scale_changed {
+                    overlay.scale = scale.clamp(1, config::MAX_SCALE_INPUT as i64) as u32;
                     *changed = true;
                 }
                 ui.end_row();
@@ -570,33 +585,6 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
                 {
                     overlay.max_y_ms = max_y.clamp(1, 1_000_000) as u32;
                     *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Position");
-                let mut position = position_name(overlay.position).to_string();
-                ComboBox::from_id_salt("position")
-                    .selected_text(position.clone())
-                    .show_ui(ui, |ui| {
-                        for (value, label) in [
-                            ("topLeft", "topLeft"),
-                            ("topCenter", "topCenter"),
-                            ("topRight", "topRight"),
-                            ("centerLeft", "centerLeft"),
-                            ("center", "center"),
-                            ("centerRight", "centerRight"),
-                            ("bottomLeft", "bottomLeft"),
-                            ("bottomCenter", "bottomCenter"),
-                            ("bottomRight", "bottomRight"),
-                        ] {
-                            ui.selectable_value(&mut position, value.to_string(), label);
-                        }
-                    });
-                if let Some(anchor) = anchor_from_name(&position) {
-                    if anchor != overlay.position {
-                        overlay.position = anchor;
-                        *changed = true;
-                    }
                 }
                 ui.end_row();
 
@@ -636,6 +624,40 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
                 {
                     overlay.margin_px = margin.clamp(0, 10_000) as u32;
                     *changed = true;
+                }
+                ui.end_row();
+            });
+    });
+
+    section(ui, "Position", |ui| {
+        Grid::new("position-grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Position");
+                let mut position = position_name(overlay.position).to_string();
+                ComboBox::from_id_salt("position")
+                    .selected_text(position.clone())
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("topLeft", "topLeft"),
+                            ("topCenter", "topCenter"),
+                            ("topRight", "topRight"),
+                            ("centerLeft", "centerLeft"),
+                            ("center", "center"),
+                            ("centerRight", "centerRight"),
+                            ("bottomLeft", "bottomLeft"),
+                            ("bottomCenter", "bottomCenter"),
+                            ("bottomRight", "bottomRight"),
+                        ] {
+                            ui.selectable_value(&mut position, value.to_string(), label);
+                        }
+                    });
+                if let Some(anchor) = anchor_from_name(&position) {
+                    if anchor != overlay.position {
+                        overlay.position = anchor;
+                        *changed = true;
+                    }
                 }
                 ui.end_row();
             });
@@ -748,8 +770,9 @@ pub fn run() {
         viewport: ViewportBuilder::default()
             .with_app_id("ping-latency-overlay")
             .with_title("PingLatencyOverlay - Config")
-            .with_inner_size(egui::vec2(900.0, 640.0))
-            .with_min_inner_size(egui::vec2(640.0, 480.0))
+            .with_inner_size(egui::vec2(800.0, 640.0))
+            .with_min_inner_size(egui::vec2(800.0, 480.0))
+            .with_max_inner_size(egui::vec2(800.0, 8192.0))
             .with_resizable(true)
             .with_visible(false)
             .with_icon(tray::app_icon()),

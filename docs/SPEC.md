@@ -20,8 +20,9 @@
   - On resumption, the next segment starts at the next responding sample's X,
     using the last responding Y, then continues with actual samples.
 - X axis:
-  - User configures a time window (minimum 30 s) and a visual scale multiplier
-    (1–10×, integer snap points, default 2×).
+  - User configures a time window (minimum 30 s) and an X-axis scale multiplier.
+    The slider snaps from 1× through 10×; the numeric input also accepts larger
+    values for wide graphs (default 2×).
   - The overlay window's long axis is sized `window(s) x scale` (e.g. 60 s at 2x
     = 120 px).
   - The graph fills the window's actual size, so the effective pixels-per-tick is

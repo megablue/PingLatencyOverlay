@@ -16,8 +16,10 @@ pub const DEFAULT_GRAPH_HEIGHT_PX: u32 = 60;
 pub const MIN_GRAPH_HEIGHT_PX: u32 = 10;
 /// Default latency ceiling, in milliseconds.
 pub const DEFAULT_MAX_Y_MS: u32 = 1000;
-/// Largest visual scale multiplier.
+/// Largest value shown by the X-axis scale slider.
 pub const MAX_SCALE: u32 = 10;
+/// Largest value accepted by the numeric X-axis scale input.
+pub const MAX_SCALE_INPUT: u32 = 1_000;
 /// Default gap between the overlay and the screen edge, in logical pixels.
 pub const DEFAULT_MARGIN_PX: u32 = 20;
 /// Default overlay background color.
@@ -197,7 +199,7 @@ impl Config {
     pub fn normalize(&mut self) {
         for o in &mut self.overlays {
             o.window_seconds = o.window_seconds.max(MIN_WINDOW_SECONDS);
-            o.scale = o.scale.clamp(1, MAX_SCALE);
+            o.scale = o.scale.clamp(1, MAX_SCALE_INPUT);
             if o.timeout_ms == 0 {
                 o.timeout_ms = DEFAULT_TIMEOUT_MS;
             }
@@ -266,11 +268,23 @@ mod tests {
     }
 
     #[test]
+    fn normalize_preserves_scale_above_slider_max() {
+        let mut config = Config {
+            overlays: vec![OverlayConfig {
+                scale: 25,
+                ..OverlayConfig::new()
+            }],
+        };
+        config.normalize();
+        assert_eq!(config.overlays[0].scale, 25);
+    }
+
+    #[test]
     fn normalize_clamps_invalid_values() {
         let mut config = Config {
             overlays: vec![OverlayConfig {
                 window_seconds: 1,
-                scale: 99,
+                scale: MAX_SCALE_INPUT + 1,
                 timeout_ms: 0,
                 graph_height_px: 1,
                 max_y_ms: 0,
@@ -282,7 +296,7 @@ mod tests {
         config.normalize();
         let overlay = &config.overlays[0];
         assert_eq!(overlay.window_seconds, MIN_WINDOW_SECONDS);
-        assert_eq!(overlay.scale, MAX_SCALE);
+        assert_eq!(overlay.scale, MAX_SCALE_INPUT);
         assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);
