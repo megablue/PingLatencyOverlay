@@ -182,9 +182,19 @@ impl PingApp {
                 }
                 TrayAction::Exit => {
                     self.quitting = true;
+                    // Hide the visible Config viewport before asking eframe to
+                    // close it, so it cannot spend another frame rendering.
+                    ctx.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Visible(false),
+                    );
+                    // Abort the async probe handles now; Drop still performs
+                    // the remaining native overlay and runtime cleanup.
+                    self.probes.stop_all();
                     // There is only one native eframe viewport. No child GPU
                     // contexts need to close, so this exits promptly.
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                    return;
                 }
             }
         }
@@ -515,12 +525,18 @@ impl PingApp {
 impl App for PingApp {
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.process_tray_events(ctx);
+        if self.quitting {
+            return;
+        }
         self.sync_overlays();
         ctx.request_repaint_after(REPAINT_INTERVAL);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_root_close(ui.ctx());
+        if self.quitting {
+            return;
+        }
         self.config_ui(ui);
     }
 
