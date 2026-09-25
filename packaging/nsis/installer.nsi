@@ -20,9 +20,12 @@ ManifestDPIAwareness PerMonitorV2
 !ifndef APP_VERSIONWITHBUILD
   !error "APP_VERSIONWITHBUILD must be supplied with /DAPP_VERSIONWITHBUILD=<version>"
 !endif
+!ifndef APP_LICENSE
+  !error "APP_LICENSE must be supplied with /DAPP_LICENSE=<absolute path>"
+!endif
 
 !define PRODUCTNAME "PingLatencyOverlay"
-!define PUBLISHER "PingLatencyOverlay"
+!define PUBLISHER "megablue"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
 
 Name "${PRODUCTNAME}"
@@ -35,7 +38,8 @@ SetCompressor /SOLID lzma
 VIProductVersion "${APP_VERSIONWITHBUILD}"
 VIAddVersionKey "ProductName" "${PRODUCTNAME}"
 VIAddVersionKey "FileDescription" "${PRODUCTNAME} — live network latency overlay"
-VIAddVersionKey "LegalCopyright" "Copyright (c) 2026"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 megablue"
+VIAddVersionKey "Comments" "GPL-3.0-only; source: https://github.com/megablue/PingLatencyOverlay"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
@@ -62,6 +66,7 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 Section "Install"
   SetOutPath "$INSTDIR"
   File "${APP_EXE}"
+  File /oname=LICENSE "${APP_LICENSE}"
 
   CreateDirectory "$SMPROGRAMS"
   CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay.exe"
@@ -82,6 +87,7 @@ Section "Desktop shortcut" SEC_DESKTOP_SHORTCUT
 SectionEnd
 
 Section "Uninstall"
+  Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\ping-latency-overlay.exe"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"

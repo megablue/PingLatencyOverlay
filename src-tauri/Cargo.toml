@@ -2,7 +2,9 @@
 name = "ping-latency-overlay"
 version = "0.1.0"
 description = "Windows overlay showing live network latency"
-authors = ["you"]
+authors = ["megablue"]
+license = "GPL-3.0-only"
+repository = "https://github.com/megablue/PingLatencyOverlay"
 edition = "2021"
 rust-version = "1.88"
 

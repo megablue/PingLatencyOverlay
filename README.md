@@ -3,9 +3,11 @@
 A lightweight Windows tray application that shows live ICMP/TCP latency graphs as
 frameless, transparent, click-through overlays.
 
-The current `egui-rewrite` branch is a native Rust rewrite using egui/eframe;
-it does not use WebView2, React, or the Tauri runtime. The previous Tauri/React
-implementation remains available on the `main` branch.
+Repository: https://github.com/megablue/PingLatencyOverlay
+
+The native Rust implementation currently lives on the `egui-rewrite` branch and
+uses egui/eframe; it does not use WebView2, React, or the Tauri runtime. The
+previous Tauri/React implementation remains available on the `main` branch.
 
 ## Build and run
 
@@ -32,6 +34,14 @@ The config editor is the only egui window. Overlays are independent native
 Win32 layered windows, so their alpha is composited by Windows rather than by a
 second GPU renderer. This keeps transparent/partial backgrounds reliable and
 avoids allocating a renderer for every overlay.
+
+## License
+
+PingLatencyOverlay is free software released under the GNU General Public License,
+version 3 only (`GPL-3.0-only`). Copyright (C) 2026 megablue.
+
+The complete license text is available in [`LICENSE`](LICENSE). Source code for
+released versions is available from the corresponding GitHub release/tag.
 
 ## Installer
 

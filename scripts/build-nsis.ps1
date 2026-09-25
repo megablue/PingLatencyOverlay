@@ -8,11 +8,15 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $project = Join-Path $root "src-tauri"
 $exe = Join-Path $project "target\release\ping-latency-overlay.exe"
 $icon = Join-Path $project "icons\icon.ico"
+$license = Join-Path $root "LICENSE"
 $outDir = Join-Path $project "target\release\bundle\nsis"
 $script = Join-Path $root "packaging\nsis\installer.nsi"
 
 if (-not (Test-Path $exe)) {
     throw "Release executable not found: $exe (run cargo build --release first)"
+}
+if (-not (Test-Path $license)) {
+    throw "License file not found: $license"
 }
 
 $cargoToml = Get-Content (Join-Path $project "Cargo.toml") -Raw
@@ -73,6 +77,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $arguments = @(
     "/DAPP_EXE=$exe",
     "/DAPP_ICON=$icon",
+    "/DAPP_LICENSE=$license",
     "/DOUT_FILE=$outFile",
     "/DAPP_VERSION=$version",
     "/DAPP_VERSIONWITHBUILD=$versionWithBuild",
