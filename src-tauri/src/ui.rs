@@ -331,25 +331,24 @@ impl PingApp {
                                                 RichText::new(indicator).color(UI_ACCENT),
                                                 RichText::new(name.clone()),
                                             );
-                                            let name_clicked = ui
-                                                .allocate_ui_with_layout(
-                                                    egui::vec2(row_width - 80.0, 28.0),
-                                                    Layout::left_to_right(Align::Min),
-                                                    |ui| {
-                                                        ui.add_sized(
-                                                            [row_width - 80.0, 28.0],
-                                                            egui::Button::new(tab_label)
-                                                                .selected(active)
-                                                                .frame(false)
-                                                                .gap(6.0),
-                                                        )
-                                                        .clicked()
-                                                    },
-                                                )
-                                                .inner;
-                                            if name_clicked {
+                                            let name_response = ui.add(
+                                                egui::Button::new(tab_label)
+                                                    .selected(active)
+                                                    .frame(false)
+                                                    .gap(6.0)
+                                                    .min_size(egui::vec2(0.0, 28.0)),
+                                            );
+                                            if name_response.clicked() {
                                                 self.selected_id = Some(id.clone());
                                             }
+                                            let controls_width = 56.0;
+                                            let gaps = ui.spacing().item_spacing.x * 2.0;
+                                            let spacer_width = (row_width
+                                                - name_response.rect.width()
+                                                - controls_width
+                                                - gaps)
+                                                .max(0.0);
+                                            ui.add_space(spacer_width);
                                             if ui
                                                 .add_sized(
                                                     [28.0, 28.0],
