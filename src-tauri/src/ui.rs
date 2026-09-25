@@ -451,7 +451,8 @@ impl PingApp {
             .find(|overlay| overlay.id == id)
         {
             overlay.enabled = !overlay.enabled;
-            let _ = self.persist_current();
+            self.dirty = true;
+            self.status.clear();
         }
     }
 
@@ -888,6 +889,15 @@ fn edit_overlay(
             });
     });
 
+    section(ui, "Position", |ui| {
+        if let Some(anchor) = position_picker.show(ui, overlay.position) {
+            if anchor != overlay.position {
+                overlay.position = anchor;
+                *changed = true;
+            }
+        }
+    });
+
     section(ui, "Graph", |ui| {
         Grid::new("graph-grid")
             .num_columns(2)
@@ -1026,14 +1036,42 @@ fn edit_overlay(
             });
     });
 
+    section(ui, "Colors", |ui| {
+        Grid::new("colors-grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                color_field(ui, "Line color", &mut overlay.line_color, changed);
+                ui.end_row();
+                color_field(ui, "Timeout color", &mut overlay.timeout_color, changed);
+                ui.end_row();
+                color_field(ui, "Background color", &mut overlay.bg_color, changed);
+                ui.end_row();
+
+                ui.label("Background opacity");
+                let mut opacity = overlay.bg_opacity.min(100) as i64;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut opacity, 0..=100)
+                            .suffix("%")
+                            .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    overlay.bg_opacity = opacity.clamp(0, 100) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+            });
+    });
+
     section(ui, "Startup Behaviors", |ui| {
         Grid::new("startup-behaviors-grid")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Cosmetic Startup Prefill").on_hover_text(
-                    "Show a cosmetic fake graph until the first real probe result arrives.",
-                );
+                ui.label("Cosmetic Startup Prefill")
+                    .on_hover_text("Show a cosmetic fake graph before real samples arrive.");
                 if ui
                     .checkbox(&mut overlay.cosmetic_startup_prefill, "Enabled")
                     .changed()
@@ -1068,44 +1106,6 @@ fn edit_overlay(
                         config::MIN_PREFILL_ANIMATION_SEC as i64,
                         config::MAX_PREFILL_ANIMATION_SEC as i64,
                     ) as u32;
-                    *changed = true;
-                }
-                ui.end_row();
-            });
-    });
-
-    section(ui, "Position", |ui| {
-        if let Some(anchor) = position_picker.show(ui, overlay.position) {
-            if anchor != overlay.position {
-                overlay.position = anchor;
-                *changed = true;
-            }
-        }
-    });
-
-    section(ui, "Colors", |ui| {
-        Grid::new("colors-grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                color_field(ui, "Line color", &mut overlay.line_color, changed);
-                ui.end_row();
-                color_field(ui, "Timeout color", &mut overlay.timeout_color, changed);
-                ui.end_row();
-                color_field(ui, "Background color", &mut overlay.bg_color, changed);
-                ui.end_row();
-
-                ui.label("Background opacity");
-                let mut opacity = overlay.bg_opacity.min(100) as i64;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut opacity, 0..=100)
-                            .suffix("%")
-                            .step_by(1.0),
-                    )
-                    .changed()
-                {
-                    overlay.bg_opacity = opacity.clamp(0, 100) as u32;
                     *changed = true;
                 }
                 ui.end_row();
