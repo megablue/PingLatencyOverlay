@@ -338,9 +338,6 @@ impl PingApp {
                                                     .gap(6.0)
                                                     .min_size(egui::vec2(0.0, 28.0)),
                                             );
-                                            if name_response.clicked() {
-                                                self.selected_id = Some(id.clone());
-                                            }
                                             let controls_width = 56.0;
                                             let gaps = ui.spacing().item_spacing.x * 2.0;
                                             let spacer_width = (row_width
@@ -348,7 +345,13 @@ impl PingApp {
                                                 - controls_width
                                                 - gaps)
                                                 .max(0.0);
-                                            ui.add_space(spacer_width);
+                                            let tab_area = ui.allocate_response(
+                                                egui::vec2(spacer_width, 28.0),
+                                                egui::Sense::click(),
+                                            );
+                                            if name_response.clicked() || tab_area.clicked() {
+                                                self.selected_id = Some(id.clone());
+                                            }
                                             if ui
                                                 .add_sized(
                                                     [28.0, 28.0],
