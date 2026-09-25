@@ -199,6 +199,7 @@ fn render_graph_into_internal(
     let mut in_segment = false;
     let mut segment_prefill: Option<bool> = None;
     let mut last_y: Option<f32> = None;
+    let mut last_point: Option<(f32, f32)> = None;
     for (index, sample) in samples.iter().enumerate() {
         let Some(x) = map_x(index, sample) else {
             continue;
@@ -217,6 +218,7 @@ fn render_graph_into_internal(
             }
             in_segment = false;
             segment_prefill = None;
+            last_point = None;
             continue;
         };
 
@@ -234,23 +236,35 @@ fn render_graph_into_internal(
                 }
                 segment = PathBuilder::new();
             }
-            let start = transform_point(
+            let point = transform_point(
                 (x, y),
                 long_px,
                 short_px,
                 config.orientation,
                 config.mirrored,
             );
-            segment.move_to(start.0, start.1);
-            if let Some(previous_y) = last_y {
-                let resume = transform_point(
-                    (x, previous_y),
+            if let Some((previous_x, previous_y)) = last_point {
+                let previous = transform_point(
+                    (previous_x, previous_y),
                     long_px,
                     short_px,
                     config.orientation,
                     config.mirrored,
                 );
-                segment.line_to(resume.0, resume.1);
+                segment.move_to(previous.0, previous.1);
+                segment.line_to(point.0, point.1);
+            } else {
+                segment.move_to(point.0, point.1);
+                if let Some(previous_y) = last_y {
+                    let resume = transform_point(
+                        (x, previous_y),
+                        long_px,
+                        short_px,
+                        config.orientation,
+                        config.mirrored,
+                    );
+                    segment.line_to(resume.0, resume.1);
+                }
             }
             in_segment = true;
             segment_prefill = Some(sample_prefill);
@@ -265,6 +279,7 @@ fn render_graph_into_internal(
             segment.line_to(point.0, point.1);
         }
         last_y = Some(y);
+        last_point = Some((x, y));
     }
     if in_segment {
         let paint = if segment_prefill == Some(true) {
@@ -561,6 +576,47 @@ mod tests {
             .count();
         assert!(magenta > 0);
         assert!(green > 0);
+    }
+
+    #[test]
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn prefill_to_real_transition_is_connected() {
+        let now = Instant::now();
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 3;
+        config.line_color = "#00ff00".to_string();
+        config.prefill_line_color = "#ff00ff".to_string();
+        let samples = vec![
+            SamplePoint {
+                value: Some(100),
+                timestamp: now - Duration::from_secs(2),
+                is_prefill: true,
+            },
+            SamplePoint {
+                value: Some(100),
+                timestamp: now - Duration::from_secs(1),
+                is_prefill: true,
+            },
+            SamplePoint {
+                value: Some(500),
+                timestamp: now,
+                is_prefill: false,
+            },
+        ];
+        let pixels = render_graph(300, 100, &config, &samples, now, false).expect("pixmap");
+        let transition_x = 250;
+        let green_at_transition = pixels
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, pixel)| {
+                index % 300 == transition_x
+                    && pixel[3] > 20
+                    && pixel[1] > 80
+                    && pixel[0] < 100
+                    && pixel[2] < 100
+            })
+            .count();
+        assert!(green_at_transition < 15);
     }
 
     #[test]
