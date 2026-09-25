@@ -288,6 +288,7 @@ struct OverlayWindow {
     history_points: Vec<SamplePoint>,
     history_dirty: bool,
     border: BorderAnimator,
+    border_selected: bool,
     pixels: Vec<u8>,
     sample_generation: u64,
     size: (i32, i32),
@@ -557,11 +558,15 @@ impl OverlayManager {
                 continue;
             };
             let config_changed = window.config != *overlay;
+            let selected = selected_id == Some(overlay.id.as_str());
+            let border_selection_changed = window.border_selected != selected;
+            window.border_selected = selected;
             let changed = window.dirty
                 || window.size != size
                 || window.position != position
                 || config_changed
-                || samples_changed;
+                || samples_changed
+                || border_selection_changed;
             if config_changed {
                 window.config = overlay.clone();
             }
@@ -597,7 +602,6 @@ impl OverlayManager {
             window.size = size;
             window.position = position;
             let now = Instant::now();
-            let selected = selected_id == Some(overlay.id.as_str());
             let border_was_active = window.border.needs_animation();
             window.border.update(&window.config, selected, now);
             let border_active = window.border.needs_animation();
@@ -708,6 +712,7 @@ impl OverlayManager {
             history_points: Vec::new(),
             history_dirty: true,
             border: BorderAnimator::new(),
+            border_selected: false,
             pixels: Vec::new(),
             sample_generation: 0,
             size,

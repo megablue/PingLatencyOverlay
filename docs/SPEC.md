@@ -44,7 +44,8 @@
     without an explicit preference.
   - The startup border effect defaults to RGB Loop when unspecified. It runs
     for 5 seconds by default, then fades for 1 second by default. Selecting an
-    overlay tab always activates the RGB loop; losing selection starts the fade
+    overlay tab always activates the RGB loop; losing selection or closing the
+    Config window starts the fade
     and eventually disables the border.
   - Border animation uses a dedicated 60 FPS redraw path and a 3 px inline
     border, independent of the graph Smooth Rendering setting.

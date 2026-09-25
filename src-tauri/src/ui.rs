@@ -281,6 +281,7 @@ enum ShutdownState {
 pub struct PingApp {
     config: Config,
     selected_id: Option<String>,
+    config_visible: bool,
     running: bool,
     status: String,
     dirty: bool,
@@ -324,6 +325,7 @@ impl PingApp {
         Ok(Self {
             config,
             selected_id,
+            config_visible: show_config,
             running,
             status: String::new(),
             dirty: false,
@@ -337,10 +339,23 @@ impl PingApp {
         })
     }
 
+    fn set_config_visible(&mut self, ctx: &Context, visible: bool) {
+        if self.config_visible == visible {
+            return;
+        }
+        self.config_visible = visible;
+        // A selected overlay's RGB border belongs to the Config interaction.
+        // Reconcile immediately so closing the window starts the normal fade
+        // instead of leaving the border selected indefinitely.
+        self.sync_overlays();
+        ctx.request_repaint();
+    }
+
     fn handle_root_close(&mut self, ctx: &Context) {
         let close_requested = ctx.input(|input| input.viewport().close_requested());
         if close_requested && self.shutdown_state == ShutdownState::Running {
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::CancelClose);
+            self.set_config_visible(ctx, false);
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
                 egui::ViewportCommand::Visible(false),
@@ -360,6 +375,7 @@ impl PingApp {
                     self.tray.set_running(self.running);
                 }
                 TrayAction::Config => {
+                    self.set_config_visible(ctx, true);
                     ctx.send_viewport_cmd_to(
                         egui::ViewportId::ROOT,
                         egui::ViewportCommand::Visible(true),
@@ -371,6 +387,7 @@ impl PingApp {
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 }
                 TrayAction::Exit => {
+                    self.config_visible = false;
                     // eframe applies viewport commands after the current frame.
                     // Defer Close until a later logic-only pass so a visible
                     // Config window is hidden before the viewport is destroyed.
@@ -388,11 +405,13 @@ impl PingApp {
     }
 
     fn sync_overlays(&mut self) {
+        let selected_id =
+            selected_overlay_for_border(self.config_visible, self.selected_id.as_deref());
         self.overlays.apply(
             &self.config,
             self.probes.samples(),
             self.running,
-            self.selected_id.as_deref(),
+            selected_id,
         );
     }
 
@@ -769,6 +788,14 @@ impl PingApp {
                 });
             });
         });
+    }
+}
+
+fn selected_overlay_for_border(config_visible: bool, selected_id: Option<&str>) -> Option<&str> {
+    if config_visible {
+        selected_id
+    } else {
+        None
     }
 }
 
@@ -1281,4 +1308,16 @@ pub fn run() {
         Box::new(|cc| PingApp::new(cc).map(|app| Box::new(app) as Box<dyn App>)),
     )
     .expect("failed to start PingLatencyOverlay");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_overlay_for_border;
+
+    #[test]
+    fn hidden_config_does_not_keep_overlay_selected_for_border() {
+        let selected = Some("overlay");
+        assert_eq!(selected_overlay_for_border(false, selected), None);
+        assert_eq!(selected_overlay_for_border(true, selected), Some("overlay"));
+    }
 }
