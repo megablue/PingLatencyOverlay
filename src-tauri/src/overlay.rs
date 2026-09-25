@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig};
 use crate::probes::SampleStore;
-use crate::render::{cosmetic_prefill_values, render_graph_into, render_prefill_into, SamplePoint};
+use crate::render::{
+    cosmetic_prefill_samples, render_graph_into, render_prefill_into, SamplePoint,
+};
 
 #[cfg(windows)]
 #[allow(non_snake_case, clippy::upper_case_acronyms)]
@@ -247,10 +249,12 @@ pub fn enable_dpi_awareness() {
     }
 }
 
+// Fake samples live only in the overlay renderer; they are retained as visual
+// history after the reveal and are never inserted into SampleStore.
 struct PrefillState {
     started_at: Instant,
     duration: Duration,
-    values: Vec<u32>,
+    samples: Vec<SamplePoint>,
     completed_rendered: bool,
 }
 
@@ -259,7 +263,7 @@ impl PrefillState {
         Self {
             started_at: now,
             duration: Duration::from_secs(config.prefill_animation_sec.max(1) as u64),
-            values: cosmetic_prefill_values(config),
+            samples: cosmetic_prefill_samples(config, now),
             completed_rendered: false,
         }
     }
@@ -279,7 +283,9 @@ struct OverlayWindow {
     config: OverlayConfig,
     samples: Vec<SamplePoint>,
     prefill: Option<PrefillState>,
-    prefill_points: Vec<SamplePoint>,
+    render_points: Vec<SamplePoint>,
+    history_points: Vec<SamplePoint>,
+    history_dirty: bool,
     pixels: Vec<u8>,
     sample_generation: u64,
     size: (i32, i32),
@@ -287,6 +293,18 @@ struct OverlayWindow {
     dirty: bool,
     last_rendered: Instant,
     surface: LayeredSurface,
+}
+
+impl OverlayWindow {
+    fn rebuild_history(&mut self) {
+        self.history_points.clear();
+        if let Some(prefill) = &self.prefill {
+            self.history_points.extend(prefill.samples.iter().copied());
+        }
+        self.history_points.extend(self.samples.iter().copied());
+        self.history_points.sort_by_key(|sample| sample.timestamp);
+        self.history_dirty = false;
+    }
 }
 
 // Keep the DIB, source DC, and BGRA staging buffer alive for the lifetime of
@@ -543,15 +561,21 @@ impl OverlayManager {
                 window.samples = sample_buffer;
                 window.sample_generation = sample_generation;
             }
-            let real_timeout = window.samples.iter().any(|sample| sample.value.is_none());
-            let enough_real_samples = window.samples.len() >= 2;
-            if !overlay.cosmetic_startup_prefill
-                || (sample_generation > 0 && (real_timeout || enough_real_samples))
-            {
+            if !overlay.cosmetic_startup_prefill {
                 window.prefill = None;
-            } else if window.prefill.is_none() || config_changed {
+            } else if sample_generation == 0 && (window.prefill.is_none() || config_changed) {
                 window.prefill = Some(PrefillState::new(overlay, Instant::now()));
             }
+            if sample_generation > 0 {
+                if let Some(first_real) = window.samples.first() {
+                    if let Some(prefill) = window.prefill.as_ref() {
+                        if prefill.started_at > first_real.timestamp {
+                            window.prefill = Some(PrefillState::new(overlay, first_real.timestamp));
+                        }
+                    }
+                }
+            }
+            window.history_dirty |= samples_changed || config_changed;
             let surface_changed = window.surface.size != size;
             if surface_changed {
                 match LayeredSurface::new(size) {
@@ -567,8 +591,11 @@ impl OverlayManager {
             let now = Instant::now();
             let smooth = running
                 && window.config.smooth_rendering
-                && window.sample_generation > 0
-                && window.prefill.is_none();
+                && (window.sample_generation > 0
+                    || window
+                        .prefill
+                        .as_ref()
+                        .is_some_and(|prefill| prefill.completed_rendered));
             let smooth_due = smooth
                 && window.last_rendered.elapsed()
                     >= smooth_frame_interval(window.config.smooth_fps);
@@ -652,7 +679,9 @@ impl OverlayManager {
             prefill: config
                 .cosmetic_startup_prefill
                 .then(|| PrefillState::new(config, Instant::now())),
-            prefill_points: Vec::new(),
+            render_points: Vec::new(),
+            history_points: Vec::new(),
+            history_dirty: true,
             pixels: Vec::new(),
             sample_generation: 0,
             size,
@@ -684,33 +713,50 @@ impl OverlayManager {
 
     fn render_window(window: &mut OverlayWindow, smooth: bool) {
         let now = Instant::now();
-        let (prefill_values, prefill_progress, prefill_complete) = if window.sample_generation == 0
-        {
-            window
-                .prefill
-                .as_ref()
-                .map_or((None, 0.0, false), |prefill| {
-                    (
-                        Some(prefill.values.as_slice()),
-                        prefill.progress(now),
-                        prefill.is_complete(now),
-                    )
-                })
-        } else {
-            (None, 0.0, false)
-        };
-        let rendered = if let Some(values) = prefill_values {
-            render_prefill_into(
-                window.size.0.max(1) as u32,
-                window.size.1.max(1) as u32,
-                &window.config,
-                values,
-                now,
-                prefill_progress,
-                &window.config.prefill_line_color,
-                &mut window.prefill_points,
-                &mut window.pixels,
-            )
+        let prefill_was_completed = window
+            .prefill
+            .as_ref()
+            .is_some_and(|prefill| prefill.completed_rendered);
+        let prefill_complete = window
+            .prefill
+            .as_ref()
+            .is_some_and(|prefill| prefill.is_complete(now));
+        if prefill_complete && (!prefill_was_completed || window.history_dirty) {
+            window.rebuild_history();
+        }
+        let prefill_samples = window
+            .prefill
+            .as_ref()
+            .map(|prefill| prefill.samples.as_slice());
+        let prefill_progress = window
+            .prefill
+            .as_ref()
+            .map(|prefill| prefill.progress(now))
+            .unwrap_or(0.0);
+        let render_smooth = smooth || prefill_samples.is_some();
+        let rendered = if let Some(samples) = prefill_samples {
+            if prefill_complete {
+                render_graph_into(
+                    window.size.0.max(1) as u32,
+                    window.size.1.max(1) as u32,
+                    &window.config,
+                    &window.history_points,
+                    now,
+                    render_smooth,
+                    &mut window.pixels,
+                )
+            } else {
+                render_prefill_into(
+                    window.size.0.max(1) as u32,
+                    window.size.1.max(1) as u32,
+                    &window.config,
+                    samples,
+                    now,
+                    prefill_progress,
+                    &mut window.render_points,
+                    &mut window.pixels,
+                )
+            }
         } else {
             render_graph_into(
                 window.size.0.max(1) as u32,

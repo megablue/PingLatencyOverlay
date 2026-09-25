@@ -10,6 +10,8 @@ use crate::config::OverlayConfig;
 pub struct SamplePoint {
     pub value: Option<u32>,
     pub timestamp: Instant,
+    /// True for cosmetic history that should use the prefill line color.
+    pub is_prefill: bool,
 }
 
 /// Render a graph into premultiplied RGBA bytes for a Win32 layered window.
@@ -164,9 +166,12 @@ pub fn render_graph_into_with_color(
         );
     }
 
-    let mut line_paint = Paint::default();
+    let mut real_line_paint = Paint::default();
     let [r, g, b] = parse_color(line_color, [74, 222, 128]);
-    line_paint.set_color_rgba8(r, g, b, 255);
+    real_line_paint.set_color_rgba8(r, g, b, 255);
+    let mut prefill_line_paint = Paint::default();
+    let [r, g, b] = parse_color(&config.prefill_line_color, [100, 116, 139]);
+    prefill_line_paint.set_color_rgba8(r, g, b, 255);
     let stroke = Stroke {
         width: 1.5,
         ..Stroke::default()
@@ -174,6 +179,7 @@ pub fn render_graph_into_with_color(
 
     let mut segment = PathBuilder::new();
     let mut in_segment = false;
+    let mut segment_prefill: Option<bool> = None;
     let mut last_y: Option<f32> = None;
     for (index, sample) in samples.iter().enumerate() {
         let Some(x) = map_x(index, sample) else {
@@ -181,17 +187,35 @@ pub fn render_graph_into_with_color(
         };
         let Some(latency) = sample.value else {
             if in_segment {
+                let paint = if segment_prefill == Some(true) {
+                    &prefill_line_paint
+                } else {
+                    &real_line_paint
+                };
                 if let Some(path) = segment.finish() {
-                    pixmap.stroke_path(&path, &line_paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
                 }
                 segment = PathBuilder::new();
             }
             in_segment = false;
+            segment_prefill = None;
             continue;
         };
 
         let y = map_y(latency);
-        if !in_segment {
+        let sample_prefill = sample.is_prefill;
+        if !in_segment || segment_prefill != Some(sample_prefill) {
+            if in_segment {
+                let paint = if segment_prefill == Some(true) {
+                    &prefill_line_paint
+                } else {
+                    &real_line_paint
+                };
+                if let Some(path) = segment.finish() {
+                    pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
+                }
+                segment = PathBuilder::new();
+            }
             let start = transform_point(
                 (x, y),
                 long_px,
@@ -211,6 +235,7 @@ pub fn render_graph_into_with_color(
                 segment.line_to(resume.0, resume.1);
             }
             in_segment = true;
+            segment_prefill = Some(sample_prefill);
         } else {
             let point = transform_point(
                 (x, y),
@@ -224,8 +249,13 @@ pub fn render_graph_into_with_color(
         last_y = Some(y);
     }
     if in_segment {
+        let paint = if segment_prefill == Some(true) {
+            &prefill_line_paint
+        } else {
+            &real_line_paint
+        };
         if let Some(path) = segment.finish() {
-            pixmap.stroke_path(&path, &line_paint, &stroke, Transform::identity(), None);
+            pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
         }
     }
 
@@ -258,38 +288,57 @@ pub fn cosmetic_prefill_values(config: &OverlayConfig) -> Vec<u32> {
         .collect()
 }
 
+/// Build timestamped cosmetic samples that occupy one graph window.
+pub fn cosmetic_prefill_samples(config: &OverlayConfig, now: Instant) -> Vec<SamplePoint> {
+    let values = cosmetic_prefill_values(config);
+    let count = values.len();
+    let window_duration = Duration::from_secs(config.window_seconds.max(1) as u64);
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let fraction = if count <= 1 {
+                1.0
+            } else {
+                index as f32 / (count - 1) as f32
+            };
+            let age =
+                Duration::from_secs_f64(window_duration.as_secs_f64() * (1.0 - fraction as f64));
+            SamplePoint {
+                value: Some(value),
+                timestamp: now.checked_sub(age).unwrap_or(now),
+                is_prefill: true,
+            }
+        })
+        .collect()
+}
+
 /// Render the cosmetic prefill as a left-to-right reveal.
 #[allow(clippy::too_many_arguments)]
 pub fn render_prefill_into(
     width: u32,
     height: u32,
     config: &OverlayConfig,
-    values: &[u32],
+    samples: &[SamplePoint],
     now: Instant,
     progress: f32,
-    line_color: &str,
     points: &mut Vec<SamplePoint>,
     pixels: &mut Vec<u8>,
 ) -> bool {
     let progress = progress.clamp(0.0, 1.0);
-    let window_duration = Duration::from_secs(config.window_seconds.max(1) as u64);
+    let count = (progress * samples.len() as f32).ceil() as usize;
     points.clear();
-    points.extend(values.iter().enumerate().map(|(index, value)| {
-        let fraction = if values.len() <= 1 {
-            1.0
-        } else {
-            index as f32 / (values.len() - 1) as f32
-        };
-        let x_fraction = (progress * fraction).clamp(0.0, 1.0);
-        let age =
-            Duration::from_secs_f64(window_duration.as_secs_f64() * (1.0 - x_fraction as f64));
-        SamplePoint {
-            value: Some(*value),
-            timestamp: now.checked_sub(age).unwrap_or(now),
-        }
-    }));
-
-    render_graph_into_with_color(width, height, config, points, now, true, line_color, pixels)
+    points.extend(samples.iter().take(count).copied());
+    render_graph_into_with_color(
+        width,
+        height,
+        config,
+        points,
+        now,
+        true,
+        &config.line_color,
+        pixels,
+    )
 }
 
 /// Map logical graph coordinates to the physical layered-window coordinates.
@@ -356,6 +405,7 @@ mod tests {
             .map(|(index, value)| SamplePoint {
                 value: *value,
                 timestamp: now - Duration::from_secs((values.len() - index) as u64),
+                is_prefill: false,
             })
             .collect()
     }
@@ -380,10 +430,12 @@ mod tests {
             SamplePoint {
                 value: Some(100),
                 timestamp: now - Duration::from_secs(15),
+                is_prefill: false,
             },
             SamplePoint {
                 value: Some(200),
                 timestamp: now - Duration::from_secs(14),
+                is_prefill: false,
             },
         ];
         let first = render_graph(300, 100, &config, &samples, now, true).expect("pixmap");
@@ -417,8 +469,8 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.window_seconds = 60;
         config.prefill_line_color = "#ff00ff".to_string();
-        let values = cosmetic_prefill_values(&config);
         let now = Instant::now();
+        let samples = cosmetic_prefill_samples(&config, now);
         let mut early = Vec::new();
         let mut complete = Vec::new();
         let mut points = Vec::new();
@@ -426,10 +478,9 @@ mod tests {
             300,
             100,
             &config,
-            &values,
+            &samples,
             now,
             0.25,
-            &config.prefill_line_color,
             &mut points,
             &mut early,
         ));
@@ -437,10 +488,9 @@ mod tests {
             300,
             100,
             &config,
-            &values,
+            &samples,
             now,
             1.0,
-            &config.prefill_line_color,
             &mut points,
             &mut complete,
         ));
@@ -453,6 +503,42 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn prefill_history_and_real_samples_render_together() {
+        let now = Instant::now();
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 60;
+        config.line_color = "#00ff00".to_string();
+        config.prefill_line_color = "#ff00ff".to_string();
+        let mut samples = cosmetic_prefill_samples(&config, now);
+        samples.push(SamplePoint {
+            value: Some(500),
+            timestamp: now,
+            is_prefill: false,
+        });
+        let mut pixels = Vec::new();
+        assert!(render_graph_into(
+            300,
+            100,
+            &config,
+            &samples,
+            now,
+            true,
+            &mut pixels,
+        ));
+        let magenta = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 20 && pixel[0] > 80 && pixel[2] > 80 && pixel[1] < 100)
+            .count();
+        let green = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 20 && pixel[1] > 80 && pixel[0] < 100 && pixel[2] < 100)
+            .count();
+        assert!(magenta > 0);
+        assert!(green > 0);
+    }
+
+    #[test]
     fn smooth_timeout_marker_moves_with_timestamp() {
         let now = Instant::now();
         let mut config = OverlayConfig::new();
@@ -461,6 +547,7 @@ mod tests {
         let samples = vec![SamplePoint {
             value: None,
             timestamp: now - Duration::from_secs(15),
+            is_prefill: false,
         }];
         let width = 300;
         let height = 100;

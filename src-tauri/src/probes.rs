@@ -129,6 +129,7 @@ async fn probe_loop(
                 buffer.values.push_back(SamplePoint {
                     value: latency,
                     timestamp: Instant::now(),
+                    is_prefill: false,
                 });
                 buffer.generation = buffer.generation.wrapping_add(1);
                 while buffer.values.len() > MAX_BUFFERED_SAMPLES {

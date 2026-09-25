@@ -83,6 +83,7 @@ settings are migrated automatically. Each overlay can optionally enable **Smooth
 rendering** and set its target redraw rate from 1–1000 FPS; it is enabled by
 default at 60 FPS for new overlays and legacy configurations without an explicit
 preference. The graph continues to use the actual probe timestamps and never
-bridges timeout gaps. **Startup Behaviors** can show a cosmetic fake graph until
-the first real timeout or the second real sample, with a configurable prefill
-color and reveal duration.
+bridges timeout gaps. **Startup Behaviors** can show a cosmetic fake graph before
+real samples arrive, with a configurable prefill color and reveal duration. The
+prefill remains as cosmetic history while real samples append to the same
+rendered timeline.

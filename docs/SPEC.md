@@ -36,9 +36,10 @@
     before the first real probe result arrives.
   - The prefill uses its own line color (default `#64748b`) and reveals from
     left to right over the configured number of seconds (default 3).
-  - The prefill is cosmetic only and is replaced once there are two real
-    samples, or immediately when the first real result is a timeout; it is
-    never added to the real sample buffer.
+  - The prefill remains as cosmetic history after the reveal; real samples are
+    appended to the same rendered timeline and naturally scroll it left. The
+    fake points retain the prefill color and are never added to the real sample
+    buffer.
   - Prefill is enabled by default for new overlays and legacy configurations
     without an explicit preference.
 - Y axis:
