@@ -393,14 +393,19 @@ impl PingApp {
     }
 
     fn repaint_interval(&self) -> Duration {
-        if !self.running {
-            return REPAINT_INTERVAL;
-        }
-        self.config
-            .overlays
-            .iter()
-            .filter(|overlay| overlay.enabled && overlay.smooth_rendering)
-            .map(|overlay| config::smooth_frame_interval(overlay.smooth_fps))
+        let smooth_interval = if self.running {
+            self.config
+                .overlays
+                .iter()
+                .filter(|overlay| overlay.enabled && overlay.smooth_rendering)
+                .map(|overlay| config::smooth_frame_interval(overlay.smooth_fps))
+                .min()
+        } else {
+            None
+        };
+        smooth_interval
+            .into_iter()
+            .chain(self.overlays.prefill_repaint_interval())
             .min()
             .unwrap_or(REPAINT_INTERVAL)
     }
@@ -1015,6 +1020,54 @@ fn edit_overlay(
                     overlay.smooth_fps = smooth_fps
                         .clamp(config::MIN_SMOOTH_FPS as i64, config::MAX_SMOOTH_FPS as i64)
                         as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+            });
+    });
+
+    section(ui, "Startup Behaviors", |ui| {
+        Grid::new("startup-behaviors-grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Cosmetic Startup Prefill").on_hover_text(
+                    "Show a cosmetic fake graph until the first real probe result arrives.",
+                );
+                if ui
+                    .checkbox(&mut overlay.cosmetic_startup_prefill, "Enabled")
+                    .changed()
+                {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                color_field(
+                    ui,
+                    "Prefill line color",
+                    &mut overlay.prefill_line_color,
+                    changed,
+                );
+                ui.end_row();
+
+                ui.label("Prefill animation (sec)");
+                let mut prefill_animation = overlay.prefill_animation_sec as i64;
+                if ui
+                    .add_enabled(
+                        overlay.cosmetic_startup_prefill,
+                        egui::DragValue::new(&mut prefill_animation)
+                            .range(
+                                config::MIN_PREFILL_ANIMATION_SEC as i64
+                                    ..=config::MAX_PREFILL_ANIMATION_SEC as i64,
+                            )
+                            .suffix(" sec"),
+                    )
+                    .changed()
+                {
+                    overlay.prefill_animation_sec = prefill_animation.clamp(
+                        config::MIN_PREFILL_ANIMATION_SEC as i64,
+                        config::MAX_PREFILL_ANIMATION_SEC as i64,
+                    ) as u32;
                     *changed = true;
                 }
                 ui.end_row();

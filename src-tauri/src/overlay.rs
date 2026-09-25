@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig};
 use crate::probes::SampleStore;
-use crate::render::{render_graph_into, SamplePoint};
+use crate::render::{cosmetic_prefill_values, render_graph_into, render_prefill_into, SamplePoint};
 
 #[cfg(windows)]
 #[allow(non_snake_case, clippy::upper_case_acronyms)]
@@ -247,10 +247,39 @@ pub fn enable_dpi_awareness() {
     }
 }
 
+struct PrefillState {
+    started_at: Instant,
+    duration: Duration,
+    values: Vec<u32>,
+    completed_rendered: bool,
+}
+
+impl PrefillState {
+    fn new(config: &OverlayConfig, now: Instant) -> Self {
+        Self {
+            started_at: now,
+            duration: Duration::from_secs(config.prefill_animation_sec.max(1) as u64),
+            values: cosmetic_prefill_values(config),
+            completed_rendered: false,
+        }
+    }
+
+    fn progress(&self, now: Instant) -> f32 {
+        (now.saturating_duration_since(self.started_at).as_secs_f64() / self.duration.as_secs_f64())
+            .clamp(0.0, 1.0) as f32
+    }
+
+    fn is_complete(&self, now: Instant) -> bool {
+        self.progress(now) >= 1.0
+    }
+}
+
 struct OverlayWindow {
     hwnd: HWND,
     config: OverlayConfig,
     samples: Vec<SamplePoint>,
+    prefill: Option<PrefillState>,
+    prefill_points: Vec<SamplePoint>,
     pixels: Vec<u8>,
     sample_generation: u64,
     size: (i32, i32),
@@ -514,6 +543,15 @@ impl OverlayManager {
                 window.samples = sample_buffer;
                 window.sample_generation = sample_generation;
             }
+            let real_timeout = window.samples.iter().any(|sample| sample.value.is_none());
+            let enough_real_samples = window.samples.len() >= 2;
+            if !overlay.cosmetic_startup_prefill
+                || (sample_generation > 0 && (real_timeout || enough_real_samples))
+            {
+                window.prefill = None;
+            } else if window.prefill.is_none() || config_changed {
+                window.prefill = Some(PrefillState::new(overlay, Instant::now()));
+            }
             let surface_changed = window.surface.size != size;
             if surface_changed {
                 match LayeredSurface::new(size) {
@@ -526,11 +564,21 @@ impl OverlayManager {
             }
             window.size = size;
             window.position = position;
-            let smooth = running && window.config.smooth_rendering;
+            let now = Instant::now();
+            let smooth = running
+                && window.config.smooth_rendering
+                && window.sample_generation > 0
+                && window.prefill.is_none();
             let smooth_due = smooth
                 && window.last_rendered.elapsed()
                     >= smooth_frame_interval(window.config.smooth_fps);
-            if changed || surface_changed || smooth_due {
+            let prefill_due = window.prefill.as_ref().is_some_and(|prefill| {
+                !prefill.completed_rendered
+                    && (prefill.is_complete(now)
+                        || window.last_rendered.elapsed()
+                            >= smooth_frame_interval(window.config.smooth_fps))
+            });
+            if changed || surface_changed || smooth_due || prefill_due {
                 Self::render_window(window, smooth);
                 window.last_rendered = Instant::now();
             }
@@ -542,6 +590,19 @@ impl OverlayManager {
             }
             self.last_topmost = Instant::now();
         }
+    }
+
+    pub fn prefill_repaint_interval(&self) -> Option<Duration> {
+        self.windows
+            .values()
+            .filter_map(|window| {
+                let prefill = window.prefill.as_ref()?;
+                if prefill.completed_rendered {
+                    return None;
+                }
+                Some(smooth_frame_interval(window.config.smooth_fps))
+            })
+            .min()
     }
 
     fn create_window(
@@ -588,6 +649,10 @@ impl OverlayManager {
             hwnd,
             config: config.clone(),
             samples: Vec::new(),
+            prefill: config
+                .cosmetic_startup_prefill
+                .then(|| PrefillState::new(config, Instant::now())),
+            prefill_points: Vec::new(),
             pixels: Vec::new(),
             sample_generation: 0,
             size,
@@ -618,15 +683,46 @@ impl OverlayManager {
     }
 
     fn render_window(window: &mut OverlayWindow, smooth: bool) {
-        if !render_graph_into(
-            window.size.0.max(1) as u32,
-            window.size.1.max(1) as u32,
-            &window.config,
-            &window.samples,
-            Instant::now(),
-            smooth,
-            &mut window.pixels,
-        ) {
+        let now = Instant::now();
+        let (prefill_values, prefill_progress, prefill_complete) = if window.sample_generation == 0
+        {
+            window
+                .prefill
+                .as_ref()
+                .map_or((None, 0.0, false), |prefill| {
+                    (
+                        Some(prefill.values.as_slice()),
+                        prefill.progress(now),
+                        prefill.is_complete(now),
+                    )
+                })
+        } else {
+            (None, 0.0, false)
+        };
+        let rendered = if let Some(values) = prefill_values {
+            render_prefill_into(
+                window.size.0.max(1) as u32,
+                window.size.1.max(1) as u32,
+                &window.config,
+                values,
+                now,
+                prefill_progress,
+                &window.config.prefill_line_color,
+                &mut window.prefill_points,
+                &mut window.pixels,
+            )
+        } else {
+            render_graph_into(
+                window.size.0.max(1) as u32,
+                window.size.1.max(1) as u32,
+                &window.config,
+                &window.samples,
+                now,
+                smooth,
+                &mut window.pixels,
+            )
+        };
+        if !rendered {
             return;
         }
         if window
@@ -634,6 +730,11 @@ impl OverlayManager {
             .update(window.hwnd, window.position, &window.pixels)
         {
             window.dirty = false;
+            if prefill_complete {
+                if let Some(prefill) = window.prefill.as_mut() {
+                    prefill.completed_rendered = true;
+                }
+            }
         }
     }
 }

@@ -26,6 +26,14 @@ pub const DEFAULT_SMOOTH_FPS: u32 = 60;
 pub const MIN_SMOOTH_FPS: u32 = 1;
 /// Largest allowed smooth redraw rate.
 pub const MAX_SMOOTH_FPS: u32 = 1_000;
+/// Default cosmetic startup prefill line color.
+pub const DEFAULT_PREFILL_LINE_COLOR: &str = "#64748b";
+/// Default cosmetic startup prefill animation duration, in seconds.
+pub const DEFAULT_PREFILL_ANIMATION_SEC: u32 = 3;
+/// Smallest allowed cosmetic startup prefill animation duration, in seconds.
+pub const MIN_PREFILL_ANIMATION_SEC: u32 = 1;
+/// Largest allowed cosmetic startup prefill animation duration, in seconds.
+pub const MAX_PREFILL_ANIMATION_SEC: u32 = 60;
 /// Default gap between the overlay and the screen edge, in logical pixels.
 pub const DEFAULT_MARGIN_PX: u32 = 20;
 /// Default overlay background color.
@@ -78,6 +86,15 @@ pub struct OverlayConfig {
     /// Legacy millisecond setting accepted when loading older configurations.
     #[serde(rename = "smoothDelayMs", default, skip_serializing)]
     legacy_smooth_delay_ms: Option<u32>,
+    /// Show a cosmetic fake graph until the first real probe result arrives.
+    #[serde(default = "default_true")]
+    pub cosmetic_startup_prefill: bool,
+    /// Line color used by the cosmetic startup graph.
+    #[serde(default = "default_prefill_line_color")]
+    pub prefill_line_color: String,
+    /// Duration of the cosmetic startup reveal, in seconds.
+    #[serde(default = "default_prefill_animation_sec")]
+    pub prefill_animation_sec: u32,
     /// Ping timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u32,
@@ -153,6 +170,9 @@ impl OverlayConfig {
             smooth_rendering: true,
             smooth_fps: default_smooth_fps(),
             legacy_smooth_delay_ms: None,
+            cosmetic_startup_prefill: true,
+            prefill_line_color: default_prefill_line_color(),
+            prefill_animation_sec: default_prefill_animation_sec(),
             timeout_ms: default_timeout_ms(),
             graph_height_px: default_graph_height_px(),
             max_y_ms: default_max_y_ms(),
@@ -196,6 +216,12 @@ fn default_scale() -> u32 {
 fn default_smooth_fps() -> u32 {
     DEFAULT_SMOOTH_FPS
 }
+fn default_prefill_line_color() -> String {
+    DEFAULT_PREFILL_LINE_COLOR.to_string()
+}
+fn default_prefill_animation_sec() -> u32 {
+    DEFAULT_PREFILL_ANIMATION_SEC
+}
 
 /// Convert a target frame rate into the interval used by the repaint scheduler.
 pub fn smooth_frame_interval(fps: u32) -> Duration {
@@ -237,6 +263,9 @@ impl Config {
                 o.smooth_fps = smooth_fps_from_legacy_delay(delay_ms);
             }
             o.smooth_fps = o.smooth_fps.clamp(MIN_SMOOTH_FPS, MAX_SMOOTH_FPS);
+            o.prefill_animation_sec = o
+                .prefill_animation_sec
+                .clamp(MIN_PREFILL_ANIMATION_SEC, MAX_PREFILL_ANIMATION_SEC);
             if o.timeout_ms == 0 {
                 o.timeout_ms = DEFAULT_TIMEOUT_MS;
             }
@@ -299,6 +328,9 @@ mod tests {
         assert_eq!(overlay.scale, 2);
         assert!(overlay.smooth_rendering);
         assert_eq!(overlay.smooth_fps, DEFAULT_SMOOTH_FPS);
+        assert!(overlay.cosmetic_startup_prefill);
+        assert_eq!(overlay.prefill_line_color, DEFAULT_PREFILL_LINE_COLOR);
+        assert_eq!(overlay.prefill_animation_sec, DEFAULT_PREFILL_ANIMATION_SEC);
         assert_eq!(overlay.timeout_ms, 1_000);
         assert_eq!(overlay.graph_height_px, 60);
         assert_eq!(overlay.max_y_ms, 1_000);
@@ -313,6 +345,18 @@ mod tests {
                 .expect("legacy config");
         assert!(overlay.smooth_rendering);
         assert_eq!(overlay.smooth_fps, DEFAULT_SMOOTH_FPS);
+        assert!(overlay.cosmetic_startup_prefill);
+        assert_eq!(overlay.prefill_line_color, DEFAULT_PREFILL_LINE_COLOR);
+        assert_eq!(overlay.prefill_animation_sec, DEFAULT_PREFILL_ANIMATION_SEC);
+    }
+
+    #[test]
+    fn explicit_startup_prefill_disabled_is_preserved() {
+        let overlay: OverlayConfig = serde_json::from_str(
+            r#"{"id":"configured","probe":{"protocol":"icmp","host":"1.1.1.1"},"cosmeticStartupPrefill":false}"#,
+        )
+        .expect("configured overlay");
+        assert!(!overlay.cosmetic_startup_prefill);
     }
 
     #[test]
@@ -347,6 +391,7 @@ mod tests {
                 window_seconds: 1,
                 scale: MAX_SCALE_INPUT + 1,
                 smooth_fps: 0,
+                prefill_animation_sec: 0,
                 timeout_ms: 0,
                 graph_height_px: 1,
                 max_y_ms: 0,
@@ -360,6 +405,7 @@ mod tests {
         assert_eq!(overlay.window_seconds, MIN_WINDOW_SECONDS);
         assert_eq!(overlay.scale, MAX_SCALE_INPUT);
         assert_eq!(overlay.smooth_fps, MIN_SMOOTH_FPS);
+        assert_eq!(overlay.prefill_animation_sec, MIN_PREFILL_ANIMATION_SEC);
         assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);

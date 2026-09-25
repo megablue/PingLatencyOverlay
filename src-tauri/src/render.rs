@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use tiny_skia::{IntSize, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
@@ -22,6 +24,29 @@ pub fn render_graph_into(
     samples: &[SamplePoint],
     now: Instant,
     smooth: bool,
+    pixels: &mut Vec<u8>,
+) -> bool {
+    render_graph_into_with_color(
+        width,
+        height,
+        config,
+        samples,
+        now,
+        smooth,
+        &config.line_color,
+        pixels,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_graph_into_with_color(
+    width: u32,
+    height: u32,
+    config: &OverlayConfig,
+    samples: &[SamplePoint],
+    now: Instant,
+    smooth: bool,
+    line_color: &str,
     pixels: &mut Vec<u8>,
 ) -> bool {
     if width == 0 || height == 0 {
@@ -140,7 +165,7 @@ pub fn render_graph_into(
     }
 
     let mut line_paint = Paint::default();
-    let [r, g, b] = parse_color(&config.line_color, [74, 222, 128]);
+    let [r, g, b] = parse_color(line_color, [74, 222, 128]);
     line_paint.set_color_rgba8(r, g, b, 255);
     let stroke = Stroke {
         width: 1.5,
@@ -206,6 +231,65 @@ pub fn render_graph_into(
 
     *pixels = pixmap.take();
     true
+}
+
+const PREFILL_MAX_SAMPLES: usize = 512;
+
+/// Build a deterministic, plausible-looking cosmetic latency curve.
+pub fn cosmetic_prefill_values(config: &OverlayConfig) -> Vec<u32> {
+    let count = config.window_seconds.max(1).min(PREFILL_MAX_SAMPLES as u32) as usize;
+    let mut hasher = DefaultHasher::new();
+    config.id.hash(&mut hasher);
+    let phase = (hasher.finish() % 360) as f32 * (std::f32::consts::PI / 180.0);
+    let max_y = config.max_y_ms.max(1) as f32;
+
+    (0..count)
+        .map(|index| {
+            let t = if count <= 1 {
+                0.0
+            } else {
+                index as f32 / (count - 1) as f32
+            };
+            let wave = (t * std::f32::consts::TAU * 1.5 + phase).sin();
+            let detail = (t * std::f32::consts::TAU * 4.0 + phase * 0.37).sin();
+            let normalized = (0.38 + wave * 0.14 + detail * 0.05).clamp(0.05, 0.85);
+            (normalized * max_y).round().max(1.0) as u32
+        })
+        .collect()
+}
+
+/// Render the cosmetic prefill as a left-to-right reveal.
+#[allow(clippy::too_many_arguments)]
+pub fn render_prefill_into(
+    width: u32,
+    height: u32,
+    config: &OverlayConfig,
+    values: &[u32],
+    now: Instant,
+    progress: f32,
+    line_color: &str,
+    points: &mut Vec<SamplePoint>,
+    pixels: &mut Vec<u8>,
+) -> bool {
+    let progress = progress.clamp(0.0, 1.0);
+    let window_duration = Duration::from_secs(config.window_seconds.max(1) as u64);
+    points.clear();
+    points.extend(values.iter().enumerate().map(|(index, value)| {
+        let fraction = if values.len() <= 1 {
+            1.0
+        } else {
+            index as f32 / (values.len() - 1) as f32
+        };
+        let x_fraction = (progress * fraction).clamp(0.0, 1.0);
+        let age =
+            Duration::from_secs_f64(window_duration.as_secs_f64() * (1.0 - x_fraction as f64));
+        SamplePoint {
+            value: Some(*value),
+            timestamp: now.checked_sub(age).unwrap_or(now),
+        }
+    }));
+
+    render_graph_into_with_color(width, height, config, points, now, true, line_color, pixels)
 }
 
 /// Map logical graph coordinates to the physical layered-window coordinates.
@@ -313,6 +397,59 @@ mod tests {
         )
         .expect("pixmap");
         assert_ne!(first, later);
+    }
+
+    #[test]
+    fn cosmetic_prefill_values_are_deterministic_and_bounded() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 60;
+        config.max_y_ms = 1_000;
+        let first = cosmetic_prefill_values(&config);
+        let second = cosmetic_prefill_values(&config);
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+        assert!(first.iter().all(|value| (1..=1_000).contains(value)));
+    }
+
+    #[test]
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn cosmetic_prefill_reveals_progressively() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 60;
+        config.prefill_line_color = "#ff00ff".to_string();
+        let values = cosmetic_prefill_values(&config);
+        let now = Instant::now();
+        let mut early = Vec::new();
+        let mut complete = Vec::new();
+        let mut points = Vec::new();
+        assert!(render_prefill_into(
+            300,
+            100,
+            &config,
+            &values,
+            now,
+            0.25,
+            &config.prefill_line_color,
+            &mut points,
+            &mut early,
+        ));
+        assert!(render_prefill_into(
+            300,
+            100,
+            &config,
+            &values,
+            now,
+            1.0,
+            &config.prefill_line_color,
+            &mut points,
+            &mut complete,
+        ));
+        let early_pixels = early.chunks_exact(4).filter(|pixel| pixel[3] > 0).count();
+        let complete_pixels = complete
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0)
+            .count();
+        assert!(complete_pixels > early_pixels);
     }
 
     #[test]

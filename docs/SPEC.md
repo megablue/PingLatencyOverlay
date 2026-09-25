@@ -31,6 +31,16 @@
     samples. It is enabled by default at 60 FPS for new overlays and legacy
     configs without an explicit preference; the per-overlay smooth FPS controls
     the intermediate redraw rate, and timeout gaps are never interpolated.
+- Startup behaviors:
+  - `Cosmetic Startup Prefill` can show a deterministic fake latency graph
+    before the first real probe result arrives.
+  - The prefill uses its own line color (default `#64748b`) and reveals from
+    left to right over the configured number of seconds (default 3).
+  - The prefill is cosmetic only and is replaced once there are two real
+    samples, or immediately when the first real result is a timeout; it is
+    never added to the real sample buffer.
+  - Prefill is enabled by default for new overlays and legacy configurations
+    without an explicit preference.
 - Y axis:
   - Height is configurable (`graphHeightPx`, default 60 px).
   - Ceiling is configurable (`maxYMs`, default 1000 ms); pings above it clamp to
