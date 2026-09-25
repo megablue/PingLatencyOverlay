@@ -305,6 +305,17 @@ impl PingApp {
                                                 RichText::new(format!("Delete \"{name}\"?"))
                                                     .color(UI_DANGER),
                                             );
+                                            let controls_width = 64.0;
+                                            let gaps = ui.spacing().item_spacing.x * 3.0;
+                                            let remaining_width = (row_width
+                                                - label_response.rect.width()
+                                                - controls_width
+                                                - gaps)
+                                                .max(0.0);
+                                            let cancel_area = ui.allocate_response(
+                                                egui::vec2(remaining_width, 26.0),
+                                                egui::Sense::click(),
+                                            );
                                             let ok_response = ui.add_sized(
                                                 [36.0, 26.0],
                                                 egui::Button::new(
@@ -314,20 +325,12 @@ impl PingApp {
                                             );
                                             let cancel_response =
                                                 ui.add_sized([28.0, 26.0], egui::Button::new("X"));
-                                            let used_width = label_response.rect.width()
-                                                + ok_response.rect.width()
-                                                + cancel_response.rect.width()
-                                                + ui.spacing().item_spacing.x * 3.0;
-                                            let remaining_width = (row_width - used_width).max(0.0);
-                                            let cancel_area = ui.allocate_response(
-                                                egui::vec2(remaining_width, 26.0),
-                                                egui::Sense::click(),
-                                            );
                                             if ok_response.clicked() {
                                                 self.confirm_delete = None;
                                                 self.delete_overlay(&id);
-                                            } else if cancel_response.clicked()
+                                            } else if label_response.clicked()
                                                 || cancel_area.clicked()
+                                                || cancel_response.clicked()
                                             {
                                                 self.confirm_delete = None;
                                             }
