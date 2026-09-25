@@ -28,6 +28,8 @@ const UI_TEXT_SECONDARY: Color32 = Color32::from_rgb(0xc5, 0xc5, 0xc5);
 const UI_ACCENT: Color32 = Color32::from_rgb(0x60, 0xcd, 0xff);
 const UI_ACCENT_STRONG: Color32 = Color32::from_rgb(0x2f, 0x6f, 0x9f);
 const UI_SELECTION: Color32 = Color32::from_rgb(0x2d, 0x4f, 0x6d);
+const UI_SCROLLBAR: Color32 = Color32::from_rgb(0x23, 0x40, 0x56);
+const UI_SCROLLBAR_HOVER: Color32 = Color32::from_rgb(0x2d, 0x4f, 0x6d);
 const UI_DANGER: Color32 = Color32::from_rgb(0xf4, 0x87, 0x71);
 const UI_DANGER_STRONG: Color32 = Color32::from_rgb(0x9e, 0x2b, 0x2b);
 
@@ -65,13 +67,13 @@ fn explorer_dark_visuals() -> egui::Visuals {
     visuals.widgets.noninteractive.fg_stroke = text;
     visuals.widgets.noninteractive.corner_radius = radius;
 
-    visuals.widgets.inactive.bg_fill = UI_SURFACE_ALT;
+    visuals.widgets.inactive.bg_fill = UI_SCROLLBAR;
     visuals.widgets.inactive.weak_bg_fill = UI_SURFACE_ALT;
     visuals.widgets.inactive.bg_stroke = border;
     visuals.widgets.inactive.fg_stroke = text;
     visuals.widgets.inactive.corner_radius = radius;
 
-    visuals.widgets.hovered.bg_fill = UI_SURFACE_HOVER;
+    visuals.widgets.hovered.bg_fill = UI_SCROLLBAR_HOVER;
     visuals.widgets.hovered.weak_bg_fill = UI_SURFACE_HOVER;
     visuals.widgets.hovered.bg_stroke = border;
     visuals.widgets.hovered.fg_stroke = text;
@@ -109,6 +111,9 @@ pub struct PingApp {
 impl PingApp {
     pub fn new(cc: &CreationContext<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         cc.egui_ctx.set_visuals(explorer_dark_visuals());
+        cc.egui_ctx.global_style_mut(|style| {
+            style.spacing.scroll.foreground_color = false;
+        });
         let config = config::load();
         let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
