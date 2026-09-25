@@ -225,8 +225,9 @@ fn render_graph_into_internal(
         let y = map_y(latency);
         let sample_prefill = sample.is_prefill;
         if !in_segment || segment_prefill != Some(sample_prefill) {
+            let previous_segment_prefill = segment_prefill;
             if in_segment {
-                let paint = if segment_prefill == Some(true) {
+                let paint = if previous_segment_prefill == Some(true) {
                     &prefill_line_paint
                 } else {
                     &real_line_paint
@@ -251,8 +252,24 @@ fn render_graph_into_internal(
                     config.orientation,
                     config.mirrored,
                 );
-                segment.move_to(previous.0, previous.1);
-                segment.line_to(point.0, point.1);
+                let connector_paint = if previous_segment_prefill == Some(true) {
+                    &prefill_line_paint
+                } else {
+                    &real_line_paint
+                };
+                let mut connector = PathBuilder::new();
+                connector.move_to(previous.0, previous.1);
+                connector.line_to(point.0, point.1);
+                if let Some(path) = connector.finish() {
+                    pixmap.stroke_path(
+                        &path,
+                        connector_paint,
+                        &stroke,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                segment.move_to(point.0, point.1);
             } else {
                 segment.move_to(point.0, point.1);
                 if let Some(previous_y) = last_y {
@@ -550,9 +567,14 @@ mod tests {
         config.window_seconds = 60;
         config.line_color = "#00ff00".to_string();
         config.prefill_line_color = "#ff00ff".to_string();
-        let mut samples = cosmetic_prefill_samples(&config, now);
+        let mut samples = cosmetic_prefill_samples(&config, now - Duration::from_secs(2));
         samples.push(SamplePoint {
             value: Some(500),
+            timestamp: now - Duration::from_secs(1),
+            is_prefill: false,
+        });
+        samples.push(SamplePoint {
+            value: Some(450),
             timestamp: now,
             is_prefill: false,
         });
@@ -604,18 +626,30 @@ mod tests {
             },
         ];
         let pixels = render_graph(300, 100, &config, &samples, now, false).expect("pixmap");
-        let transition_x = 250;
+        let magenta_near_transition = pixels
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, pixel)| {
+                let x = index % 300;
+                (235..=245).contains(&x)
+                    && pixel[3] > 20
+                    && pixel[0] > 80
+                    && pixel[2] > 80
+                    && pixel[1] < 100
+            })
+            .count();
         let green_at_transition = pixels
             .chunks_exact(4)
             .enumerate()
             .filter(|(index, pixel)| {
-                index % 300 == transition_x
+                index % 300 == 250
                     && pixel[3] > 20
                     && pixel[1] > 80
                     && pixel[0] < 100
                     && pixel[2] < 100
             })
             .count();
+        assert!(magenta_near_transition > 0);
         assert!(green_at_transition < 15);
     }
 
