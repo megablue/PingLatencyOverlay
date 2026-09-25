@@ -532,19 +532,46 @@ impl PingApp {
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
-                                            let tab_label = (
-                                                RichText::new(indicator).color(UI_ACCENT),
-                                                RichText::new(name.clone()),
+                                            let (tab_rect, tab_response) = ui.allocate_exact_size(
+                                                egui::vec2(row_width - 80.0, 28.0),
+                                                egui::Sense::click(),
                                             );
-                                            let name_response = ui.add(
-                                                egui::Button::new(tab_label)
-                                                    .selected(active)
-                                                    .frame(false)
-                                                    .truncate()
-                                                    .gap(6.0)
-                                                    .min_size(egui::vec2(row_width - 80.0, 28.0)),
+                                            let font_id =
+                                                egui::TextStyle::Button.resolve(ui.style());
+                                            let mut tab_text = egui::text::LayoutJob::default();
+                                            tab_text.wrap.max_width = tab_rect.width();
+                                            tab_text.wrap.max_rows = 1;
+                                            tab_text.wrap.break_anywhere = true;
+                                            tab_text.append(
+                                                indicator,
+                                                0.0,
+                                                egui::TextFormat::simple(
+                                                    font_id.clone(),
+                                                    UI_ACCENT,
+                                                ),
                                             );
-                                            if name_response.clicked() {
+                                            tab_text.append(
+                                                "  ",
+                                                0.0,
+                                                egui::TextFormat::simple(
+                                                    font_id.clone(),
+                                                    UI_ACCENT,
+                                                ),
+                                            );
+                                            tab_text.append(
+                                                &name,
+                                                0.0,
+                                                egui::TextFormat::simple(font_id.clone(), UI_TEXT),
+                                            );
+                                            let galley = ui.painter().layout_job(tab_text);
+                                            let text_offset =
+                                                (tab_rect.height() - galley.size().y) / 2.0;
+                                            ui.painter().galley(
+                                                tab_rect.left_top() + egui::vec2(0.0, text_offset),
+                                                galley,
+                                                UI_TEXT,
+                                            );
+                                            if tab_response.clicked() {
                                                 self.selected_id = Some(id.clone());
                                             }
                                             if ui
