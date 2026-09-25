@@ -1,24 +1,55 @@
-use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use std::time::{Duration, Instant};
+
+use tiny_skia::{IntSize, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::config::OverlayConfig;
+
+#[derive(Clone, Copy, Debug)]
+pub struct SamplePoint {
+    pub value: Option<u32>,
+    pub timestamp: Instant,
+}
 
 /// Render a graph into premultiplied RGBA bytes for a Win32 layered window.
 ///
 /// The native window path deliberately does not use egui or a GPU surface. This
 /// keeps alpha under our control and means each overlay consumes only a small
 /// software buffer instead of creating another renderer/context.
-pub fn render_graph(
+pub fn render_graph_into(
     width: u32,
     height: u32,
     config: &OverlayConfig,
-    samples: &[Option<u32>],
-) -> Option<Vec<u8>> {
+    samples: &[SamplePoint],
+    now: Instant,
+    smooth: bool,
+    pixels: &mut Vec<u8>,
+) -> bool {
     if width == 0 || height == 0 {
-        return None;
+        return false;
     }
-
-    let mut pixmap = Pixmap::new(width, height)?;
-    let full = Rect::from_ltrb(0.0, 0.0, width as f32, height as f32)?;
+    let Some(size) = IntSize::from_wh(width, height) else {
+        return false;
+    };
+    let byte_len = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    if pixels.len() != byte_len {
+        pixels.resize(byte_len, 0);
+    } else {
+        pixels.fill(0);
+    }
+    let data = std::mem::take(pixels);
+    let mut pixmap = match Pixmap::from_vec(data, size) {
+        Some(pixmap) => pixmap,
+        None => {
+            pixels.resize(byte_len, 0);
+            return false;
+        }
+    };
+    let Some(full) = Rect::from_ltrb(0.0, 0.0, width as f32, height as f32) else {
+        *pixels = pixmap.take();
+        return false;
+    };
 
     // The background belongs to the physical window, not the rotated graph.
     // At zero opacity the pixmap remains completely transparent.
@@ -34,7 +65,14 @@ pub fn render_graph(
     let long_px = if rotated { height as f32 } else { width as f32 };
     let short_px = if rotated { width as f32 } else { height as f32 };
     let visible_samples = config.window_seconds.max(1) as usize;
-    let start = samples.len().saturating_sub(visible_samples);
+    let window_duration = Duration::from_secs(visible_samples as u64);
+    let start = if smooth {
+        samples.partition_point(|sample| {
+            now.saturating_duration_since(sample.timestamp) > window_duration
+        })
+    } else {
+        samples.len().saturating_sub(visible_samples)
+    };
     let samples = &samples[start..];
     let step = long_px / visible_samples as f32;
 
@@ -46,15 +84,30 @@ pub fn render_graph(
         let t = (value as f32).min(y_max) / y_max;
         bottom - t * (bottom - top)
     };
-    let map_x = |index: usize| (index as f32 + 0.5) * step;
+    let map_x = |index: usize, sample: &SamplePoint| -> Option<f32> {
+        if smooth {
+            // Move every point by its real age so the whole graph scrolls as
+            // one surface; index-based positions would jump when a sample
+            // arrives at the right edge.
+            let age = now.saturating_duration_since(sample.timestamp);
+            if age > window_duration {
+                return None;
+            }
+            Some(long_px * (1.0 - age.as_secs_f32() / window_duration.as_secs_f32()))
+        } else {
+            Some((index as f32 + 0.5) * step)
+        }
+    };
 
     let mut timeout_paint = Paint::default();
     let [r, g, b] = parse_color(&config.timeout_color, [239, 68, 68]);
     timeout_paint.set_color_rgba8(r, g, b, 255);
     let mut timeout_builder = PathBuilder::new();
     for (index, sample) in samples.iter().enumerate() {
-        if sample.is_none() {
-            let x = map_x(index);
+        let Some(x) = map_x(index, sample) else {
+            continue;
+        };
+        if sample.value.is_none() {
             let start = transform_point(
                 (x, top),
                 long_px,
@@ -98,8 +151,10 @@ pub fn render_graph(
     let mut in_segment = false;
     let mut last_y: Option<f32> = None;
     for (index, sample) in samples.iter().enumerate() {
-        let x = map_x(index);
-        let Some(latency) = sample else {
+        let Some(x) = map_x(index, sample) else {
+            continue;
+        };
+        let Some(latency) = sample.value else {
             if in_segment {
                 if let Some(path) = segment.finish() {
                     pixmap.stroke_path(&path, &line_paint, &stroke, Transform::identity(), None);
@@ -110,7 +165,7 @@ pub fn render_graph(
             continue;
         };
 
-        let y = map_y(*latency);
+        let y = map_y(latency);
         if !in_segment {
             let start = transform_point(
                 (x, y),
@@ -149,7 +204,8 @@ pub fn render_graph(
         }
     }
 
-    Some(pixmap.take())
+    *pixels = pixmap.take();
+    true
 }
 
 /// Map logical graph coordinates to the physical layered-window coordinates.
@@ -195,13 +251,117 @@ mod tests {
     use super::*;
     use crate::config::OverlayConfig;
 
+    fn render_graph(
+        width: u32,
+        height: u32,
+        config: &OverlayConfig,
+        samples: &[SamplePoint],
+        now: Instant,
+        smooth: bool,
+    ) -> Option<Vec<u8>> {
+        let mut pixels = Vec::new();
+        render_graph_into(width, height, config, samples, now, smooth, &mut pixels)
+            .then_some(pixels)
+    }
+
+    fn samples(values: &[Option<u32>]) -> Vec<SamplePoint> {
+        let now = Instant::now();
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| SamplePoint {
+                value: *value,
+                timestamp: now - Duration::from_secs((values.len() - index) as u64),
+            })
+            .collect()
+    }
+
     #[test]
     #[allow(clippy::chunks_exact_to_as_chunks)]
     fn transparent_background_stays_transparent() {
         let config = OverlayConfig::new();
-        let pixels = render_graph(120, 60, &config, &[Some(10), None, Some(20)]).expect("pixmap");
+        let samples = samples(&[Some(10), None, Some(20)]);
+        let pixels =
+            render_graph(120, 60, &config, &samples, Instant::now(), false).expect("pixmap");
         let transparent = pixels.chunks_exact(4).filter(|pixel| pixel[3] == 0).count();
         assert!(transparent > 100);
+    }
+
+    #[test]
+    fn smooth_rendering_uses_timestamp_positions() {
+        let now = Instant::now();
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        let samples = vec![
+            SamplePoint {
+                value: Some(100),
+                timestamp: now - Duration::from_secs(15),
+            },
+            SamplePoint {
+                value: Some(200),
+                timestamp: now - Duration::from_secs(14),
+            },
+        ];
+        let first = render_graph(300, 100, &config, &samples, now, true).expect("pixmap");
+        let later = render_graph(
+            300,
+            100,
+            &config,
+            &samples,
+            now + Duration::from_millis(500),
+            true,
+        )
+        .expect("pixmap");
+        assert_ne!(first, later);
+    }
+
+    #[test]
+    fn smooth_timeout_marker_moves_with_timestamp() {
+        let now = Instant::now();
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        config.timeout_color = "#ff0000".to_string();
+        let samples = vec![SamplePoint {
+            value: None,
+            timestamp: now - Duration::from_secs(15),
+        }];
+        let width = 300;
+        let height = 100;
+        let red_x_bounds = |pixels: &[u8]| {
+            let mut min_x = width;
+            let mut max_x = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    let offset = ((y * width + x) * 4) as usize;
+                    let pixel = &pixels[offset..offset + 4];
+                    if pixel[3] > 20 && pixel[0] > 100 && pixel[1] < 100 && pixel[2] < 100 {
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                    }
+                }
+            }
+            (min_x, max_x)
+        };
+        let first = render_graph(width, height, &config, &samples, now, true).expect("pixmap");
+        let later = render_graph(
+            width,
+            height,
+            &config,
+            &samples,
+            now + Duration::from_millis(500),
+            true,
+        )
+        .expect("pixmap");
+        let first_bounds = red_x_bounds(&first);
+        let later_bounds = red_x_bounds(&later);
+        assert!(
+            first_bounds.0 < width && first_bounds.1 > 0,
+            "no timeout pixels"
+        );
+        assert!(
+            later_bounds.1 < first_bounds.1,
+            "timeout marker did not move left"
+        );
     }
 
     #[test]
@@ -217,7 +377,15 @@ mod tests {
             } else {
                 (300, 100)
             };
-            let pixels = render_graph(width, height, &config, &[None]).expect("pixmap");
+            let pixels = render_graph(
+                width,
+                height,
+                &config,
+                &samples(&[None]),
+                Instant::now(),
+                false,
+            )
+            .expect("pixmap");
             let mut min_x = width;
             let mut min_y = height;
             let mut max_x = 0;

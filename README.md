@@ -69,4 +69,6 @@ Settings are stored at:
 ```
 
 The config format is shared with the Tauri implementation, so existing overlay
-settings are migrated automatically.
+settings are migrated automatically. Each overlay can optionally enable **Smooth
+rendering** and set its intermediate redraw delay in milliseconds; the graph
+continues to use the actual probe timestamps and never bridges timeout gaps.

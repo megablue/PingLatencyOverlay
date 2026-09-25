@@ -20,6 +20,12 @@ pub const DEFAULT_MAX_Y_MS: u32 = 1000;
 pub const MAX_SCALE: u32 = 10;
 /// Largest value accepted by the numeric X-axis scale input.
 pub const MAX_SCALE_INPUT: u32 = 1_000;
+/// Default delay between smooth overlay redraws.
+pub const DEFAULT_SMOOTH_DELAY_MS: u32 = 16;
+/// Smallest allowed smooth redraw delay.
+pub const MIN_SMOOTH_DELAY_MS: u32 = 1;
+/// Largest allowed smooth redraw delay.
+pub const MAX_SMOOTH_DELAY_MS: u32 = 1_000;
 /// Default gap between the overlay and the screen edge, in logical pixels.
 pub const DEFAULT_MARGIN_PX: u32 = 20;
 /// Default overlay background color.
@@ -63,6 +69,12 @@ pub struct OverlayConfig {
     /// Visual scale multiplier: pixels per tick.
     #[serde(default = "default_scale")]
     pub scale: u32,
+    /// Continuously redraw the graph between timestamped samples.
+    #[serde(default)]
+    pub smooth_rendering: bool,
+    /// Delay between smooth redraws, in milliseconds.
+    #[serde(default = "default_smooth_delay_ms")]
+    pub smooth_delay_ms: u32,
     /// Ping timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u32,
@@ -135,6 +147,8 @@ impl OverlayConfig {
             position: Anchor::TopRight,
             window_seconds: default_window_seconds(),
             scale: default_scale(),
+            smooth_rendering: false,
+            smooth_delay_ms: default_smooth_delay_ms(),
             timeout_ms: default_timeout_ms(),
             graph_height_px: default_graph_height_px(),
             max_y_ms: default_max_y_ms(),
@@ -175,6 +189,9 @@ fn default_window_seconds() -> u32 {
 fn default_scale() -> u32 {
     2
 }
+fn default_smooth_delay_ms() -> u32 {
+    DEFAULT_SMOOTH_DELAY_MS
+}
 fn default_timeout_ms() -> u32 {
     DEFAULT_TIMEOUT_MS
 }
@@ -200,6 +217,9 @@ impl Config {
         for o in &mut self.overlays {
             o.window_seconds = o.window_seconds.max(MIN_WINDOW_SECONDS);
             o.scale = o.scale.clamp(1, MAX_SCALE_INPUT);
+            o.smooth_delay_ms = o
+                .smooth_delay_ms
+                .clamp(MIN_SMOOTH_DELAY_MS, MAX_SMOOTH_DELAY_MS);
             if o.timeout_ms == 0 {
                 o.timeout_ms = DEFAULT_TIMEOUT_MS;
             }
@@ -260,11 +280,22 @@ mod tests {
         assert_eq!(overlay.name, "New overlay");
         assert!(overlay.enabled);
         assert_eq!(overlay.scale, 2);
+        assert!(!overlay.smooth_rendering);
+        assert_eq!(overlay.smooth_delay_ms, DEFAULT_SMOOTH_DELAY_MS);
         assert_eq!(overlay.timeout_ms, 1_000);
         assert_eq!(overlay.graph_height_px, 60);
         assert_eq!(overlay.max_y_ms, 1_000);
         assert_eq!(overlay.margin_px, 20);
         assert_eq!(overlay.bg_opacity, 0);
+    }
+
+    #[test]
+    fn legacy_overlay_config_gets_smooth_defaults() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert!(!overlay.smooth_rendering);
+        assert_eq!(overlay.smooth_delay_ms, DEFAULT_SMOOTH_DELAY_MS);
     }
 
     #[test]
@@ -285,6 +316,7 @@ mod tests {
             overlays: vec![OverlayConfig {
                 window_seconds: 1,
                 scale: MAX_SCALE_INPUT + 1,
+                smooth_delay_ms: 0,
                 timeout_ms: 0,
                 graph_height_px: 1,
                 max_y_ms: 0,
@@ -297,6 +329,7 @@ mod tests {
         let overlay = &config.overlays[0];
         assert_eq!(overlay.window_seconds, MIN_WINDOW_SECONDS);
         assert_eq!(overlay.scale, MAX_SCALE_INPUT);
+        assert_eq!(overlay.smooth_delay_ms, MIN_SMOOTH_DELAY_MS);
         assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);

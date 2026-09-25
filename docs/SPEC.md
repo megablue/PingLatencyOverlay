@@ -27,6 +27,9 @@
     = 120 px).
   - The graph fills the window's actual size, so the effective pixels-per-tick is
     `viewport / windowSeconds` (see the DPI note in `AGENTS.md`).
+  - Optional smooth rendering scrolls the timestamped graph between probe
+    samples. The per-overlay smooth delay controls the intermediate redraw
+    interval in milliseconds; timeout gaps are never interpolated.
 - Y axis:
   - Height is configurable (`graphHeightPx`, default 60 px).
   - Ceiling is configurable (`maxYMs`, default 1000 ms); pings above it clamp to

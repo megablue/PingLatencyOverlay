@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Anchor, Config, OverlayConfig};
 use crate::probes::SampleStore;
-use crate::render::render_graph;
+use crate::render::{render_graph_into, SamplePoint};
 
 #[cfg(windows)]
 #[allow(non_snake_case, clippy::upper_case_acronyms)]
@@ -179,8 +179,8 @@ use win::{
     DestroyWindow, GetDC, GetDpiForSystem, GetModuleHandleW, GetMonitorInfoW, GetStockObject,
     MonitorFromPoint, RegisterClassW, ReleaseDC, SelectObject, SetProcessDpiAwarenessContext,
     SetWindowPos, ShowWindow, UnregisterClassW, UpdateLayeredWindow, UpdateWindow, ValidateRect,
-    BITMAPINFO, BLENDFUNCTION, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, POINT, RECT,
-    SIZE, UINT, WNDCLASSW, WPARAM,
+    BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, POINT,
+    RECT, SIZE, UINT, WNDCLASSW, WPARAM,
 };
 
 #[cfg(windows)]
@@ -250,11 +250,159 @@ pub fn enable_dpi_awareness() {
 struct OverlayWindow {
     hwnd: HWND,
     config: OverlayConfig,
-    samples: Vec<Option<u32>>,
+    samples: Vec<SamplePoint>,
+    pixels: Vec<u8>,
     sample_generation: u64,
     size: (i32, i32),
     position: (i32, i32),
     dirty: bool,
+    last_rendered: Instant,
+    surface: LayeredSurface,
+}
+
+// Keep the DIB, source DC, and BGRA staging buffer alive for the lifetime of
+// an overlay. Smooth mode can call UpdateLayeredWindow at display frequency;
+// recreating these GDI objects for every frame would needlessly stress the
+// graphics subsystem.
+struct LayeredSurface {
+    size: (i32, i32),
+    screen_dc: HDC,
+    memory_dc: HDC,
+    bitmap: HGDIOBJ,
+    old_object: HGDIOBJ,
+    bits: HGDIOBJ,
+    bgra: Vec<u8>,
+}
+
+impl LayeredSurface {
+    fn new(size: (i32, i32)) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        if size.0 <= 0 || size.1 <= 0 {
+            return Err("layered surface has invalid dimensions".into());
+        }
+
+        unsafe {
+            let screen_dc = GetDC(ptr::null_mut());
+            if screen_dc.is_null() {
+                return Err("GetDC failed for layered surface".into());
+            }
+            let memory_dc = CreateCompatibleDC(screen_dc);
+            if memory_dc.is_null() {
+                ReleaseDC(ptr::null_mut(), screen_dc);
+                return Err("CreateCompatibleDC failed for layered surface".into());
+            }
+
+            let mut bitmap_info: BITMAPINFO = zeroed();
+            bitmap_info.bmiHeader.biSize =
+                size_of::<crate::overlay::win::BITMAPINFOHEADER>() as u32;
+            bitmap_info.bmiHeader.biWidth = size.0;
+            bitmap_info.bmiHeader.biHeight = -size.1;
+            bitmap_info.bmiHeader.biPlanes = 1;
+            bitmap_info.bmiHeader.biBitCount = 32;
+            bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+            let mut bits: HGDIOBJ = ptr::null_mut();
+            let bitmap = CreateDIBSection(
+                screen_dc,
+                &bitmap_info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                ptr::null_mut(),
+                0,
+            );
+            if bitmap.is_null() {
+                DeleteDC(memory_dc);
+                ReleaseDC(ptr::null_mut(), screen_dc);
+                return Err("CreateDIBSection failed for layered surface".into());
+            }
+            if bits.is_null() {
+                DeleteObject(bitmap);
+                DeleteDC(memory_dc);
+                ReleaseDC(ptr::null_mut(), screen_dc);
+                return Err("CreateDIBSection returned no pixels".into());
+            }
+
+            let old_object = SelectObject(memory_dc, bitmap);
+            if old_object.is_null() {
+                DeleteObject(bitmap);
+                DeleteDC(memory_dc);
+                ReleaseDC(ptr::null_mut(), screen_dc);
+                return Err("SelectObject failed for layered surface".into());
+            }
+
+            let byte_len = (size.0 as usize)
+                .saturating_mul(size.1 as usize)
+                .saturating_mul(4);
+            Ok(Self {
+                size,
+                screen_dc,
+                memory_dc,
+                bitmap,
+                old_object,
+                bits,
+                bgra: vec![0; byte_len],
+            })
+        }
+    }
+
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn update(&mut self, hwnd: HWND, position: (i32, i32), rgba: &[u8]) -> bool {
+        if rgba.len() != self.bgra.len() {
+            return false;
+        }
+        for (src, dst) in rgba.chunks_exact(4).zip(self.bgra.chunks_exact_mut(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+
+        unsafe {
+            ptr::copy_nonoverlapping(self.bgra.as_ptr(), self.bits.cast::<u8>(), self.bgra.len());
+            let destination = POINT {
+                x: position.0,
+                y: position.1,
+            };
+            let source = POINT { x: 0, y: 0 };
+            let window_size = SIZE {
+                cx: self.size.0,
+                cy: self.size.1,
+            };
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA,
+            };
+            UpdateLayeredWindow(
+                hwnd,
+                self.screen_dc,
+                &destination,
+                &window_size,
+                self.memory_dc,
+                &source,
+                0,
+                &blend,
+                ULW_ALPHA,
+            ) != 0
+        }
+    }
+}
+
+impl Drop for LayeredSurface {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.memory_dc.is_null() {
+                if !self.old_object.is_null() {
+                    SelectObject(self.memory_dc, self.old_object);
+                }
+                DeleteObject(self.bitmap);
+                DeleteDC(self.memory_dc);
+            }
+            if !self.screen_dc.is_null() {
+                ReleaseDC(ptr::null_mut(), self.screen_dc);
+            }
+        }
+    }
 }
 
 pub struct OverlayManager {
@@ -289,8 +437,9 @@ impl OverlayManager {
         })
     }
 
-    /// Reconcile native windows and redraw only when config or samples changed.
-    pub fn apply(&mut self, config: &Config, samples: &SampleStore) {
+    /// Reconcile native windows and redraw when config, samples, or a smooth
+    /// overlay's configured redraw deadline requires it.
+    pub fn apply(&mut self, config: &Config, samples: &SampleStore, running: bool) {
         let wanted: HashSet<String> = config
             .overlays
             .iter()
@@ -365,12 +514,25 @@ impl OverlayManager {
                 window.samples = sample_buffer;
                 window.sample_generation = sample_generation;
             }
+            let surface_changed = window.surface.size != size;
+            if surface_changed {
+                match LayeredSurface::new(size) {
+                    Ok(surface) => window.surface = surface,
+                    Err(error) => {
+                        log::error!("failed to resize overlay {}: {error}", overlay.id);
+                        continue;
+                    }
+                }
+            }
             window.size = size;
             window.position = position;
-            if changed {
-                if let Some(window) = self.windows.get_mut(&overlay.id) {
-                    Self::render_window(window);
-                }
+            let smooth = running && window.config.smooth_rendering;
+            let smooth_delay = window.config.smooth_delay_ms.max(1);
+            let smooth_due = smooth
+                && window.last_rendered.elapsed() >= Duration::from_millis(smooth_delay as u64);
+            if changed || surface_changed || smooth_due {
+                Self::render_window(window, smooth);
+                window.last_rendered = Instant::now();
             }
         }
 
@@ -412,20 +574,32 @@ impl OverlayManager {
         if hwnd.is_null() {
             return Err("CreateWindowExW failed".into());
         }
+        let surface = match LayeredSurface::new(size) {
+            Ok(surface) => surface,
+            Err(error) => {
+                unsafe {
+                    DestroyWindow(hwnd);
+                }
+                return Err(error);
+            }
+        };
 
         let mut window = OverlayWindow {
             hwnd,
             config: config.clone(),
             samples: Vec::new(),
+            pixels: Vec::new(),
             sample_generation: 0,
             size,
             position,
             dirty: true,
+            last_rendered: Instant::now(),
+            surface,
         };
         // Give the layered window its first surface before making it visible.
         // Otherwise Windows can briefly retain the class background (white)
         // behind a fully transparent first frame.
-        Self::render_window(&mut window);
+        Self::render_window(&mut window, false);
 
         unsafe {
             SetWindowPos(
@@ -443,16 +617,22 @@ impl OverlayManager {
         Ok(window)
     }
 
-    fn render_window(window: &mut OverlayWindow) {
-        let Some(rgba) = render_graph(
+    fn render_window(window: &mut OverlayWindow, smooth: bool) {
+        if !render_graph_into(
             window.size.0.max(1) as u32,
             window.size.1.max(1) as u32,
             &window.config,
             &window.samples,
-        ) else {
+            Instant::now(),
+            smooth,
+            &mut window.pixels,
+        ) {
             return;
-        };
-        if update_layered_window(window.hwnd, window.position, window.size, &rgba) {
+        }
+        if window
+            .surface
+            .update(window.hwnd, window.position, &window.pixels)
+        {
             window.dirty = false;
         }
     }
@@ -487,101 +667,6 @@ unsafe extern "system" fn overlay_wnd_proc(
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-#[cfg(windows)]
-#[allow(clippy::chunks_exact_to_as_chunks)]
-fn update_layered_window(hwnd: HWND, position: (i32, i32), size: (i32, i32), rgba: &[u8]) -> bool {
-    if size.0 <= 0 || size.1 <= 0 {
-        return false;
-    }
-    let mut bgra = vec![0u8; rgba.len()];
-    for (src, dst) in rgba.chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
-        dst[0] = src[2];
-        dst[1] = src[1];
-        dst[2] = src[0];
-        dst[3] = src[3];
-    }
-
-    unsafe {
-        let screen_dc = GetDC(ptr::null_mut());
-        if screen_dc.is_null() {
-            return false;
-        }
-        let memory_dc = CreateCompatibleDC(screen_dc);
-        if memory_dc.is_null() {
-            ReleaseDC(ptr::null_mut(), screen_dc);
-            return false;
-        }
-
-        let mut bitmap_info: BITMAPINFO = zeroed();
-        bitmap_info.bmiHeader.biSize = size_of::<crate::overlay::win::BITMAPINFOHEADER>() as u32;
-        bitmap_info.bmiHeader.biWidth = size.0;
-        bitmap_info.bmiHeader.biHeight = -size.1;
-        bitmap_info.bmiHeader.biPlanes = 1;
-        bitmap_info.bmiHeader.biBitCount = 32;
-        bitmap_info.bmiHeader.biCompression = BI_RGB;
-
-        let mut bits: HGDIOBJ = ptr::null_mut();
-        let bitmap = CreateDIBSection(
-            screen_dc,
-            &bitmap_info,
-            DIB_RGB_COLORS,
-            &mut bits,
-            ptr::null_mut(),
-            0,
-        );
-        if bitmap.is_null() || bits.is_null() {
-            DeleteDC(memory_dc);
-            ReleaseDC(ptr::null_mut(), screen_dc);
-            return false;
-        }
-
-        let old_object = SelectObject(memory_dc, bitmap);
-        if old_object.is_null() {
-            DeleteObject(bitmap);
-            DeleteDC(memory_dc);
-            ReleaseDC(ptr::null_mut(), screen_dc);
-            return false;
-        }
-        let byte_len = (size.0 as usize)
-            .saturating_mul(size.1 as usize)
-            .saturating_mul(4);
-        ptr::copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), byte_len);
-
-        let destination = POINT {
-            x: position.0,
-            y: position.1,
-        };
-        let source = POINT { x: 0, y: 0 };
-        let window_size = SIZE {
-            cx: size.0,
-            cy: size.1,
-        };
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA,
-        };
-        let result = UpdateLayeredWindow(
-            hwnd,
-            screen_dc,
-            &destination,
-            &window_size,
-            memory_dc,
-            &source,
-            0,
-            &blend,
-            ULW_ALPHA,
-        );
-
-        SelectObject(memory_dc, old_object);
-        DeleteObject(bitmap);
-        DeleteDC(memory_dc);
-        ReleaseDC(ptr::null_mut(), screen_dc);
-        result != 0
     }
 }
 

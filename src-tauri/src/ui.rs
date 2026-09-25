@@ -381,7 +381,21 @@ impl PingApp {
     }
 
     fn sync_overlays(&mut self) {
-        self.overlays.apply(&self.config, self.probes.samples());
+        self.overlays
+            .apply(&self.config, self.probes.samples(), self.running);
+    }
+
+    fn repaint_interval(&self) -> Duration {
+        if !self.running {
+            return REPAINT_INTERVAL;
+        }
+        self.config
+            .overlays
+            .iter()
+            .filter(|overlay| overlay.enabled && overlay.smooth_rendering)
+            .map(|overlay| Duration::from_millis(overlay.smooth_delay_ms.max(1) as u64))
+            .min()
+            .unwrap_or(REPAINT_INTERVAL)
     }
 
     fn apply_saved_config(&mut self, next: Config) {
@@ -737,7 +751,7 @@ impl App for PingApp {
             return;
         }
         self.sync_overlays();
-        ctx.request_repaint_after(REPAINT_INTERVAL);
+        ctx.request_repaint_after(self.repaint_interval());
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -955,6 +969,36 @@ fn edit_overlay(
                     .changed()
                 {
                     overlay.margin_px = margin.clamp(0, 10_000) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Smooth rendering");
+                if ui
+                    .checkbox(&mut overlay.smooth_rendering, "Enabled")
+                    .changed()
+                {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Smooth delay (ms)").on_hover_text(
+                    "Delay between intermediate graph redraws; 16 ms is about 60 FPS.",
+                );
+                let mut smooth_delay = overlay.smooth_delay_ms as i64;
+                if ui
+                    .add_enabled(
+                        overlay.smooth_rendering,
+                        egui::DragValue::new(&mut smooth_delay).range(
+                            config::MIN_SMOOTH_DELAY_MS as i64..=config::MAX_SMOOTH_DELAY_MS as i64,
+                        ),
+                    )
+                    .changed()
+                {
+                    overlay.smooth_delay_ms = smooth_delay.clamp(
+                        config::MIN_SMOOTH_DELAY_MS as i64,
+                        config::MAX_SMOOTH_DELAY_MS as i64,
+                    ) as u32;
                     *changed = true;
                 }
                 ui.end_row();

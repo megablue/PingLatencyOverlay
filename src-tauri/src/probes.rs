@@ -1,13 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use crate::config::{Config, OverlayConfig};
 use crate::probe;
+use crate::render::SamplePoint;
 
 /// One graph tick is one second. Probe tasks keep their own cadence and are
 /// never restarted just because the user saved a style or graph setting.
@@ -16,7 +17,7 @@ const MAX_BUFFERED_SAMPLES: usize = 86_400;
 
 #[derive(Default)]
 pub struct SampleBuffer {
-    pub values: VecDeque<Option<u32>>,
+    pub values: VecDeque<SamplePoint>,
     pub generation: u64,
 }
 
@@ -125,7 +126,10 @@ async fn probe_loop(
                 let latency = probe::measure(&overlay.probe, overlay.timeout_ms).await;
                 let mut all_samples = samples.lock().unwrap();
                 let buffer = all_samples.entry(id.clone()).or_default();
-                buffer.values.push_back(latency);
+                buffer.values.push_back(SamplePoint {
+                    value: latency,
+                    timestamp: Instant::now(),
+                });
                 buffer.generation = buffer.generation.wrapping_add(1);
                 while buffer.values.len() > MAX_BUFFERED_SAMPLES {
                     buffer.values.pop_front();
