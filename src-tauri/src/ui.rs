@@ -94,6 +94,183 @@ fn explorer_dark_visuals() -> egui::Visuals {
     visuals
 }
 
+const POSITION_PICKER_SIZE: f32 = 220.0;
+const POSITION_PICKER_DISPLAY_SIZE: f32 = 180.0;
+const POSITION_PICKER_PADDING: f32 = 4.0;
+const POSITION_PICKER_CELL_SIZE: f32 = 40.0;
+const POSITION_PICKER_GAP: f32 = 46.0;
+
+struct PositionPicker {
+    default_texture: egui::TextureHandle,
+    hover_texture: egui::TextureHandle,
+    selected_texture: egui::TextureHandle,
+}
+
+impl PositionPicker {
+    fn new(ctx: &Context) -> Self {
+        Self {
+            default_texture: load_position_texture(
+                ctx,
+                "position-picker-default",
+                include_bytes!("../../assets/overlay-position-ui-default.png"),
+            ),
+            hover_texture: load_position_texture(
+                ctx,
+                "position-picker-hover",
+                include_bytes!("../../assets/overlay-position-ui-hover.png"),
+            ),
+            selected_texture: load_position_texture(
+                ctx,
+                "position-picker-selected",
+                include_bytes!("../../assets/overlay-position-ui-selected.png"),
+            ),
+        }
+    }
+
+    fn show(&self, ui: &mut Ui, current: Anchor) -> Option<Anchor> {
+        let display_size = ui
+            .available_width()
+            .clamp(1.0, POSITION_PICKER_DISPLAY_SIZE);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(display_size, display_size), egui::Sense::click());
+        let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        ui.painter()
+            .image(self.default_texture.id(), rect, full_uv, Color32::WHITE);
+
+        let hovered = response
+            .hover_pos()
+            .and_then(|point| position_cell_at(rect, point));
+        if let Some(index) = hovered {
+            let cell_rect = position_cell_rect(rect, index);
+            ui.painter().image(
+                self.hover_texture.id(),
+                cell_rect,
+                position_cell_uv(index),
+                Color32::WHITE,
+            );
+        }
+
+        let selected = position_index(current);
+        let selected_rect = position_cell_rect(rect, selected);
+        ui.painter().image(
+            self.selected_texture.id(),
+            selected_rect,
+            position_cell_uv(selected),
+            Color32::WHITE,
+        );
+        ui.painter().rect_stroke(
+            selected_rect,
+            8.0,
+            egui::Stroke::new(1.5, UI_ACCENT),
+            egui::StrokeKind::Inside,
+        );
+
+        let clicked_anchor = response
+            .clicked()
+            .then(|| response.hover_pos())
+            .flatten()
+            .and_then(|point| position_cell_at(rect, point))
+            .map(position_anchor);
+        if let Some(index) = hovered {
+            response.on_hover_text(position_name(position_anchor(index)));
+        }
+        clicked_anchor
+    }
+}
+
+fn load_position_texture(ctx: &Context, name: &str, bytes: &[u8]) -> egui::TextureHandle {
+    let image = image::load_from_memory(bytes)
+        .expect("bundled position picker asset must be valid")
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    ctx.load_texture(
+        name,
+        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+        egui::TextureOptions::LINEAR,
+    )
+}
+
+fn position_index(anchor: Anchor) -> usize {
+    match anchor {
+        Anchor::TopLeft => 0,
+        Anchor::TopCenter => 1,
+        Anchor::TopRight => 2,
+        Anchor::CenterLeft => 3,
+        Anchor::Center => 4,
+        Anchor::CenterRight => 5,
+        Anchor::BottomLeft => 6,
+        Anchor::BottomCenter => 7,
+        Anchor::BottomRight => 8,
+    }
+}
+
+fn position_anchor(index: usize) -> Anchor {
+    match index {
+        0 => Anchor::TopLeft,
+        1 => Anchor::TopCenter,
+        2 => Anchor::TopRight,
+        3 => Anchor::CenterLeft,
+        4 => Anchor::Center,
+        5 => Anchor::CenterRight,
+        6 => Anchor::BottomLeft,
+        7 => Anchor::BottomCenter,
+        _ => Anchor::BottomRight,
+    }
+}
+
+fn position_cell_at(rect: egui::Rect, point: egui::Pos2) -> Option<usize> {
+    let scale_x = rect.width() / POSITION_PICKER_SIZE;
+    let scale_y = rect.height() / POSITION_PICKER_SIZE;
+    let x = (point.x - rect.left()) / scale_x;
+    let y = (point.y - rect.top()) / scale_y;
+    if !(0.0..POSITION_PICKER_SIZE).contains(&x) || !(0.0..POSITION_PICKER_SIZE).contains(&y) {
+        return None;
+    }
+
+    for index in 0..9 {
+        let cell = position_cell_rect(
+            egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(POSITION_PICKER_SIZE, POSITION_PICKER_SIZE),
+            ),
+            index,
+        );
+        if cell.contains(egui::pos2(x, y)) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn position_cell_rect(bounds: egui::Rect, index: usize) -> egui::Rect {
+    let column = (index % 3) as f32;
+    let row = (index / 3) as f32;
+    let x = POSITION_PICKER_PADDING + column * (POSITION_PICKER_CELL_SIZE + POSITION_PICKER_GAP);
+    let y = POSITION_PICKER_PADDING + row * (POSITION_PICKER_CELL_SIZE + POSITION_PICKER_GAP);
+    let scale = bounds.width() / POSITION_PICKER_SIZE;
+    egui::Rect::from_min_size(
+        bounds.min + egui::vec2(x * scale, y * scale),
+        egui::vec2(
+            POSITION_PICKER_CELL_SIZE * scale,
+            POSITION_PICKER_CELL_SIZE * scale,
+        ),
+    )
+}
+
+fn position_cell_uv(index: usize) -> egui::Rect {
+    let column = (index % 3) as f32;
+    let row = (index / 3) as f32;
+    let x = POSITION_PICKER_PADDING + column * (POSITION_PICKER_CELL_SIZE + POSITION_PICKER_GAP);
+    let y = POSITION_PICKER_PADDING + row * (POSITION_PICKER_CELL_SIZE + POSITION_PICKER_GAP);
+    egui::Rect::from_min_max(
+        egui::pos2(x / POSITION_PICKER_SIZE, y / POSITION_PICKER_SIZE),
+        egui::pos2(
+            (x + POSITION_PICKER_CELL_SIZE) / POSITION_PICKER_SIZE,
+            (y + POSITION_PICKER_CELL_SIZE) / POSITION_PICKER_SIZE,
+        ),
+    )
+}
+
 pub struct PingApp {
     config: Config,
     selected_id: Option<String>,
@@ -104,6 +281,7 @@ pub struct PingApp {
     probes: ProbeManager,
     overlays: OverlayManager,
     tray: TrayState,
+    position_picker: PositionPicker,
     _runtime: Option<tokio::runtime::Runtime>,
     quitting: bool,
 }
@@ -114,6 +292,7 @@ impl PingApp {
         cc.egui_ctx.global_style_mut(|style| {
             style.spacing.scroll.foreground_color = false;
         });
+        let position_picker = PositionPicker::new(&cc.egui_ctx);
         let config = config::load();
         let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
@@ -145,6 +324,7 @@ impl PingApp {
             probes,
             overlays,
             tray,
+            position_picker,
             _runtime: Some(runtime),
             quitting: false,
         })
@@ -477,7 +657,12 @@ impl PingApp {
                 );
                 ui.add_space(8.0);
                 let mut changed = false;
-                edit_overlay(ui, &mut self.config.overlays[index], &mut changed);
+                edit_overlay(
+                    ui,
+                    &mut self.config.overlays[index],
+                    &mut changed,
+                    &self.position_picker,
+                );
                 if changed {
                     self.dirty = true;
                     self.status.clear();
@@ -563,7 +748,12 @@ impl Drop for PingApp {
     }
 }
 
-fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
+fn edit_overlay(
+    ui: &mut Ui,
+    overlay: &mut OverlayConfig,
+    changed: &mut bool,
+    position_picker: &PositionPicker,
+) {
     section(ui, "General", |ui| {
         Grid::new("general-grid")
             .num_columns(2)
@@ -755,37 +945,13 @@ fn edit_overlay(ui: &mut Ui, overlay: &mut OverlayConfig, changed: &mut bool) {
     });
 
     section(ui, "Position", |ui| {
-        Grid::new("position-grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("Position");
-                let mut position = position_name(overlay.position).to_string();
-                ComboBox::from_id_salt("position")
-                    .selected_text(position.clone())
-                    .show_ui(ui, |ui| {
-                        for (value, label) in [
-                            ("topLeft", "topLeft"),
-                            ("topCenter", "topCenter"),
-                            ("topRight", "topRight"),
-                            ("centerLeft", "centerLeft"),
-                            ("center", "center"),
-                            ("centerRight", "centerRight"),
-                            ("bottomLeft", "bottomLeft"),
-                            ("bottomCenter", "bottomCenter"),
-                            ("bottomRight", "bottomRight"),
-                        ] {
-                            ui.selectable_value(&mut position, value.to_string(), label);
-                        }
-                    });
-                if let Some(anchor) = anchor_from_name(&position) {
-                    if anchor != overlay.position {
-                        overlay.position = anchor;
-                        *changed = true;
-                    }
-                }
-                ui.end_row();
-            });
+        ui.label("Position");
+        if let Some(anchor) = position_picker.show(ui, overlay.position) {
+            if anchor != overlay.position {
+                overlay.position = anchor;
+                *changed = true;
+            }
+        }
     });
 
     section(ui, "Colors", |ui| {
@@ -886,21 +1052,6 @@ fn position_name(anchor: Anchor) -> &'static str {
         Anchor::BottomCenter => "bottomCenter",
         Anchor::BottomRight => "bottomRight",
     }
-}
-
-fn anchor_from_name(name: &str) -> Option<Anchor> {
-    Some(match name {
-        "topLeft" => Anchor::TopLeft,
-        "topCenter" => Anchor::TopCenter,
-        "topRight" => Anchor::TopRight,
-        "centerLeft" => Anchor::CenterLeft,
-        "center" => Anchor::Center,
-        "centerRight" => Anchor::CenterRight,
-        "bottomLeft" => Anchor::BottomLeft,
-        "bottomCenter" => Anchor::BottomCenter,
-        "bottomRight" => Anchor::BottomRight,
-        _ => return None,
-    })
 }
 
 pub fn run() {
