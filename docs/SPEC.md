@@ -28,8 +28,9 @@
   - The graph fills the window's actual size, so the effective pixels-per-tick is
     `viewport / windowSeconds` (see the DPI note in `AGENTS.md`).
   - Optional smooth rendering scrolls the timestamped graph between probe
-    samples. The per-overlay smooth delay controls the intermediate redraw
-    interval in milliseconds; timeout gaps are never interpolated.
+    samples. It is enabled by default at 60 FPS for new overlays and legacy
+    configs without an explicit preference; the per-overlay smooth FPS controls
+    the intermediate redraw rate, and timeout gaps are never interpolated.
 - Y axis:
   - Height is configurable (`graphHeightPx`, default 60 px).
   - Ceiling is configurable (`maxYMs`, default 1000 ms); pings above it clamp to

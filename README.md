@@ -80,5 +80,7 @@ Settings are stored at:
 
 The config format is shared with the Tauri implementation, so existing overlay
 settings are migrated automatically. Each overlay can optionally enable **Smooth
-rendering** and set its intermediate redraw delay in milliseconds; the graph
-continues to use the actual probe timestamps and never bridges timeout gaps.
+rendering** and set its target redraw rate from 1–1000 FPS; it is enabled by
+default at 60 FPS for new overlays and legacy configurations without an explicit
+preference. The graph continues to use the actual probe timestamps and never
+bridges timeout gaps.

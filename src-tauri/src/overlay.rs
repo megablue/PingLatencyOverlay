@@ -5,7 +5,7 @@ use std::mem::{size_of, zeroed};
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use crate::config::{Anchor, Config, OverlayConfig};
+use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig};
 use crate::probes::SampleStore;
 use crate::render::{render_graph_into, SamplePoint};
 
@@ -527,9 +527,9 @@ impl OverlayManager {
             window.size = size;
             window.position = position;
             let smooth = running && window.config.smooth_rendering;
-            let smooth_delay = window.config.smooth_delay_ms.max(1);
             let smooth_due = smooth
-                && window.last_rendered.elapsed() >= Duration::from_millis(smooth_delay as u64);
+                && window.last_rendered.elapsed()
+                    >= smooth_frame_interval(window.config.smooth_fps);
             if changed || surface_changed || smooth_due {
                 Self::render_window(window, smooth);
                 window.last_rendered = Instant::now();

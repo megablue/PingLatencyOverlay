@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,12 +20,12 @@ pub const DEFAULT_MAX_Y_MS: u32 = 1000;
 pub const MAX_SCALE: u32 = 10;
 /// Largest value accepted by the numeric X-axis scale input.
 pub const MAX_SCALE_INPUT: u32 = 1_000;
-/// Default delay between smooth overlay redraws.
-pub const DEFAULT_SMOOTH_DELAY_MS: u32 = 16;
-/// Smallest allowed smooth redraw delay.
-pub const MIN_SMOOTH_DELAY_MS: u32 = 1;
-/// Largest allowed smooth redraw delay.
-pub const MAX_SMOOTH_DELAY_MS: u32 = 1_000;
+/// Default smooth overlay redraw rate.
+pub const DEFAULT_SMOOTH_FPS: u32 = 60;
+/// Smallest allowed smooth redraw rate.
+pub const MIN_SMOOTH_FPS: u32 = 1;
+/// Largest allowed smooth redraw rate.
+pub const MAX_SMOOTH_FPS: u32 = 1_000;
 /// Default gap between the overlay and the screen edge, in logical pixels.
 pub const DEFAULT_MARGIN_PX: u32 = 20;
 /// Default overlay background color.
@@ -70,11 +70,14 @@ pub struct OverlayConfig {
     #[serde(default = "default_scale")]
     pub scale: u32,
     /// Continuously redraw the graph between timestamped samples.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub smooth_rendering: bool,
-    /// Delay between smooth redraws, in milliseconds.
-    #[serde(default = "default_smooth_delay_ms")]
-    pub smooth_delay_ms: u32,
+    /// Target redraw rate while smooth rendering is enabled.
+    #[serde(default = "default_smooth_fps")]
+    pub smooth_fps: u32,
+    /// Legacy millisecond setting accepted when loading older configurations.
+    #[serde(rename = "smoothDelayMs", default, skip_serializing)]
+    legacy_smooth_delay_ms: Option<u32>,
     /// Ping timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u32,
@@ -147,8 +150,9 @@ impl OverlayConfig {
             position: Anchor::TopRight,
             window_seconds: default_window_seconds(),
             scale: default_scale(),
-            smooth_rendering: false,
-            smooth_delay_ms: default_smooth_delay_ms(),
+            smooth_rendering: true,
+            smooth_fps: default_smooth_fps(),
+            legacy_smooth_delay_ms: None,
             timeout_ms: default_timeout_ms(),
             graph_height_px: default_graph_height_px(),
             max_y_ms: default_max_y_ms(),
@@ -189,9 +193,21 @@ fn default_window_seconds() -> u32 {
 fn default_scale() -> u32 {
     2
 }
-fn default_smooth_delay_ms() -> u32 {
-    DEFAULT_SMOOTH_DELAY_MS
+fn default_smooth_fps() -> u32 {
+    DEFAULT_SMOOTH_FPS
 }
+
+/// Convert a target frame rate into the interval used by the repaint scheduler.
+pub fn smooth_frame_interval(fps: u32) -> Duration {
+    let fps = fps.clamp(MIN_SMOOTH_FPS, MAX_SMOOTH_FPS);
+    Duration::from_secs_f64(1.0 / fps as f64)
+}
+
+fn smooth_fps_from_legacy_delay(delay_ms: u32) -> u32 {
+    let delay_ms = delay_ms.max(1);
+    ((1_000 + delay_ms / 2) / delay_ms).clamp(MIN_SMOOTH_FPS, MAX_SMOOTH_FPS)
+}
+
 fn default_timeout_ms() -> u32 {
     DEFAULT_TIMEOUT_MS
 }
@@ -217,9 +233,10 @@ impl Config {
         for o in &mut self.overlays {
             o.window_seconds = o.window_seconds.max(MIN_WINDOW_SECONDS);
             o.scale = o.scale.clamp(1, MAX_SCALE_INPUT);
-            o.smooth_delay_ms = o
-                .smooth_delay_ms
-                .clamp(MIN_SMOOTH_DELAY_MS, MAX_SMOOTH_DELAY_MS);
+            if let Some(delay_ms) = o.legacy_smooth_delay_ms.take() {
+                o.smooth_fps = smooth_fps_from_legacy_delay(delay_ms);
+            }
+            o.smooth_fps = o.smooth_fps.clamp(MIN_SMOOTH_FPS, MAX_SMOOTH_FPS);
             if o.timeout_ms == 0 {
                 o.timeout_ms = DEFAULT_TIMEOUT_MS;
             }
@@ -280,8 +297,8 @@ mod tests {
         assert_eq!(overlay.name, "New overlay");
         assert!(overlay.enabled);
         assert_eq!(overlay.scale, 2);
-        assert!(!overlay.smooth_rendering);
-        assert_eq!(overlay.smooth_delay_ms, DEFAULT_SMOOTH_DELAY_MS);
+        assert!(overlay.smooth_rendering);
+        assert_eq!(overlay.smooth_fps, DEFAULT_SMOOTH_FPS);
         assert_eq!(overlay.timeout_ms, 1_000);
         assert_eq!(overlay.graph_height_px, 60);
         assert_eq!(overlay.max_y_ms, 1_000);
@@ -290,12 +307,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_overlay_config_gets_smooth_defaults() {
+    fn overlay_config_without_smooth_fields_gets_defaults() {
         let overlay: OverlayConfig =
             serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
                 .expect("legacy config");
-        assert!(!overlay.smooth_rendering);
-        assert_eq!(overlay.smooth_delay_ms, DEFAULT_SMOOTH_DELAY_MS);
+        assert!(overlay.smooth_rendering);
+        assert_eq!(overlay.smooth_fps, DEFAULT_SMOOTH_FPS);
+    }
+
+    #[test]
+    fn legacy_smooth_delay_is_migrated_to_fps() {
+        let mut config: Config = serde_json::from_str(
+            r#"{"overlays":[{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"},"smoothDelayMs":8}]}"#,
+        )
+        .expect("legacy config");
+        config.normalize();
+        assert_eq!(config.overlays[0].smooth_fps, 125);
+        let serialized = serde_json::to_value(&config).expect("serialized config");
+        assert_eq!(serialized["overlays"][0]["smoothFps"], 125);
+        assert!(serialized["overlays"][0].get("smoothDelayMs").is_none());
     }
 
     #[test]
@@ -316,7 +346,7 @@ mod tests {
             overlays: vec![OverlayConfig {
                 window_seconds: 1,
                 scale: MAX_SCALE_INPUT + 1,
-                smooth_delay_ms: 0,
+                smooth_fps: 0,
                 timeout_ms: 0,
                 graph_height_px: 1,
                 max_y_ms: 0,
@@ -329,7 +359,7 @@ mod tests {
         let overlay = &config.overlays[0];
         assert_eq!(overlay.window_seconds, MIN_WINDOW_SECONDS);
         assert_eq!(overlay.scale, MAX_SCALE_INPUT);
-        assert_eq!(overlay.smooth_delay_ms, MIN_SMOOTH_DELAY_MS);
+        assert_eq!(overlay.smooth_fps, MIN_SMOOTH_FPS);
         assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);

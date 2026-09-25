@@ -400,7 +400,7 @@ impl PingApp {
             .overlays
             .iter()
             .filter(|overlay| overlay.enabled && overlay.smooth_rendering)
-            .map(|overlay| Duration::from_millis(overlay.smooth_delay_ms.max(1) as u64))
+            .map(|overlay| config::smooth_frame_interval(overlay.smooth_fps))
             .min()
             .unwrap_or(REPAINT_INTERVAL)
     }
@@ -999,23 +999,22 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Smooth delay (ms)").on_hover_text(
-                    "Delay between intermediate graph redraws; 16 ms is about 60 FPS.",
+                ui.label("Smooth FPS").on_hover_text(
+                    "Target redraw rate for the graph; this does not change the probe cadence.",
                 );
-                let mut smooth_delay = overlay.smooth_delay_ms as i64;
+                let mut smooth_fps = overlay.smooth_fps as i64;
                 if ui
                     .add_enabled(
                         overlay.smooth_rendering,
-                        egui::DragValue::new(&mut smooth_delay).range(
-                            config::MIN_SMOOTH_DELAY_MS as i64..=config::MAX_SMOOTH_DELAY_MS as i64,
-                        ),
+                        egui::DragValue::new(&mut smooth_fps)
+                            .range(config::MIN_SMOOTH_FPS as i64..=config::MAX_SMOOTH_FPS as i64)
+                            .suffix(" FPS"),
                     )
                     .changed()
                 {
-                    overlay.smooth_delay_ms = smooth_delay.clamp(
-                        config::MIN_SMOOTH_DELAY_MS as i64,
-                        config::MAX_SMOOTH_DELAY_MS as i64,
-                    ) as u32;
+                    overlay.smooth_fps = smooth_fps
+                        .clamp(config::MIN_SMOOTH_FPS as i64, config::MAX_SMOOTH_FPS as i64)
+                        as u32;
                     *changed = true;
                 }
                 ui.end_row();
