@@ -367,7 +367,7 @@ impl PingApp {
         if self.shutdown_state != ShutdownState::Running {
             return;
         }
-        for action in tray::poll() {
+        for action in self.tray.poll() {
             match action {
                 TrayAction::ToggleRunning => {
                     self.running = !self.running;
