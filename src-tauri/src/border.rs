@@ -301,7 +301,10 @@ fn blend_pixel(pixels: &mut [u8], stride: usize, x: u32, y: u32, rgb: [u8; 3], a
     if x >= stride {
         return;
     }
-    let Some(start) = y.checked_mul(stride).and_then(|row| row.checked_add(x)) else {
+    let Some(pixel_index) = y.checked_mul(stride).and_then(|row| row.checked_add(x)) else {
+        return;
+    };
+    let Some(start) = pixel_index.checked_mul(4) else {
         return;
     };
     let Some(end) = start.checked_add(4) else {
@@ -472,6 +475,15 @@ mod tests {
         assert!((0..40).any(|x| {
             first.pixel(x, 0).expect("first pixel") != second.pixel(x, 0).expect("second pixel")
         }));
+        for y in 3..27 {
+            for x in 3..37 {
+                assert_eq!(
+                    first.pixel(x, y).expect("inner pixel").alpha(),
+                    0,
+                    "unexpected noise at ({x}, {y})"
+                );
+            }
+        }
         assert_eq!(first.pixel(4, 15).expect("inner pixel").alpha(), 0);
     }
 
