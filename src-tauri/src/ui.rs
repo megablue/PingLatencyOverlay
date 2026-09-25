@@ -540,21 +540,11 @@ impl PingApp {
                                                 egui::Button::new(tab_label)
                                                     .selected(active)
                                                     .frame(false)
+                                                    .truncate()
                                                     .gap(6.0)
-                                                    .min_size(egui::vec2(0.0, 28.0)),
+                                                    .min_size(egui::vec2(row_width - 80.0, 28.0)),
                                             );
-                                            let controls_width = 56.0;
-                                            let gaps = ui.spacing().item_spacing.x * 2.0;
-                                            let spacer_width = (row_width
-                                                - name_response.rect.width()
-                                                - controls_width
-                                                - gaps)
-                                                .max(0.0);
-                                            let tab_area = ui.allocate_response(
-                                                egui::vec2(spacer_width, 28.0),
-                                                egui::Sense::click(),
-                                            );
-                                            if name_response.clicked() || tab_area.clicked() {
+                                            if name_response.clicked() {
                                                 self.selected_id = Some(id.clone());
                                             }
                                             if ui
