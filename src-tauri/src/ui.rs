@@ -879,9 +879,9 @@ pub fn run() {
         viewport: ViewportBuilder::default()
             .with_app_id("ping-latency-overlay")
             .with_title("PingLatencyOverlay - Config")
-            .with_inner_size(egui::vec2(800.0, 640.0))
-            .with_min_inner_size(egui::vec2(800.0, 480.0))
-            .with_max_inner_size(egui::vec2(800.0, 8192.0))
+            .with_inner_size(egui::vec2(640.0, 640.0))
+            .with_min_inner_size(egui::vec2(640.0, 480.0))
+            .with_max_inner_size(egui::vec2(640.0, 8192.0))
             .with_resizable(true)
             .with_visible(false)
             .with_icon(tray::app_icon()),
