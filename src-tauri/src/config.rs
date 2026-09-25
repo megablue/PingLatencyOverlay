@@ -210,6 +210,7 @@ impl OverlayConfig {
 pub enum BorderEffect {
     #[default]
     RgbLoop,
+    RgbNoise,
     Disabled,
 }
 
@@ -415,6 +416,15 @@ mod tests {
         )
         .expect("configured overlay");
         assert_eq!(overlay.startup_border_effect, BorderEffect::Disabled);
+    }
+
+    #[test]
+    fn explicit_startup_rgb_noise_is_preserved() {
+        let overlay: OverlayConfig = serde_json::from_str(
+            r#"{"id":"configured","probe":{"protocol":"icmp","host":"1.1.1.1"},"startupBorderEffect":"rgbNoise"}"#,
+        )
+        .expect("configured overlay");
+        assert_eq!(overlay.startup_border_effect, BorderEffect::RgbNoise);
     }
 
     #[test]

@@ -7,6 +7,11 @@ use crate::config::{BorderEffect, OverlayConfig};
 const BORDER_WIDTH: f32 = 3.0;
 const RGB_CYCLE_SECONDS: f32 = 3.0;
 
+/// Effect used for temporary selection activation. Startup effects are
+/// configurable per overlay; keeping this separate makes a future global
+/// activation effect reuse the same animator without changing startup logic.
+pub const SELECTED_BORDER_EFFECT: BorderEffect = BorderEffect::RgbLoop;
+
 /// Border animation is intentionally independent of the graph's Smooth FPS setting.
 pub fn border_frame_interval() -> Duration {
     Duration::from_nanos(16_666_667)
@@ -16,6 +21,7 @@ pub fn border_frame_interval() -> Duration {
 pub struct BorderVisual {
     pub effect: BorderEffect,
     pub phase: f32,
+    pub animation_time: Duration,
     pub opacity: f32,
 }
 
@@ -56,14 +62,31 @@ impl BorderAnimator {
     }
 
     pub fn update(&mut self, config: &OverlayConfig, selected: bool, now: Instant) {
+        self.update_with_selected_effect(config, selected, SELECTED_BORDER_EFFECT, now);
+    }
+
+    /// Update the animator with an explicit effect for temporary selection.
+    /// The default wrapper keeps selected tabs on RGB Loop today, while a
+    /// future global option can pass its configured effect through this path.
+    pub fn update_with_selected_effect(
+        &mut self,
+        config: &OverlayConfig,
+        selected: bool,
+        selected_effect: BorderEffect,
+        now: Instant,
+    ) {
         if selected {
             self.startup_consumed = true;
             let restart = match self.phase {
                 Phase::Inactive | Phase::Fading { .. } => true,
-                Phase::Active { selected, .. } => !selected,
+                Phase::Active {
+                    effect,
+                    selected: active_selected,
+                    ..
+                } => !active_selected || effect != selected_effect,
             };
             if restart {
-                self.activate(BorderEffect::RgbLoop, now, true, false);
+                self.activate(selected_effect, now, true, false);
             }
             return;
         }
@@ -123,6 +146,7 @@ impl BorderAnimator {
             } => Some(BorderVisual {
                 effect,
                 phase: elapsed_phase(started_at, now),
+                animation_time: now.saturating_duration_since(started_at),
                 opacity: 1.0,
             }),
             Phase::Fading {
@@ -143,6 +167,7 @@ impl BorderAnimator {
                     Some(BorderVisual {
                         effect,
                         phase: elapsed_phase(started_at, now),
+                        animation_time: now.saturating_duration_since(started_at),
                         opacity,
                     })
                 }
@@ -189,9 +214,13 @@ fn elapsed_phase(started_at: Instant, now: Instant) -> f32 {
 
 pub fn draw_border(pixmap: &mut Pixmap, width: u32, height: u32, visual: &BorderVisual) {
     match visual.effect {
-        BorderEffect::Disabled => return,
-        BorderEffect::RgbLoop => {}
+        BorderEffect::Disabled => {}
+        BorderEffect::RgbLoop => draw_solid_border(pixmap, width, height, visual),
+        BorderEffect::RgbNoise => draw_noise_border(pixmap, width, height, visual),
     }
+}
+
+fn draw_solid_border(pixmap: &mut Pixmap, width: u32, height: u32, visual: &BorderVisual) {
     if visual.opacity <= 0.0 || width < 3 || height < 3 {
         return;
     }
@@ -228,6 +257,84 @@ pub fn draw_border(pixmap: &mut Pixmap, width: u32, height: u32, visual: &Border
         Transform::identity(),
         None,
     );
+}
+
+fn draw_noise_border(pixmap: &mut Pixmap, width: u32, height: u32, visual: &BorderVisual) {
+    if visual.opacity <= 0.0 || width < 3 || height < 3 {
+        return;
+    }
+
+    let border_width = BORDER_WIDTH as u32;
+    let alpha = (visual.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let stride = width as usize;
+    let pixels = pixmap.data_mut();
+    let mut draw_pixel = |x: u32, y: u32| {
+        let rgb = rgb_noise_at(x, y, visual.animation_time);
+        blend_pixel(pixels, stride, x, y, rgb, alpha);
+    };
+
+    // Draw the top and bottom rows first, then the two side columns. Keeping
+    // the border exactly three pixels wide makes every border pixel receive
+    // its own color while avoiding corner pixels being painted twice.
+    for x in 0..width {
+        for inset in 0..border_width {
+            draw_pixel(x, inset);
+            draw_pixel(x, height - 1 - inset);
+        }
+    }
+    for y in border_width..height.saturating_sub(border_width) {
+        for x in 0..border_width {
+            draw_pixel(x, y);
+        }
+        for x in width - border_width..width {
+            draw_pixel(x, y);
+        }
+    }
+}
+
+fn blend_pixel(pixels: &mut [u8], stride: usize, x: u32, y: u32, rgb: [u8; 3], alpha: u8) {
+    if alpha == 0 {
+        return;
+    }
+    let x = x as usize;
+    let y = y as usize;
+    if x >= stride {
+        return;
+    }
+    let Some(start) = y.checked_mul(stride).and_then(|row| row.checked_add(x)) else {
+        return;
+    };
+    let Some(end) = start.checked_add(4) else {
+        return;
+    };
+    let Some(pixel) = pixels.get_mut(start..end) else {
+        return;
+    };
+
+    let inverse_alpha = 255 - alpha;
+    for channel in 0..3 {
+        let source = ((rgb[channel] as u16 * alpha as u16 + 127) / 255) as u8;
+        let destination = ((pixel[channel] as u16 * inverse_alpha as u16 + 127) / 255) as u8;
+        pixel[channel] = source.saturating_add(destination);
+    }
+    let destination_alpha = ((pixel[3] as u16 * inverse_alpha as u16 + 127) / 255) as u8;
+    pixel[3] = alpha.saturating_add(destination_alpha);
+}
+
+fn rgb_noise_at(x: u32, y: u32, animation_time: Duration) -> [u8; 3] {
+    let mut seed = (x as u64) | ((y as u64) << 32);
+    let elapsed_nanos = animation_time.as_nanos();
+    let time_seed = (elapsed_nanos as u64) ^ ((elapsed_nanos >> 64) as u64);
+    seed ^= time_seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let noise = mix_noise_seed(seed);
+    [noise as u8, (noise >> 8) as u8, (noise >> 16) as u8]
+}
+
+fn mix_noise_seed(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 fn rgb_at_phase(phase: f32) -> [u8; 3] {
@@ -302,6 +409,73 @@ mod tests {
     }
 
     #[test]
+    fn selected_activation_keeps_using_rgb_loop() {
+        let mut config = config();
+        config.startup_border_effect = BorderEffect::RgbNoise;
+        let start = Instant::now();
+        let mut animator = BorderAnimator::new();
+        animator.update(&config, true, start);
+        assert_eq!(
+            animator.visual(start).expect("selected border").effect,
+            BorderEffect::RgbLoop
+        );
+    }
+
+    #[test]
+    fn selected_effect_can_be_supplied_for_a_future_global_option() {
+        let config = config();
+        let start = Instant::now();
+        let mut animator = BorderAnimator::new();
+        animator.update_with_selected_effect(&config, true, BorderEffect::RgbNoise, start);
+        assert_eq!(
+            animator.visual(start).expect("selected border").effect,
+            BorderEffect::RgbNoise
+        );
+
+        animator.update_with_selected_effect(
+            &config,
+            true,
+            BorderEffect::RgbLoop,
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(
+            animator
+                .visual(start + Duration::from_secs(1))
+                .expect("updated border")
+                .effect,
+            BorderEffect::RgbLoop
+        );
+    }
+
+    #[test]
+    fn noise_border_uses_independent_colors_and_animates() {
+        let first_visual = BorderVisual {
+            effect: BorderEffect::RgbNoise,
+            phase: 0.0,
+            animation_time: Duration::ZERO,
+            opacity: 1.0,
+        };
+        let second_visual = BorderVisual {
+            phase: 0.25,
+            animation_time: Duration::from_millis(250),
+            ..first_visual
+        };
+        let mut first = Pixmap::new(40, 30).expect("first pixmap");
+        let mut second = Pixmap::new(40, 30).expect("second pixmap");
+        draw_border(&mut first, 40, 30, &first_visual);
+        draw_border(&mut second, 40, 30, &second_visual);
+
+        let first_row: Vec<_> = (0..40)
+            .map(|x| first.pixel(x, 0).expect("top border pixel"))
+            .collect();
+        assert!(first_row.iter().any(|pixel| *pixel != first_row[0]));
+        assert!((0..40).any(|x| {
+            first.pixel(x, 0).expect("first pixel") != second.pixel(x, 0).expect("second pixel")
+        }));
+        assert_eq!(first.pixel(4, 15).expect("inner pixel").alpha(), 0);
+    }
+
+    #[test]
     fn border_is_drawn_three_pixels_inside_the_surface() {
         let mut pixmap = Pixmap::new(40, 30).expect("pixmap");
         draw_border(
@@ -311,6 +485,7 @@ mod tests {
             &BorderVisual {
                 effect: BorderEffect::RgbLoop,
                 phase: 0.0,
+                animation_time: Duration::ZERO,
                 opacity: 1.0,
             },
         );

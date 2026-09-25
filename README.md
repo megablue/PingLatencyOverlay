@@ -88,5 +88,7 @@ real samples arrive, with a configurable prefill color and reveal duration. The
 prefill remains as cosmetic history while real samples append to the same
 rendered timeline. A selected overlay tab also activates its 3 px RGB startup
 border effect; the effect uses an independent 60 FPS animation path and defaults
-to a 5-second animation followed by a 1-second fade. Closing Config also
-deselects the active tab and fades the border out.
+to a 5-second animation followed by a 1-second fade. Startup border options
+include RGB loop and RGB Noise, which gives every border pixel its own animated
+pseudorandom color. Closing Config also deselects the active tab and fades the
+border out.

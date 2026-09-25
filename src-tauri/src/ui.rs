@@ -1160,6 +1160,11 @@ fn edit_overlay(
                     .selected_text(border_effect_label(border_effect))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut border_effect, BorderEffect::RgbLoop, "RGB loop");
+                        ui.selectable_value(
+                            &mut border_effect,
+                            BorderEffect::RgbNoise,
+                            "RGB Noise",
+                        );
                         ui.selectable_value(&mut border_effect, BorderEffect::Disabled, "Disabled");
                     });
                 if border_effect != overlay.startup_border_effect {
@@ -1255,6 +1260,7 @@ fn color_to_hex(color: Color32) -> String {
 fn border_effect_label(effect: BorderEffect) -> &'static str {
     match effect {
         BorderEffect::RgbLoop => "RGB loop",
+        BorderEffect::RgbNoise => "RGB Noise",
         BorderEffect::Disabled => "Disabled",
     }
 }
