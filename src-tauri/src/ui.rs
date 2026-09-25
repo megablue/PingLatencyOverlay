@@ -516,8 +516,14 @@ impl PingApp {
 
     fn show_status_area(&mut self, ui: &mut Ui) {
         let message = self.status.as_str();
+        let version = format!("v{}", env!("APP_BUILD_VERSION"));
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
-            ui.add(egui::Label::new(message).truncate());
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(message).truncate());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(version).color(UI_TEXT_SECONDARY));
+                });
+            });
         });
     }
 }

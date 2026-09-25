@@ -14,11 +14,15 @@ ManifestDPIAwareness PerMonitorV2
 !ifndef OUT_FILE
   !error "OUT_FILE must be supplied with /DOUT_FILE=<absolute path>"
 !endif
+!ifndef APP_VERSION
+  !error "APP_VERSION must be supplied with /DAPP_VERSION=<version>"
+!endif
+!ifndef APP_VERSIONWITHBUILD
+  !error "APP_VERSIONWITHBUILD must be supplied with /DAPP_VERSIONWITHBUILD=<version>"
+!endif
 
 !define PRODUCTNAME "PingLatencyOverlay"
 !define PUBLISHER "PingLatencyOverlay"
-!define VERSION "0.1.0"
-!define VERSIONWITHBUILD "0.1.0.0"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
 
 Name "${PRODUCTNAME}"
@@ -28,13 +32,13 @@ InstallDirRegKey HKCU "${UNINSTKEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "${VERSIONWITHBUILD}"
+VIProductVersion "${APP_VERSIONWITHBUILD}"
 VIAddVersionKey "ProductName" "${PRODUCTNAME}"
 VIAddVersionKey "FileDescription" "${PRODUCTNAME} — live network latency overlay"
 VIAddVersionKey "LegalCopyright" "Copyright (c) 2026"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
-VIAddVersionKey "FileVersion" "${VERSION}"
-VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${APP_VERSION}"
+VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 
 !define MUI_ICON "${APP_ICON}"
 !define MUI_UNICON "${APP_ICON}"
@@ -64,7 +68,7 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
-  WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "${UNINSTKEY}" "Publisher" "${PUBLISHER}"
   WriteRegStr HKCU "${UNINSTKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTKEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'

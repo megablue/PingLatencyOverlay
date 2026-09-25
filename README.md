@@ -44,8 +44,12 @@ npm run bundle
 This uses NSIS and creates:
 
 ```text
-src-tauri/target/release/bundle/nsis/PingLatencyOverlay_0.1.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/PingLatencyOverlay_<version>_x64-setup.exe
 ```
+
+The build version is derived from the current Git commit count in the form
+`MAJOR.MINOR.<commit-count>` and is shown in the Config window. If Git metadata
+is unavailable, the package version from `src-tauri/Cargo.toml` is used.
 
 For ARM64, install the MSVC ARM64 build tools and Rust target, build with
 `cargo build --release --target aarch64-pc-windows-msvc`, then run:
