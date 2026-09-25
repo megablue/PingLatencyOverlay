@@ -541,9 +541,10 @@ impl OverlayManager {
                 (generation, changed, buffer)
             };
             let (size, position) = layout_for(overlay, dpi);
+            let selected = selected_id == Some(overlay.id.as_str());
 
             if !self.windows.contains_key(&overlay.id) {
-                match self.create_window(overlay, size, position) {
+                match self.create_window(overlay, size, position, selected) {
                     Ok(window) => {
                         self.windows.insert(overlay.id.clone(), window);
                     }
@@ -558,7 +559,6 @@ impl OverlayManager {
                 continue;
             };
             let config_changed = window.config != *overlay;
-            let selected = selected_id == Some(overlay.id.as_str());
             let border_selection_changed = window.border_selected != selected;
             window.border_selected = selected;
             let changed = window.dirty
@@ -666,6 +666,7 @@ impl OverlayManager {
         config: &OverlayConfig,
         size: (i32, i32),
         position: (i32, i32),
+        selected: bool,
     ) -> Result<OverlayWindow, Box<dyn Error + Send + Sync>> {
         let title = wide(&format!("PingLatencyOverlay::{}", config.id))?;
         let hwnd = unsafe {
@@ -712,7 +713,7 @@ impl OverlayManager {
             history_points: Vec::new(),
             history_dirty: true,
             border: BorderAnimator::new(),
-            border_selected: false,
+            border_selected: selected,
             pixels: Vec::new(),
             sample_generation: 0,
             size,
@@ -721,6 +722,10 @@ impl OverlayManager {
             last_rendered: Instant::now(),
             surface,
         };
+        // Initialize the border before the first surface is rendered. This
+        // makes the configured startup effect visible on the very first frame,
+        // rather than only after the next overlay reconciliation pass.
+        window.border.update(config, selected, Instant::now());
         // Give the layered window its first surface before making it visible.
         // Otherwise Windows can briefly retain the class background (white)
         // behind a fully transparent first frame.
