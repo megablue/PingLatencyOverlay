@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use tiny_skia::{IntSize, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
+use crate::border::{self, BorderVisual};
 use crate::config::OverlayConfig;
 
 #[derive(Clone, Copy, Debug)]
@@ -19,6 +20,7 @@ pub struct SamplePoint {
 /// The native window path deliberately does not use egui or a GPU surface. This
 /// keeps alpha under our control and means each overlay consumes only a small
 /// software buffer instead of creating another renderer/context.
+#[cfg(test)]
 pub fn render_graph_into(
     width: u32,
     height: u32,
@@ -28,7 +30,21 @@ pub fn render_graph_into(
     smooth: bool,
     pixels: &mut Vec<u8>,
 ) -> bool {
-    render_graph_into_with_color(
+    render_graph_into_with_border(width, height, config, samples, now, smooth, None, pixels)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_graph_into_with_border(
+    width: u32,
+    height: u32,
+    config: &OverlayConfig,
+    samples: &[SamplePoint],
+    now: Instant,
+    smooth: bool,
+    border: Option<&BorderVisual>,
+    pixels: &mut Vec<u8>,
+) -> bool {
+    render_graph_into_internal(
         width,
         height,
         config,
@@ -36,12 +52,13 @@ pub fn render_graph_into(
         now,
         smooth,
         &config.line_color,
+        border,
         pixels,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_graph_into_with_color(
+fn render_graph_into_internal(
     width: u32,
     height: u32,
     config: &OverlayConfig,
@@ -49,6 +66,7 @@ pub fn render_graph_into_with_color(
     now: Instant,
     smooth: bool,
     line_color: &str,
+    border: Option<&BorderVisual>,
     pixels: &mut Vec<u8>,
 ) -> bool {
     if width == 0 || height == 0 {
@@ -259,6 +277,9 @@ pub fn render_graph_into_with_color(
         }
     }
 
+    if let Some(border) = border {
+        border::draw_border(&mut pixmap, width, height, border);
+    }
     *pixels = pixmap.take();
     true
 }
@@ -322,6 +343,7 @@ pub fn render_prefill_into(
     samples: &[SamplePoint],
     now: Instant,
     progress: f32,
+    border: Option<&BorderVisual>,
     points: &mut Vec<SamplePoint>,
     pixels: &mut Vec<u8>,
 ) -> bool {
@@ -329,7 +351,7 @@ pub fn render_prefill_into(
     let count = (progress * samples.len() as f32).ceil() as usize;
     points.clear();
     points.extend(samples.iter().take(count).copied());
-    render_graph_into_with_color(
+    render_graph_into_internal(
         width,
         height,
         config,
@@ -337,6 +359,7 @@ pub fn render_prefill_into(
         now,
         true,
         &config.line_color,
+        border,
         pixels,
     )
 }
@@ -481,6 +504,7 @@ mod tests {
             &samples,
             now,
             0.25,
+            None,
             &mut points,
             &mut early,
         ));
@@ -491,6 +515,7 @@ mod tests {
             &samples,
             now,
             1.0,
+            None,
             &mut points,
             &mut complete,
         ));

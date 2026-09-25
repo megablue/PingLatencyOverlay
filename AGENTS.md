@@ -15,6 +15,7 @@ product behavior.
   - `src/overlay.rs` — native layered HWND creation, DPI/work-area layout, and
     per-window alpha compositing with `UpdateLayeredWindow`.
   - `src/render.rs` — software graph rendering into premultiplied RGBA.
+  - `src/border.rs` — runtime border-effect state and software RGB border drawing.
   - `src/ui.rs` — tray-mode egui configuration editor.
   - `src/tray.rs` — tray icon, menu, and bundled artwork.
 - `scripts/gen-icons.mjs` — generates native artwork with no dependencies.

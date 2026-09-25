@@ -86,4 +86,6 @@ preference. The graph continues to use the actual probe timestamps and never
 bridges timeout gaps. **Startup Behaviors** can show a cosmetic fake graph before
 real samples arrive, with a configurable prefill color and reveal duration. The
 prefill remains as cosmetic history while real samples append to the same
-rendered timeline.
+rendered timeline. A selected overlay tab also activates its 3 px RGB startup
+border effect; the effect uses an independent 60 FPS animation path and defaults
+to a 5-second animation followed by a 1-second fade.

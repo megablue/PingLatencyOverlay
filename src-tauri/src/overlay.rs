@@ -5,10 +5,11 @@ use std::mem::{size_of, zeroed};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use crate::border::{border_frame_interval, BorderAnimator};
 use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig};
 use crate::probes::SampleStore;
 use crate::render::{
-    cosmetic_prefill_samples, render_graph_into, render_prefill_into, SamplePoint,
+    cosmetic_prefill_samples, render_graph_into_with_border, render_prefill_into, SamplePoint,
 };
 
 #[cfg(windows)]
@@ -286,6 +287,7 @@ struct OverlayWindow {
     render_points: Vec<SamplePoint>,
     history_points: Vec<SamplePoint>,
     history_dirty: bool,
+    border: BorderAnimator,
     pixels: Vec<u8>,
     sample_generation: u64,
     size: (i32, i32),
@@ -484,9 +486,15 @@ impl OverlayManager {
         })
     }
 
-    /// Reconcile native windows and redraw when config, samples, or a smooth
-    /// overlay's configured redraw deadline requires it.
-    pub fn apply(&mut self, config: &Config, samples: &SampleStore, running: bool) {
+    /// Reconcile native windows and redraw when config, samples, smooth rendering,
+    /// prefill animation, or border animation requires it.
+    pub fn apply(
+        &mut self,
+        config: &Config,
+        samples: &SampleStore,
+        running: bool,
+        selected_id: Option<&str>,
+    ) {
         let wanted: HashSet<String> = config
             .overlays
             .iter()
@@ -589,6 +597,10 @@ impl OverlayManager {
             window.size = size;
             window.position = position;
             let now = Instant::now();
+            let selected = selected_id == Some(overlay.id.as_str());
+            let border_was_active = window.border.needs_animation();
+            window.border.update(&window.config, selected, now);
+            let border_active = window.border.needs_animation();
             let smooth = running
                 && window.config.smooth_rendering
                 && (window.sample_generation > 0
@@ -599,15 +611,21 @@ impl OverlayManager {
             let smooth_due = smooth
                 && window.last_rendered.elapsed()
                     >= smooth_frame_interval(window.config.smooth_fps);
+            let border_due = (border_active
+                && window.last_rendered.elapsed() >= border_frame_interval())
+                || border_active != border_was_active;
             let prefill_due = window.prefill.as_ref().is_some_and(|prefill| {
                 !prefill.completed_rendered
                     && (prefill.is_complete(now)
                         || window.last_rendered.elapsed()
                             >= smooth_frame_interval(window.config.smooth_fps))
             });
-            if changed || surface_changed || smooth_due || prefill_due {
-                Self::render_window(window, smooth);
-                window.last_rendered = Instant::now();
+            if changed || surface_changed || smooth_due || prefill_due || border_due {
+                if Self::render_window(window, smooth) {
+                    window.last_rendered = Instant::now();
+                } else {
+                    window.dirty = true;
+                }
             }
         }
 
@@ -630,6 +648,13 @@ impl OverlayManager {
                 Some(smooth_frame_interval(window.config.smooth_fps))
             })
             .min()
+    }
+
+    pub fn border_repaint_interval(&self) -> Option<Duration> {
+        self.windows
+            .values()
+            .any(|window| window.border.needs_animation())
+            .then(border_frame_interval)
     }
 
     fn create_window(
@@ -682,6 +707,7 @@ impl OverlayManager {
             render_points: Vec::new(),
             history_points: Vec::new(),
             history_dirty: true,
+            border: BorderAnimator::new(),
             pixels: Vec::new(),
             sample_generation: 0,
             size,
@@ -711,8 +737,9 @@ impl OverlayManager {
         Ok(window)
     }
 
-    fn render_window(window: &mut OverlayWindow, smooth: bool) {
+    fn render_window(window: &mut OverlayWindow, smooth: bool) -> bool {
         let now = Instant::now();
+        let border = window.border.visual(now);
         let prefill_was_completed = window
             .prefill
             .as_ref()
@@ -733,16 +760,17 @@ impl OverlayManager {
             .as_ref()
             .map(|prefill| prefill.progress(now))
             .unwrap_or(0.0);
-        let render_smooth = smooth || prefill_samples.is_some();
+        let render_smooth = smooth || prefill_samples.is_some() || border.is_some();
         let rendered = if let Some(samples) = prefill_samples {
             if prefill_complete {
-                render_graph_into(
+                render_graph_into_with_border(
                     window.size.0.max(1) as u32,
                     window.size.1.max(1) as u32,
                     &window.config,
                     &window.history_points,
                     now,
                     render_smooth,
+                    border.as_ref(),
                     &mut window.pixels,
                 )
             } else {
@@ -753,23 +781,25 @@ impl OverlayManager {
                     samples,
                     now,
                     prefill_progress,
+                    border.as_ref(),
                     &mut window.render_points,
                     &mut window.pixels,
                 )
             }
         } else {
-            render_graph_into(
+            render_graph_into_with_border(
                 window.size.0.max(1) as u32,
                 window.size.1.max(1) as u32,
                 &window.config,
                 &window.samples,
                 now,
                 smooth,
+                border.as_ref(),
                 &mut window.pixels,
             )
         };
         if !rendered {
-            return;
+            return false;
         }
         if window
             .surface
@@ -781,6 +811,9 @@ impl OverlayManager {
                     prefill.completed_rendered = true;
                 }
             }
+            true
+        } else {
+            false
         }
     }
 }

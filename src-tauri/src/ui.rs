@@ -6,7 +6,7 @@ use eframe::egui::{
 };
 use eframe::{App, CreationContext, NativeOptions};
 
-use crate::config::{self, Anchor, Config, OverlayConfig, ProbeConfig};
+use crate::config::{self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig};
 use crate::overlay::OverlayManager;
 use crate::probes::ProbeManager;
 use crate::tray::{self, TrayAction, TrayState};
@@ -388,8 +388,12 @@ impl PingApp {
     }
 
     fn sync_overlays(&mut self) {
-        self.overlays
-            .apply(&self.config, self.probes.samples(), self.running);
+        self.overlays.apply(
+            &self.config,
+            self.probes.samples(),
+            self.running,
+            self.selected_id.as_deref(),
+        );
     }
 
     fn repaint_interval(&self) -> Duration {
@@ -406,6 +410,7 @@ impl PingApp {
         smooth_interval
             .into_iter()
             .chain(self.overlays.prefill_repaint_interval())
+            .chain(self.overlays.border_repaint_interval())
             .min()
             .unwrap_or(REPAINT_INTERVAL)
     }
@@ -1109,6 +1114,61 @@ fn edit_overlay(
                     *changed = true;
                 }
                 ui.end_row();
+
+                ui.label("Startup border effect").on_hover_text(
+                    "The selected tab always activates the RGB loop; this controls startup only.",
+                );
+                let mut border_effect = overlay.startup_border_effect;
+                ComboBox::from_id_salt("startup-border-effect")
+                    .selected_text(border_effect_label(border_effect))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut border_effect, BorderEffect::RgbLoop, "RGB loop");
+                        ui.selectable_value(&mut border_effect, BorderEffect::Disabled, "Disabled");
+                    });
+                if border_effect != overlay.startup_border_effect {
+                    overlay.startup_border_effect = border_effect;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Border animation (sec)");
+                let mut border_animation = overlay.border_animation_sec as i64;
+                if ui
+                    .add_enabled(
+                        overlay.startup_border_effect != BorderEffect::Disabled,
+                        egui::DragValue::new(&mut border_animation)
+                            .range(
+                                config::MIN_BORDER_ANIMATION_SEC as i64
+                                    ..=config::MAX_BORDER_ANIMATION_SEC as i64,
+                            )
+                            .suffix(" sec"),
+                    )
+                    .changed()
+                {
+                    overlay.border_animation_sec = border_animation.clamp(
+                        config::MIN_BORDER_ANIMATION_SEC as i64,
+                        config::MAX_BORDER_ANIMATION_SEC as i64,
+                    ) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Border fade out (sec)");
+                let mut border_fade = overlay.border_fade_sec as i64;
+                if ui
+                    .add_enabled(
+                        overlay.startup_border_effect != BorderEffect::Disabled,
+                        egui::DragValue::new(&mut border_fade)
+                            .range(0..=config::MAX_BORDER_FADE_SEC as i64)
+                            .suffix(" sec"),
+                    )
+                    .changed()
+                {
+                    overlay.border_fade_sec =
+                        border_fade.clamp(0, config::MAX_BORDER_FADE_SEC as i64) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
             });
     });
 }
@@ -1153,6 +1213,13 @@ fn parse_color(value: &str) -> Color32 {
 fn color_to_hex(color: Color32) -> String {
     let value = color.to_array();
     format!("#{:02x}{:02x}{:02x}", value[0], value[1], value[2])
+}
+
+fn border_effect_label(effect: BorderEffect) -> &'static str {
+    match effect {
+        BorderEffect::RgbLoop => "RGB loop",
+        BorderEffect::Disabled => "Disabled",
+    }
 }
 
 fn position_indicator(anchor: Anchor) -> &'static str {

@@ -34,6 +34,16 @@ pub const DEFAULT_PREFILL_ANIMATION_SEC: u32 = 3;
 pub const MIN_PREFILL_ANIMATION_SEC: u32 = 1;
 /// Largest allowed cosmetic startup prefill animation duration, in seconds.
 pub const MAX_PREFILL_ANIMATION_SEC: u32 = 60;
+/// Default duration before a startup border effect begins fading, in seconds.
+pub const DEFAULT_BORDER_ANIMATION_SEC: u32 = 5;
+/// Smallest allowed border animation duration, in seconds.
+pub const MIN_BORDER_ANIMATION_SEC: u32 = 1;
+/// Largest allowed border animation duration, in seconds.
+pub const MAX_BORDER_ANIMATION_SEC: u32 = 60;
+/// Default border fade duration, in seconds.
+pub const DEFAULT_BORDER_FADE_SEC: u32 = 1;
+/// Largest allowed border fade duration, in seconds.
+pub const MAX_BORDER_FADE_SEC: u32 = 60;
 /// Default gap between the overlay and the screen edge, in logical pixels.
 pub const DEFAULT_MARGIN_PX: u32 = 20;
 /// Default overlay background color.
@@ -95,6 +105,15 @@ pub struct OverlayConfig {
     /// Duration of the cosmetic startup reveal, in seconds.
     #[serde(default = "default_prefill_animation_sec")]
     pub prefill_animation_sec: u32,
+    /// Border effect to play once during startup.
+    #[serde(default = "default_startup_border_effect")]
+    pub startup_border_effect: BorderEffect,
+    /// Time before a startup border effect begins fading, in seconds.
+    #[serde(default = "default_border_animation_sec")]
+    pub border_animation_sec: u32,
+    /// Duration of the border fade-out, in seconds.
+    #[serde(default = "default_border_fade_sec")]
+    pub border_fade_sec: u32,
     /// Ping timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u32,
@@ -173,6 +192,9 @@ impl OverlayConfig {
             cosmetic_startup_prefill: true,
             prefill_line_color: default_prefill_line_color(),
             prefill_animation_sec: default_prefill_animation_sec(),
+            startup_border_effect: default_startup_border_effect(),
+            border_animation_sec: default_border_animation_sec(),
+            border_fade_sec: default_border_fade_sec(),
             timeout_ms: default_timeout_ms(),
             graph_height_px: default_graph_height_px(),
             max_y_ms: default_max_y_ms(),
@@ -181,6 +203,14 @@ impl OverlayConfig {
             bg_opacity: default_bg_opacity(),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BorderEffect {
+    #[default]
+    RgbLoop,
+    Disabled,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -221,6 +251,15 @@ fn default_prefill_line_color() -> String {
 }
 fn default_prefill_animation_sec() -> u32 {
     DEFAULT_PREFILL_ANIMATION_SEC
+}
+fn default_startup_border_effect() -> BorderEffect {
+    BorderEffect::RgbLoop
+}
+fn default_border_animation_sec() -> u32 {
+    DEFAULT_BORDER_ANIMATION_SEC
+}
+fn default_border_fade_sec() -> u32 {
+    DEFAULT_BORDER_FADE_SEC
 }
 
 /// Convert a target frame rate into the interval used by the repaint scheduler.
@@ -266,6 +305,10 @@ impl Config {
             o.prefill_animation_sec = o
                 .prefill_animation_sec
                 .clamp(MIN_PREFILL_ANIMATION_SEC, MAX_PREFILL_ANIMATION_SEC);
+            o.border_animation_sec = o
+                .border_animation_sec
+                .clamp(MIN_BORDER_ANIMATION_SEC, MAX_BORDER_ANIMATION_SEC);
+            o.border_fade_sec = o.border_fade_sec.min(MAX_BORDER_FADE_SEC);
             if o.timeout_ms == 0 {
                 o.timeout_ms = DEFAULT_TIMEOUT_MS;
             }
@@ -331,6 +374,9 @@ mod tests {
         assert!(overlay.cosmetic_startup_prefill);
         assert_eq!(overlay.prefill_line_color, DEFAULT_PREFILL_LINE_COLOR);
         assert_eq!(overlay.prefill_animation_sec, DEFAULT_PREFILL_ANIMATION_SEC);
+        assert_eq!(overlay.startup_border_effect, BorderEffect::RgbLoop);
+        assert_eq!(overlay.border_animation_sec, DEFAULT_BORDER_ANIMATION_SEC);
+        assert_eq!(overlay.border_fade_sec, DEFAULT_BORDER_FADE_SEC);
         assert_eq!(overlay.timeout_ms, 1_000);
         assert_eq!(overlay.graph_height_px, 60);
         assert_eq!(overlay.max_y_ms, 1_000);
@@ -348,6 +394,9 @@ mod tests {
         assert!(overlay.cosmetic_startup_prefill);
         assert_eq!(overlay.prefill_line_color, DEFAULT_PREFILL_LINE_COLOR);
         assert_eq!(overlay.prefill_animation_sec, DEFAULT_PREFILL_ANIMATION_SEC);
+        assert_eq!(overlay.startup_border_effect, BorderEffect::RgbLoop);
+        assert_eq!(overlay.border_animation_sec, DEFAULT_BORDER_ANIMATION_SEC);
+        assert_eq!(overlay.border_fade_sec, DEFAULT_BORDER_FADE_SEC);
     }
 
     #[test]
@@ -357,6 +406,15 @@ mod tests {
         )
         .expect("configured overlay");
         assert!(!overlay.cosmetic_startup_prefill);
+    }
+
+    #[test]
+    fn explicit_startup_border_effect_is_preserved() {
+        let overlay: OverlayConfig = serde_json::from_str(
+            r#"{"id":"configured","probe":{"protocol":"icmp","host":"1.1.1.1"},"startupBorderEffect":"disabled"}"#,
+        )
+        .expect("configured overlay");
+        assert_eq!(overlay.startup_border_effect, BorderEffect::Disabled);
     }
 
     #[test]
@@ -392,6 +450,8 @@ mod tests {
                 scale: MAX_SCALE_INPUT + 1,
                 smooth_fps: 0,
                 prefill_animation_sec: 0,
+                border_animation_sec: 0,
+                border_fade_sec: MAX_BORDER_FADE_SEC + 1,
                 timeout_ms: 0,
                 graph_height_px: 1,
                 max_y_ms: 0,
@@ -406,6 +466,8 @@ mod tests {
         assert_eq!(overlay.scale, MAX_SCALE_INPUT);
         assert_eq!(overlay.smooth_fps, MIN_SMOOTH_FPS);
         assert_eq!(overlay.prefill_animation_sec, MIN_PREFILL_ANIMATION_SEC);
+        assert_eq!(overlay.border_animation_sec, MIN_BORDER_ANIMATION_SEC);
+        assert_eq!(overlay.border_fade_sec, MAX_BORDER_FADE_SEC);
         assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);

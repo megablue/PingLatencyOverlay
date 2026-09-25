@@ -1,3 +1,4 @@
+mod border;
 mod config;
 mod overlay;
 mod probe;
