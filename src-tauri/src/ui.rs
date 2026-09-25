@@ -172,7 +172,7 @@ impl PositionPicker {
             .and_then(|point| position_cell_at(rect, point))
             .map(position_anchor);
         if let Some(index) = hovered {
-            response.on_hover_text(position_name(position_anchor(index)));
+            response.on_hover_text_at_pointer(position_name(position_anchor(index)));
         }
         clicked_anchor
     }
@@ -945,7 +945,6 @@ fn edit_overlay(
     });
 
     section(ui, "Position", |ui| {
-        ui.label("Position");
         if let Some(anchor) = position_picker.show(ui, overlay.position) {
             if anchor != overlay.position {
                 overlay.position = anchor;
