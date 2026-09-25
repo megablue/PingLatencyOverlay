@@ -415,12 +415,17 @@ impl PingApp {
             .unwrap_or(REPAINT_INTERVAL)
     }
 
-    fn apply_saved_config(&mut self, next: Config) {
-        self.config = next;
-        // This updates task settings and creates/removes only the necessary
-        // native overlay HWNDs. It intentionally does not restart all probes.
+    fn apply_runtime_config(&mut self) {
+        // Apply task and HWND changes immediately without writing the draft
+        // configuration to disk. Existing probe tasks are reused by
+        // ProbeManager::apply_config.
         self.probes.apply_config(&self.config);
         self.sync_overlays();
+    }
+
+    fn apply_saved_config(&mut self, next: Config) {
+        self.config = next;
+        self.apply_runtime_config();
     }
 
     fn persist_current(&mut self) -> bool {
@@ -449,6 +454,7 @@ impl PingApp {
     }
 
     fn toggle_overlay(&mut self, id: &str) {
+        let mut changed = false;
         if let Some(overlay) = self
             .config
             .overlays
@@ -456,8 +462,12 @@ impl PingApp {
             .find(|overlay| overlay.id == id)
         {
             overlay.enabled = !overlay.enabled;
+            changed = true;
+        }
+        if changed {
             self.dirty = true;
             self.status.clear();
+            self.apply_runtime_config();
         }
     }
 
