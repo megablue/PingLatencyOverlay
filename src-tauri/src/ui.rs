@@ -271,6 +271,13 @@ fn position_cell_uv(index: usize) -> egui::Rect {
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShutdownState {
+    Running,
+    HideRequested,
+    CloseRequested,
+}
+
 pub struct PingApp {
     config: Config,
     selected_id: Option<String>,
@@ -283,7 +290,7 @@ pub struct PingApp {
     tray: TrayState,
     position_picker: PositionPicker,
     _runtime: Option<tokio::runtime::Runtime>,
-    quitting: bool,
+    shutdown_state: ShutdownState,
 }
 
 impl PingApp {
@@ -326,13 +333,13 @@ impl PingApp {
             tray,
             position_picker,
             _runtime: Some(runtime),
-            quitting: false,
+            shutdown_state: ShutdownState::Running,
         })
     }
 
     fn handle_root_close(&mut self, ctx: &Context) {
         let close_requested = ctx.input(|input| input.viewport().close_requested());
-        if close_requested && !self.quitting {
+        if close_requested && self.shutdown_state == ShutdownState::Running {
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
@@ -342,6 +349,9 @@ impl PingApp {
     }
 
     fn process_tray_events(&mut self, ctx: &Context) {
+        if self.shutdown_state != ShutdownState::Running {
+            return;
+        }
         for action in tray::poll() {
             match action {
                 TrayAction::ToggleRunning => {
@@ -361,19 +371,16 @@ impl PingApp {
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 }
                 TrayAction::Exit => {
-                    self.quitting = true;
-                    // Hide the visible Config viewport before asking eframe to
-                    // close it, so it cannot spend another frame rendering.
+                    // eframe applies viewport commands after the current frame.
+                    // Defer Close until a later logic-only pass so a visible
+                    // Config window is hidden before the viewport is destroyed.
+                    self.shutdown_state = ShutdownState::HideRequested;
                     ctx.send_viewport_cmd_to(
                         egui::ViewportId::ROOT,
                         egui::ViewportCommand::Visible(false),
                     );
-                    // Abort the async probe handles now; Drop still performs
-                    // the remaining native overlay and runtime cleanup.
                     self.probes.stop_all();
-                    // There is only one native eframe viewport. No child GPU
-                    // contexts need to close, so this exits promptly.
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                    ctx.request_repaint();
                     return;
                 }
             }
@@ -746,17 +753,27 @@ impl PingApp {
 
 impl App for PingApp {
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let was_shutting_down = self.shutdown_state != ShutdownState::Running;
         self.process_tray_events(ctx);
-        if self.quitting {
+
+        if self.shutdown_state != ShutdownState::Running {
+            if was_shutting_down && self.shutdown_state == ShutdownState::HideRequested {
+                self.shutdown_state = ShutdownState::CloseRequested;
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                // Close is delivered as a viewport event, so request the
+                // following logic-only pass to observe it.
+                ctx.request_repaint();
+            }
             return;
         }
+
         self.sync_overlays();
         ctx.request_repaint_after(self.repaint_interval());
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_root_close(ui.ctx());
-        if self.quitting {
+        if self.shutdown_state != ShutdownState::Running {
             return;
         }
         self.config_ui(ui);
