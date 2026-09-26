@@ -46,6 +46,9 @@ Installer (run from the repository root):
 - Config lives at `~/.config/.PingLatencyOverlay/config.json`. When that file is
   missing, `config.rs` migrates `~/.PingLatencyOverlay/config.json` and only
   removes the legacy directory when `config.json` was its sole entry.
+- `horizontalMarginPx` and `verticalMarginPx` are signed screen-axis offsets.
+  Edge anchors measure inward from the work-area edge; centered axes measure
+  from the center. Legacy `marginPx` is mapped per anchor during normalization.
 - The bottom row of the Config window is the **status bar**
   (`show_status_bar`); transient operation messages appear there beside the
   right-aligned version label.

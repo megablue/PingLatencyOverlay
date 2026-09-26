@@ -65,8 +65,15 @@
     rotated with it.
 - Position: one of 9 anchors within the monitor's **work area** (which excludes
   the taskbar / other appbars), so bottom and right overlays aren't hidden behind
-  the taskbar. The gap from the work-area edge is configurable (`marginPx`,
-  default 20 logical px); center anchors ignore it.
+  the taskbar.
+- Position offsets are signed screen-axis values in logical pixels:
+  `horizontalMarginPx` and `verticalMarginPx`, both defaulting to 0. Edge-facing
+  axes measure inward from the work-area edge; centered axes measure from the
+  center. Positive values move right/down (or inward from an edge), and negative
+  values move left/up (or outward from an edge). Negative values may move an
+  overlay outside the work area.
+- Existing `marginPx` configurations are migrated relative to each overlay's
+  current anchor so their screen position is preserved.
 
 ## Probe (per overlay)
 - Protocol: ICMP echo or TCP connect.

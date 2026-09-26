@@ -1,47 +1,6 @@
 # PingLatencyOverlay
 
-A lightweight Windows tray application that shows live ICMP/TCP latency graphs as
-frameless, transparent, click-through overlays.
-
-Repository: https://github.com/megablue/PingLatencyOverlay
-
-The native Rust implementation currently lives on the `egui-rewrite` branch and
-uses egui/eframe; it does not use WebView2, React, or the Tauri runtime. The
-previous Tauri/React implementation remains available on the `main` branch.
-
-## Build and run
-
-From `src-tauri/`:
-
-```powershell
-cargo run
-cargo build --release
-cargo test
-cargo clippy --all-targets -- -D warnings
-```
-
-The release executable is written to:
-
-```text
-src-tauri/target/release/ping-latency-overlay.exe
-```
-
-The app starts in tray mode. Left-click the tray icon to open Config; right-click
-for Start/Pause, Config, and Exit. For development, `cargo run -- --show-config`
-opens Config immediately.
-
-The config editor is the only egui window. Overlays are independent native
-Win32 layered windows, so their alpha is composited by Windows rather than by a
-second GPU renderer. This keeps transparent/partial backgrounds reliable and
-avoids allocating a renderer for every overlay.
-
-## License
-
-PingLatencyOverlay is free software released under the GNU General Public License,
-version 3 only (`GPL-3.0-only`). Copyright (C) 2026 megablue.
-
-The complete license text is available in [`LICENSE`](LICENSE). Source code for
-released versions is available from the corresponding GitHub release/tag.
+A lightweight Windows tray application that turns ICMP and TCP latency measurements into always-on-top, transparent graphs. Overlays are frameless and click-through, run locally without telemetry, and can be placed on any monitor with configurable timing, scale, orientation, colors, and startup effects.
 
 ## Installer
 
@@ -83,17 +42,50 @@ When the new file is missing, the app migrates a legacy
 removed only when `config.json` was its only entry; any other user files are
 preserved. The Config status bar reports the migration result.
 
-The config format is shared with the Tauri implementation, so existing overlay
-settings are migrated automatically. Each overlay can optionally enable **Smooth
-rendering** and set its target redraw rate from 1–1000 FPS; it is enabled by
-default at 60 FPS for new overlays and legacy configurations without an explicit
-preference. The graph continues to use the actual probe timestamps and never
-bridges timeout gaps. **Startup Behaviors** can show a cosmetic fake graph before
-real samples arrive, with a configurable prefill color and reveal duration. The
-prefill remains as cosmetic history while real samples append to the same
-rendered timeline. A selected overlay tab also activates its 3 px RGB startup
-border effect; the effect uses an independent 60 FPS animation path and defaults
-to a 5-second animation followed by a 1-second fade. Startup border options
-include RGB loop and RGB Noise, which gives every border pixel its own animated
-pseudorandom color. Closing Config also deselects the active tab and fades the
-border out.
+## Positioning
+
+Each overlay uses a work-area anchor with independent signed screen-axis
+offsets. `Horizontal margin` and `Vertical margin` default to `0` pixels.
+On centered anchors, positive values move right/down and negative values move
+left/up. On edge-facing anchors, positive values move inward from the work-area
+edge and negative values move outward. For example, `CenterLeft` with
+`horizontal = 0` and `vertical = 0` sits at the left edge and vertically
+centered. Negative values may move an overlay outside the work area.
+
+Margins refer to screen axes, even when the graph orientation is rotated.
+Existing configurations using the old `marginPx` value are migrated relative
+to each overlay's current anchor.
+
+## Build and run
+
+From `src-tauri/`:
+
+```powershell
+cargo run
+cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+The release executable is written to:
+
+```text
+src-tauri/target/release/ping-latency-overlay.exe
+```
+
+The app starts in tray mode. Left-click the tray icon to open Config; right-click
+for Start/Pause, Config, and Exit. For development, `cargo run -- --show-config`
+opens Config immediately.
+
+The config editor is the only egui window. Overlays are independent native
+Win32 layered windows, so their alpha is composited by Windows rather than by a
+second GPU renderer. This keeps transparent/partial backgrounds reliable and
+avoids allocating a renderer for every overlay.
+
+## License
+
+PingLatencyOverlay is free software released under the GNU General Public License,
+version 3 only (`GPL-3.0-only`). Copyright (C) 2026 megablue.
+
+The complete license text is available in [`LICENSE`](LICENSE). Source code for
+released versions is available from the corresponding GitHub release/tag.

@@ -961,6 +961,52 @@ fn edit_overlay(
                 *changed = true;
             }
         }
+        Grid::new("position-offsets-grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Horizontal margin (px)").on_hover_text(
+                    "Positive shifts right on centered anchors or inward from a left/right edge; negative shifts the opposite way.",
+                );
+                let mut horizontal_margin = overlay.horizontal_margin_px as i64;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut horizontal_margin).range(
+                            config::MIN_MARGIN_OFFSET_PX as i64
+                                ..=config::MAX_MARGIN_OFFSET_PX as i64,
+                        ),
+                    )
+                    .changed()
+                {
+                    overlay.horizontal_margin_px = horizontal_margin.clamp(
+                        config::MIN_MARGIN_OFFSET_PX as i64,
+                        config::MAX_MARGIN_OFFSET_PX as i64,
+                    ) as i32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Vertical margin (px)").on_hover_text(
+                    "Positive shifts down on centered anchors or inward from a top/bottom edge; negative shifts the opposite way.",
+                );
+                let mut vertical_margin = overlay.vertical_margin_px as i64;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut vertical_margin).range(
+                            config::MIN_MARGIN_OFFSET_PX as i64
+                                ..=config::MAX_MARGIN_OFFSET_PX as i64,
+                        ),
+                    )
+                    .changed()
+                {
+                    overlay.vertical_margin_px = vertical_margin.clamp(
+                        config::MIN_MARGIN_OFFSET_PX as i64,
+                        config::MAX_MARGIN_OFFSET_PX as i64,
+                    ) as i32;
+                    *changed = true;
+                }
+                ui.end_row();
+            });
     });
 
     section(ui, "Graph", |ui| {
@@ -1057,17 +1103,6 @@ fn edit_overlay(
                         *changed = true;
                     }
                 });
-                ui.end_row();
-
-                ui.label("Margin (px)");
-                let mut margin = overlay.margin_px as i64;
-                if ui
-                    .add(egui::DragValue::new(&mut margin).range(0..=10_000))
-                    .changed()
-                {
-                    overlay.margin_px = margin.clamp(0, 10_000) as u32;
-                    *changed = true;
-                }
                 ui.end_row();
 
                 ui.label("Smooth rendering");

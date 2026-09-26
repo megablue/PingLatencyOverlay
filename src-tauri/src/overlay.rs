@@ -886,6 +886,43 @@ fn dpi_scale() -> f32 {
 }
 
 #[cfg(windows)]
+fn position_for_anchor(
+    anchor: Anchor,
+    work: RECT,
+    width: i64,
+    height: i64,
+    horizontal_margin: i64,
+    vertical_margin: i64,
+) -> (i64, i64) {
+    let left = work.left as i64;
+    let top = work.top as i64;
+    let right = work.right as i64;
+    let bottom = work.bottom as i64;
+    let center_x = left + (right - left - width) / 2;
+    let center_y = top + (bottom - top - height) / 2;
+    match anchor {
+        Anchor::TopLeft => (left + horizontal_margin, top + vertical_margin),
+        Anchor::TopCenter => (center_x + horizontal_margin, top + vertical_margin),
+        Anchor::TopRight => (right - width - horizontal_margin, top + vertical_margin),
+        Anchor::CenterLeft => (left + horizontal_margin, center_y + vertical_margin),
+        Anchor::Center => (center_x + horizontal_margin, center_y + vertical_margin),
+        Anchor::CenterRight => (
+            right - width - horizontal_margin,
+            center_y + vertical_margin,
+        ),
+        Anchor::BottomLeft => (left + horizontal_margin, bottom - height - vertical_margin),
+        Anchor::BottomCenter => (
+            center_x + horizontal_margin,
+            bottom - height - vertical_margin,
+        ),
+        Anchor::BottomRight => (
+            right - width - horizontal_margin,
+            bottom - height - vertical_margin,
+        ),
+    }
+}
+
+#[cfg(windows)]
 fn layout_for(config: &OverlayConfig, dpi_scale: f32) -> ((i32, i32), (i32, i32)) {
     let long_logical =
         (config.window_seconds.max(1) as f64 * config.scale.max(1) as f64).clamp(1.0, 8192.0);
@@ -902,37 +939,19 @@ fn layout_for(config: &OverlayConfig, dpi_scale: f32) -> ((i32, i32), (i32, i32)
         )
     };
     let size = (long_px.max(1), short_px.max(1));
-    let margin = (config.margin_px as f64 * dpi_scale as f64) as i32;
+    let horizontal_margin = (config.horizontal_margin_px as f64 * dpi_scale as f64).round() as i64;
+    let vertical_margin = (config.vertical_margin_px as f64 * dpi_scale as f64).round() as i64;
     let work = primary_work_area();
-    let left = work.left as i64;
-    let top = work.top as i64;
-    let right = work.right as i64;
-    let bottom = work.bottom as i64;
     let width = size.0 as i64;
     let height = size.1 as i64;
-    let (x, y) = match config.position {
-        Anchor::TopLeft => (left + margin as i64, top + margin as i64),
-        Anchor::TopCenter => (left + (right - left - width) / 2, top + margin as i64),
-        Anchor::TopRight => (right - width - margin as i64, top + margin as i64),
-        Anchor::CenterLeft => (left + margin as i64, top + (bottom - top - height) / 2),
-        Anchor::Center => (
-            left + (right - left - width) / 2,
-            top + (bottom - top - height) / 2,
-        ),
-        Anchor::CenterRight => (
-            right - width - margin as i64,
-            top + (bottom - top - height) / 2,
-        ),
-        Anchor::BottomLeft => (left + margin as i64, bottom - height - margin as i64),
-        Anchor::BottomCenter => (
-            left + (right - left - width) / 2,
-            bottom - height - margin as i64,
-        ),
-        Anchor::BottomRight => (
-            right - width - margin as i64,
-            bottom - height - margin as i64,
-        ),
-    };
+    let (x, y) = position_for_anchor(
+        config.position,
+        work,
+        width,
+        height,
+        horizontal_margin,
+        vertical_margin,
+    );
     (
         size,
         (
@@ -964,4 +983,42 @@ fn primary_work_area() -> RECT {
 #[cfg(windows)]
 fn wide(value: &str) -> Result<Vec<u16>, Box<dyn Error + Send + Sync>> {
     Ok(value.encode_utf16().chain(std::iter::once(0)).collect())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    fn work_area() -> RECT {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1000,
+            bottom: 800,
+        }
+    }
+
+    #[test]
+    fn signed_margins_follow_anchor_reference() {
+        assert_eq!(
+            position_for_anchor(Anchor::TopCenter, work_area(), 100, 50, 10, 20),
+            (460, 20)
+        );
+        assert_eq!(
+            position_for_anchor(Anchor::CenterLeft, work_area(), 100, 50, 0, 0),
+            (0, 375)
+        );
+        assert_eq!(
+            position_for_anchor(Anchor::TopRight, work_area(), 100, 50, -10, 5),
+            (910, 5)
+        );
+        assert_eq!(
+            position_for_anchor(Anchor::Center, work_area(), 100, 50, -10, 20),
+            (440, 395)
+        );
+        assert_eq!(
+            position_for_anchor(Anchor::BottomCenter, work_area(), 100, 50, -10, 20),
+            (440, 730)
+        );
+    }
 }

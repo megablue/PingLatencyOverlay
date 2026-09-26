@@ -44,8 +44,14 @@ pub const MAX_BORDER_ANIMATION_SEC: u32 = 60;
 pub const DEFAULT_BORDER_FADE_SEC: u32 = 1;
 /// Largest allowed border fade duration, in seconds.
 pub const MAX_BORDER_FADE_SEC: u32 = 60;
-/// Default gap between the overlay and the screen edge, in logical pixels.
-pub const DEFAULT_MARGIN_PX: u32 = 20;
+/// Default horizontal offset from the anchor reference, in logical pixels.
+pub const DEFAULT_HORIZONTAL_MARGIN_PX: i32 = 0;
+/// Default vertical offset from the anchor reference, in logical pixels.
+pub const DEFAULT_VERTICAL_MARGIN_PX: i32 = 0;
+/// Smallest allowed signed margin offset, in logical pixels.
+pub const MIN_MARGIN_OFFSET_PX: i32 = -10_000;
+/// Largest allowed signed margin offset, in logical pixels.
+pub const MAX_MARGIN_OFFSET_PX: i32 = 10_000;
 /// Default overlay background color.
 pub const DEFAULT_BG_COLOR: &str = "#0f172a";
 /// Default overlay background opacity (0 = fully transparent).
@@ -123,9 +129,15 @@ pub struct OverlayConfig {
     /// Latency ceiling in milliseconds; higher pings clamp to the top.
     #[serde(default = "default_max_y_ms")]
     pub max_y_ms: u32,
-    /// Gap between the overlay and the screen edge, in logical pixels.
-    #[serde(default = "default_margin_px")]
-    pub margin_px: u32,
+    /// Signed horizontal offset from the anchor's horizontal reference.
+    #[serde(default)]
+    pub horizontal_margin_px: i32,
+    /// Signed vertical offset from the anchor's vertical reference.
+    #[serde(default)]
+    pub vertical_margin_px: i32,
+    /// Legacy single-axis margin accepted when loading older configurations.
+    #[serde(rename = "marginPx", default, skip_serializing)]
+    legacy_margin_px: Option<u32>,
     /// Background color drawn behind the graph.
     #[serde(default = "default_bg_color")]
     pub bg_color: String,
@@ -198,7 +210,9 @@ impl OverlayConfig {
             timeout_ms: default_timeout_ms(),
             graph_height_px: default_graph_height_px(),
             max_y_ms: default_max_y_ms(),
-            margin_px: default_margin_px(),
+            horizontal_margin_px: DEFAULT_HORIZONTAL_MARGIN_PX,
+            vertical_margin_px: DEFAULT_VERTICAL_MARGIN_PX,
+            legacy_margin_px: None,
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
         }
@@ -283,14 +297,35 @@ fn default_graph_height_px() -> u32 {
 fn default_max_y_ms() -> u32 {
     DEFAULT_MAX_Y_MS
 }
-fn default_margin_px() -> u32 {
-    DEFAULT_MARGIN_PX
-}
 fn default_bg_color() -> String {
     DEFAULT_BG_COLOR.to_string()
 }
 fn default_bg_opacity() -> u32 {
     DEFAULT_BG_OPACITY
+}
+
+fn anchor_has_horizontal_edge(anchor: Anchor) -> bool {
+    matches!(
+        anchor,
+        Anchor::TopLeft
+            | Anchor::TopRight
+            | Anchor::CenterLeft
+            | Anchor::CenterRight
+            | Anchor::BottomLeft
+            | Anchor::BottomRight
+    )
+}
+
+fn anchor_has_vertical_edge(anchor: Anchor) -> bool {
+    matches!(
+        anchor,
+        Anchor::TopLeft
+            | Anchor::TopCenter
+            | Anchor::TopRight
+            | Anchor::BottomLeft
+            | Anchor::BottomCenter
+            | Anchor::BottomRight
+    )
 }
 
 impl Config {
@@ -310,6 +345,25 @@ impl Config {
                 .border_animation_sec
                 .clamp(MIN_BORDER_ANIMATION_SEC, MAX_BORDER_ANIMATION_SEC);
             o.border_fade_sec = o.border_fade_sec.min(MAX_BORDER_FADE_SEC);
+            if let Some(legacy_margin) = o.legacy_margin_px.take() {
+                let legacy_margin = legacy_margin.min(MAX_MARGIN_OFFSET_PX as u32) as i32;
+                o.horizontal_margin_px = if anchor_has_horizontal_edge(o.position) {
+                    legacy_margin
+                } else {
+                    0
+                };
+                o.vertical_margin_px = if anchor_has_vertical_edge(o.position) {
+                    legacy_margin
+                } else {
+                    0
+                };
+            }
+            o.horizontal_margin_px = o
+                .horizontal_margin_px
+                .clamp(MIN_MARGIN_OFFSET_PX, MAX_MARGIN_OFFSET_PX);
+            o.vertical_margin_px = o
+                .vertical_margin_px
+                .clamp(MIN_MARGIN_OFFSET_PX, MAX_MARGIN_OFFSET_PX);
             if o.timeout_ms == 0 {
                 o.timeout_ms = DEFAULT_TIMEOUT_MS;
             }
@@ -543,7 +597,8 @@ mod tests {
         assert_eq!(overlay.timeout_ms, 1_000);
         assert_eq!(overlay.graph_height_px, 60);
         assert_eq!(overlay.max_y_ms, 1_000);
-        assert_eq!(overlay.margin_px, 20);
+        assert_eq!(overlay.horizontal_margin_px, 0);
+        assert_eq!(overlay.vertical_margin_px, 0);
         assert_eq!(overlay.bg_opacity, 0);
     }
 
@@ -600,6 +655,52 @@ mod tests {
         let serialized = serde_json::to_value(&config).expect("serialized config");
         assert_eq!(serialized["overlays"][0]["smoothFps"], 125);
         assert!(serialized["overlays"][0].get("smoothDelayMs").is_none());
+    }
+
+    #[test]
+    fn legacy_margin_is_mapped_relative_to_each_anchor() {
+        let cases = [
+            ("topLeft", 20, 20),
+            ("topCenter", 0, 20),
+            ("topRight", 20, 20),
+            ("centerLeft", 20, 0),
+            ("center", 0, 0),
+            ("centerRight", 20, 0),
+            ("bottomLeft", 20, 20),
+            ("bottomCenter", 0, 20),
+            ("bottomRight", 20, 20),
+        ];
+        for (position, expected_horizontal, expected_vertical) in cases {
+            let raw = format!(
+                r#"{{"id":"legacy","position":"{position}","probe":{{"protocol":"icmp","host":"1.1.1.1"}},"marginPx":20}}"#
+            );
+            let overlay: OverlayConfig = serde_json::from_str(&raw).expect("legacy config");
+            let mut config = Config {
+                overlays: vec![overlay],
+            };
+            config.normalize();
+            let overlay = &config.overlays[0];
+            assert_eq!(
+                overlay.horizontal_margin_px, expected_horizontal,
+                "{position}"
+            );
+            assert_eq!(overlay.vertical_margin_px, expected_vertical, "{position}");
+        }
+    }
+
+    #[test]
+    fn legacy_margin_field_is_not_serialized_after_migration() {
+        let mut overlay = OverlayConfig::new();
+        overlay.position = Anchor::TopCenter;
+        overlay.legacy_margin_px = Some(20);
+        let mut config = Config {
+            overlays: vec![overlay],
+        };
+        config.normalize();
+        let value = serde_json::to_value(&config.overlays[0]).expect("serialized config");
+        assert!(value.get("marginPx").is_none());
+        assert_eq!(value["horizontalMarginPx"], 0);
+        assert_eq!(value["verticalMarginPx"], 20);
     }
 
     #[test]
@@ -721,6 +822,8 @@ mod tests {
                 graph_height_px: 1,
                 max_y_ms: 0,
                 orientation: 45,
+                horizontal_margin_px: MAX_MARGIN_OFFSET_PX + 1,
+                vertical_margin_px: MIN_MARGIN_OFFSET_PX - 1,
                 bg_opacity: 200,
                 ..OverlayConfig::new()
             }],
@@ -737,6 +840,8 @@ mod tests {
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);
         assert_eq!(overlay.orientation, 0);
+        assert_eq!(overlay.horizontal_margin_px, MAX_MARGIN_OFFSET_PX);
+        assert_eq!(overlay.vertical_margin_px, MIN_MARGIN_OFFSET_PX);
         assert_eq!(overlay.bg_opacity, 100);
     }
 }
