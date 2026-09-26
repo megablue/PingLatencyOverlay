@@ -29,6 +29,16 @@ const DETAIL_FOOTER_BUTTON_WIDTH: f32 = 96.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PROFILE_ROW_HEIGHT: f32 = 26.0;
 const PROFILE_ACTION_WIDTH: f32 = 200.0;
+/// Smallest width a read-only path on the Global page may shrink to.
+const STORAGE_PATH_MIN: f32 = 120.0;
+/// The Global rail glyph: `(vertical offset, knob position)`, both as a
+/// fraction of the glyph's unit. The offsets sum to zero so the glyph is
+/// centred, and the knob positions keep every knob inside its own track.
+const GLOBAL_ICON_ROWS: [(f32, f32); 3] = [(-0.28, 0.55), (0.0, -0.55), (0.28, 0.05)];
+/// Half the length of a Global glyph track, as a fraction of the unit.
+const GLOBAL_ICON_TRACK_HALF: f32 = 0.35;
+/// Radius of a Global glyph knob, as a fraction of the unit.
+const GLOBAL_ICON_KNOB_RADIUS: f32 = 0.1;
 /// Space kept free at the right of a profile row for its overlay count and the
 /// active dot, so a long name truncates instead of running under them.
 const PROFILE_ROW_TRAILING: f32 = 52.0;
@@ -386,6 +396,11 @@ pub struct PingApp {
     profile_dialog: Option<ProfileDialog>,
     profile_name_focus: bool,
     selected_id: Option<String>,
+    /// Preferences as last written to `globalconfig.json`.
+    prefs: config::GlobalPrefs,
+    /// The staged copy the Global page edits, written on Save.
+    prefs_draft: config::GlobalPrefs,
+    prefs_dirty: bool,
     config_visible: bool,
     running: bool,
     status: String,
@@ -410,6 +425,9 @@ impl PingApp {
         let config = loaded.config;
         let status = config_notices_status(&loaded.notices);
         let active_profile = loaded.active_profile;
+        // The one place the rail's collapsed state survives a restart.
+        let prefs = loaded.prefs;
+        let rail_collapsed = prefs.ui.rail_collapsed;
         let profiles = loaded.profiles;
         let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
@@ -433,7 +451,7 @@ impl PingApp {
         // is sent as soon as the app state exists.
         let mut app = Self {
             page: Page::Overlays,
-            rail_collapsed: false,
+            rail_collapsed,
             config,
             // Cloned before the id is moved into `active_profile`, so the
             // Profiles page opens on whatever is already loaded.
@@ -446,6 +464,9 @@ impl PingApp {
             profile_dialog: None,
             profile_name_focus: false,
             selected_id,
+            prefs_draft: prefs.clone(),
+            prefs,
+            prefs_dirty: false,
             config_visible: show_config,
             running,
             status,
@@ -662,14 +683,40 @@ impl PingApp {
         let _ = self.persist_current();
     }
 
+    /// Write whichever drafts are dirty.
+    ///
+    /// The profile draft and the preferences draft are independent: the Global
+    /// page stages its own copy, so one Save can carry both.
     fn save_edits(&mut self) {
-        if self.persist_current() {
+        let profile_saved = self.persist_current();
+        let prefs_saved = self.save_prefs();
+        if profile_saved || prefs_saved {
             self.status = "Saved.".to_string();
         }
     }
 
-    /// Drop unsaved edits by reloading the active profile from disk.
+    /// Store the preferences draft, leaving the active profile pointer alone.
+    fn save_prefs(&mut self) -> bool {
+        if !self.prefs_dirty {
+            return true;
+        }
+        match config::write_global_prefs(&self.prefs_draft) {
+            Ok(()) => {
+                self.prefs = self.prefs_draft.clone();
+                self.prefs_dirty = false;
+                true
+            }
+            Err(error) => {
+                self.status = format!("Could not update globalconfig.json: {error}");
+                false
+            }
+        }
+    }
+
+    /// Drop unsaved edits by reloading the active profile and the preferences
+    /// from disk.
     fn discard_edits(&mut self) {
+        self.discard_prefs();
         match config::load_profile(&self.active_profile) {
             Ok(mut stored) => {
                 stored.normalize();
@@ -684,6 +731,14 @@ impl PingApp {
                 );
             }
         }
+    }
+
+    /// Put the preferences back the way disk has them, rail included.
+    fn discard_prefs(&mut self) {
+        self.prefs = config::read_global_prefs();
+        self.prefs_draft = self.prefs.clone();
+        self.rail_collapsed = self.prefs.ui.rail_collapsed;
+        self.prefs_dirty = false;
     }
 
     /// Re-read the profile list, and with it the overlay count every profile
@@ -1438,24 +1493,79 @@ impl PingApp {
         match self.page {
             Page::Overlays => self.show_overlays_page(ui, height),
             Page::Profiles => self.show_profiles_page(ui, height),
-            page => self.show_page_placeholder(ui, page),
+            // The Global page has no list: `config_ui` drops pane 2 for it so
+            // the preferences get the full width.
+            Page::Global => {}
         }
     }
 
-    /// Stand-in for a page whose list or detail is still to come.
-    fn show_page_placeholder(&self, ui: &mut Ui, page: Page) {
-        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-            ui.label(RichText::new(page.label()).heading().color(UI_TEXT));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(format!(
-                    "The {} page arrives in a later release. The {} page still has everything.",
-                    page.label().to_lowercase(),
-                    Page::Overlays.label().to_lowercase(),
-                ))
-                .color(UI_TEXT_SECONDARY),
-            );
-        });
+    /// Pane 3 of the Global page: the app-wide preferences.
+    ///
+    /// The rail toggle applies immediately, so the user watches the rail
+    /// collapse as they click, but the value is only written when the draft is
+    /// saved, so Discard can put it back.
+    fn show_global_page(&mut self, ui: &mut Ui) {
+        let mut rail_collapsed = self.prefs_draft.ui.rail_collapsed;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Global").heading().color(UI_TEXT));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("These settings apply to the whole app, not to a profile.")
+                        .color(UI_TEXT_SECONDARY),
+                );
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("APPEARANCE").color(UI_ACCENT));
+                ui.separator();
+                let mut changed = false;
+                ui.add_enabled_ui(true, |ui| {
+                    changed = ui
+                        .checkbox(&mut rail_collapsed, "Collapse the navigation rail")
+                        .changed();
+                });
+                if changed {
+                    self.prefs_draft.ui.rail_collapsed = rail_collapsed;
+                    self.rail_collapsed = rail_collapsed;
+                    self.prefs_dirty = true;
+                }
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("STORAGE").color(UI_ACCENT));
+                ui.separator();
+                for (label, path) in [
+                    (
+                        "Config folder",
+                        config::config_dir().to_string_lossy().to_string(),
+                    ),
+                    (
+                        "Profiles",
+                        config::profiles_dir().to_string_lossy().to_string(),
+                    ),
+                    (
+                        "Global config",
+                        config::global_config_path().to_string_lossy().to_string(),
+                    ),
+                ] {
+                    ui.horizontal(|ui| {
+                        let label_width = 96.0;
+                        let gap = ui.spacing().item_spacing.x;
+                        let path_width =
+                            (ui.available_width() - label_width - gap - STORAGE_PATH_MIN).max(60.0);
+                        ui.add_sized(
+                            [label_width, 26.0],
+                            egui::Label::new(RichText::new(label).color(UI_TEXT_SECONDARY)),
+                        );
+                        ui.add_sized(
+                            [path_width, 26.0],
+                            egui::Label::new(RichText::new(&path).color(UI_TEXT)).truncate(),
+                        )
+                        .on_hover_text(path.clone());
+                    });
+                }
+            });
     }
 
     /// Profile switcher menu shown under the pane 2 header.
@@ -1759,7 +1869,7 @@ impl PingApp {
             |ui| match self.page {
                 Page::Overlays => self.show_editor(ui),
                 Page::Profiles => self.show_profile_detail(ui),
-                page => self.show_page_placeholder(ui, page),
+                Page::Global => self.show_global_page(ui),
             },
         );
         if has_footer {
@@ -2620,11 +2730,13 @@ fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: C
                 painter.rect_stroke(card, radius, stroke, egui::StrokeKind::Middle);
             }
         }
-        // Three tracks with a knob each, read as global preferences.
+        // Three tracks with a knob each, read as global preferences. The
+        // vertical offsets are symmetric around the centre and every knob sits
+        // inside the track it belongs to.
         Page::Global => {
-            let half = unit * 0.35;
-            for (row, knob) in [0.45f32, -0.35, 0.1].into_iter().enumerate() {
-                let y = center.y + row as f32 * unit * 0.28;
+            let half = GLOBAL_ICON_TRACK_HALF * unit;
+            for (row, knob) in GLOBAL_ICON_ROWS {
+                let y = center.y + row * unit;
                 painter.line_segment(
                     [
                         egui::pos2(center.x - half, y),
@@ -2633,8 +2745,8 @@ fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: C
                     stroke,
                 );
                 painter.circle_filled(
-                    egui::pos2(center.x + half * 2.0 * knob, y),
-                    unit * 0.11,
+                    egui::pos2(center.x + half * knob, y),
+                    GLOBAL_ICON_KNOB_RADIUS * unit,
                     color,
                 );
             }
@@ -2700,7 +2812,8 @@ mod tests {
     use super::{
         can_switch_profile, config_notice_status, config_notices_status, page_has_detail_footer,
         profile_name_width, profile_row_label, rail_width, selected_overlay_for_border,
-        window_title, Page, DETAIL_FOOTER_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_MARGIN,
+        window_title, Page, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
+        GLOBAL_ICON_TRACK_HALF, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_MARGIN,
         PROFILE_ROW_TRAILING, RAIL_WIDTH, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT,
         WINDOW_MIN_WIDTH,
     };
@@ -2742,6 +2855,35 @@ mod tests {
         assert!(
             used <= row_width,
             "a profile row needs {used}px but the pane offers {row_width}px"
+        );
+    }
+
+    /// The Global glyph shipped low and asymmetric, and one knob poked past
+    /// the end of its own track, so the geometry is pinned here.
+    #[test]
+    fn the_global_glyph_is_centred_and_stays_inside_its_box() {
+        let total: f32 = GLOBAL_ICON_ROWS.iter().map(|(row, _)| row).sum();
+        assert!(
+            total.abs() < f32::EPSILON,
+            "vertical offsets {GLOBAL_ICON_ROWS:?} do not sum to zero, so the glyph is not centred"
+        );
+
+        let lowest: f32 = GLOBAL_ICON_ROWS
+            .iter()
+            .map(|(row, _)| row.abs())
+            .fold(0.0, f32::max);
+        assert!(
+            lowest + GLOBAL_ICON_KNOB_RADIUS <= 0.5,
+            "the glyph reaches {lowest} of the half box, past the knob radius"
+        );
+
+        let widest: f32 = GLOBAL_ICON_ROWS
+            .iter()
+            .map(|(_, knob)| knob.abs())
+            .fold(0.0, f32::max);
+        assert!(
+            widest * GLOBAL_ICON_TRACK_HALF + GLOBAL_ICON_KNOB_RADIUS <= GLOBAL_ICON_TRACK_HALF,
+            "a knob reaches past the end of its track"
         );
     }
 

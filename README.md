@@ -62,8 +62,10 @@ profile switcher on the Overlays page and by the profile list on the Profiles
 page; the right pane shows the detail, and a pane's own actions sit in a fixed
 footer under its scrolling list. Selecting a profile in the list only selects it — the **Profiles**
 page has a separate **Switch to this profile** button, because switching is
-refused while you have unsaved edits. The **Global** page arrives in the next
-release.
+refused while you have unsaved edits. The **Global** page has no list of its
+own: it uses the full width for app-wide preferences, currently the rail's
+collapsed state plus the paths of the config folder, the profiles folder and
+`globalconfig.json`.
 
 Each profile has two names. The **display name** is what you type and what the
 window title, the switcher and the profile list show

@@ -97,7 +97,11 @@
   on. A profile renamed to a name that resolves to its own id keeps its file.
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
-  be stored.
+  be stored. Preferences live under a single `ui` object, currently just
+  `ui.railCollapsed`. Only that object is ever rewritten: the active profile
+  pointer and any key a future version adds survive a preferences write, and a
+  file that is missing, unparseable or holds unrelated keys simply yields the
+  defaults.
 - The active profile is recorded in that file as `activeProfile` (the id) plus
   `activeProfileFile` (the `profile_<id>.json` name), and both keys are removed
   when the active profile is `default`, so an absent key means `default`.
@@ -154,7 +158,13 @@
   overlay count and **Switch to this profile**, **Rename**, **Duplicate** and
   **Delete** on the Profiles page. Rename, Duplicate and Delete open their editor
   in place of that detail. The Global page has no list, so the detail pane spans
-  the width the list pane would have used.
+  the width the list pane would have used, and shows the app-wide preferences:
+  an **Appearance** group with a **Collapse the navigation rail** checkbox, and a
+  **Storage** group listing the config folder, the profiles folder and
+  `globalconfig.json` as read-only paths, truncated with the full path on hover.
+  Toggling the rail applies immediately, so the user watches it collapse as they
+  click, but the value is only written when the draft is saved and **Discard**
+  puts the rail back.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
   right aligned with Save as the filled primary action, under a scrolling detail.
   Both are enabled only while there is something to write, which is also how

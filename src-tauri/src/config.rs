@@ -407,6 +407,8 @@ const MAX_PROFILE_DISPLAY_NAME_LEN: usize = 64;
 const MAX_PROFILE_POSTFIX: u32 = 9999;
 /// JSON key holding a profile's display name.
 const PROFILE_NAME_KEY: &str = "profileName";
+/// JSON key holding the Config window's own preferences.
+const UI_PREFS_KEY: &str = "ui";
 
 /// Result of loading the configuration, including any one-time migrations.
 pub struct ConfigLoad {
@@ -414,6 +416,30 @@ pub struct ConfigLoad {
     pub active_profile: String,
     pub profiles: Vec<ProfileEntry>,
     pub notices: Vec<ConfigNotice>,
+    pub prefs: GlobalPrefs,
+}
+
+/// App-wide preferences, stored beside the active profile pointer in
+/// `globalconfig.json`.
+///
+/// Every field defaults, so a file written by an older build, or one a user
+/// hand-edited, still loads. Only the `ui` object is ever rewritten, which
+/// leaves `activeProfile`, `activeProfileFile` and any key a future version
+/// adds untouched.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalPrefs {
+    #[serde(default)]
+    pub ui: UiPrefs,
+}
+
+/// Preferences that belong to the Config window rather than to a profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiPrefs {
+    /// Whether the navigation rail is collapsed to its icons.
+    #[serde(default)]
+    pub rail_collapsed: bool,
 }
 
 /// A profile in the profiles directory: its id and the name shown in the UI.
@@ -794,6 +820,30 @@ impl Store {
         }
     }
 
+    /// The app-wide preferences, defaulting rather than failing when the file
+    /// holds something unexpected.
+    fn read_global_prefs(&self) -> GlobalPrefs {
+        serde_json::from_value(self.read_global_config()).unwrap_or_default()
+    }
+
+    /// Store the preferences, replacing only the `ui` key.
+    ///
+    /// The merge is the whole point: the active profile pointer lives in the
+    /// same file, so writing the preferences must not drop it.
+    fn write_global_prefs(&self, prefs: &GlobalPrefs) -> io::Result<()> {
+        let ui = serde_json::to_value(&prefs.ui).map_err(io::Error::other)?;
+        let mut value = self.read_global_config();
+        let Some(object) = value.as_object_mut() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "globalconfig.json is not a JSON object.",
+            ));
+        };
+        object.insert(UI_PREFS_KEY.to_string(), ui);
+        let json = serde_json::to_string_pretty(&value).map_err(io::Error::other)?;
+        write_atomic(&self.global_config_path(), &json)
+    }
+
     /// Move a validated `config.json` into the profiles directory.
     fn import_config(&self) -> io::Result<Option<ProfileImport>> {
         let root = self.config_path();
@@ -951,6 +1001,7 @@ impl Store {
             active_profile,
             profiles: self.list_profiles_detailed(),
             notices,
+            prefs: self.read_global_prefs(),
         }
     }
 }
@@ -974,6 +1025,11 @@ pub fn config_dir() -> PathBuf {
 /// `~/.config/.PingLatencyOverlay/profiles`
 pub fn profiles_dir() -> PathBuf {
     store().profiles_dir()
+}
+
+/// `~/.config/.PingLatencyOverlay/globalconfig.json`
+pub fn global_config_path() -> PathBuf {
+    store().global_config_path()
 }
 
 /// Legacy `~/.PingLatencyOverlay` directory.
@@ -1119,6 +1175,16 @@ pub fn delete_profile(name: &str) -> io::Result<()> {
 }
 
 /// Remember the active profile for the next launch.
+/// The app-wide preferences currently stored in `globalconfig.json`.
+pub fn read_global_prefs() -> GlobalPrefs {
+    store().read_global_prefs()
+}
+
+/// Store the app-wide preferences, leaving the active profile pointer in place.
+pub fn write_global_prefs(prefs: &GlobalPrefs) -> io::Result<()> {
+    store().write_global_prefs(prefs)
+}
+
 pub fn set_active_profile(name: &str) -> io::Result<()> {
     store().set_active_profile(name)
 }
@@ -1783,6 +1849,67 @@ mod tests {
             "{}",
             "global preferences stay empty until something is stored"
         );
+    }
+
+    #[test]
+    fn global_prefs_default_when_absent() {
+        let root = TestDir::new("prefs-absent");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+
+        assert_eq!(store.read_global_prefs(), GlobalPrefs::default());
+        let loaded = store.load(&root.path().join("missing-legacy"));
+        assert_eq!(loaded.prefs, GlobalPrefs::default());
+    }
+
+    #[test]
+    fn global_prefs_round_trip_through_global_config() {
+        let root = TestDir::new("prefs-round-trip");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        store.create_profile("Work VPN").expect("create profile");
+        store
+            .set_active_profile("work-vpn")
+            .expect("set active profile");
+
+        let prefs = GlobalPrefs {
+            ui: UiPrefs {
+                rail_collapsed: true,
+            },
+        };
+        store.write_global_prefs(&prefs).expect("write prefs");
+
+        let loaded = store.load(&root.path().join("missing-legacy"));
+        assert!(loaded.prefs.ui.rail_collapsed);
+        // The preferences live beside the active profile pointer, so writing
+        // them must leave that pointer alone.
+        assert_eq!(loaded.active_profile, "work-vpn");
+    }
+
+    #[test]
+    fn unknown_global_keys_survive_a_prefs_update() {
+        let root = TestDir::new("prefs-unknown-keys");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        fs::write(
+            store.global_config_path(),
+            r#"{"futurePreference":true,"activeProfile":"work"}"#,
+        )
+        .expect("seed global config");
+
+        store
+            .write_global_prefs(&GlobalPrefs {
+                ui: UiPrefs {
+                    rail_collapsed: true,
+                },
+            })
+            .expect("write prefs");
+
+        let raw = fs::read_to_string(store.global_config_path()).expect("read global config");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse global config");
+        assert_eq!(value["futurePreference"], true);
+        assert_eq!(value["activeProfile"], "work");
+        assert_eq!(value[UI_PREFS_KEY]["railCollapsed"], true);
     }
 
     #[test]

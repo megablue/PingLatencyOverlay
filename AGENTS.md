@@ -95,6 +95,21 @@ Installer (run from the repository root):
   next line and leaves an empty column; forgetting the gap overflows the row by
   the gap width. Both mistakes shipped once. `profile_name_width` and
   `a_profile_row_fits_its_pane` exist to keep the arithmetic honest.
+- App-wide preferences live under a single `ui` object in `globalconfig.json`
+  (`GlobalPrefs`/`UiPrefs` in `config.rs`, every field `#[serde(default)]`).
+  `write_global_prefs` merges: it replaces only the `ui` key, so the active
+  profile pointer and any unknown key survive. Never write that file as a whole
+  object.
+- The Global page stages its edits in `prefs_draft` and writes on Save
+  (`save_prefs`), while the rail's collapsed state is applied to the live UI
+  immediately so the user sees it change; `discard_prefs` puts both the stored
+  value and the rail back. `save_edits` writes whichever of the profile draft
+  and the preferences draft is dirty.
+- A painted glyph whose parts are laid out from a table must be checked for
+  centring and containment. The Global glyph shipped with its row offsets read
+  as loop indices by `enumerate()`, so the tuple halves swapped jobs: it sat
+  low and one knob poked past its track. `GLOBAL_ICON_ROWS` plus
+  `the_global_glyph_is_centred_and_stays_inside_its_box` now pin that.
 - The bottom row of the Config window is the **status bar**
   (`show_status_bar`); it only shows the transient operation message and the
   right-aligned version label, so it takes `&self`.
