@@ -16,6 +16,12 @@ const SIDEBAR_CONTROLS_HEIGHT: f32 = 188.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PROFILE_ROW_HEIGHT: f32 = 26.0;
 const PROFILE_ICON_SIZE: f32 = 24.0;
+/// Stable widget id for the profile name field, so it keeps keyboard focus.
+const PROFILE_NAME_FIELD_ID: &str = "profile-name-field";
+/// Fixed popup width. The popup must never derive its width from
+/// `available_width()`, because `Area` stores the content size and re-lays the
+/// content out at it next frame, so any overflow feeds back and grows forever.
+const PROFILE_POPUP_WIDTH: f32 = SIDEBAR_WIDTH - 40.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 // Windows 11 Explorer-inspired dark palette.
@@ -913,9 +919,9 @@ impl PingApp {
         let dirty = self.dirty;
         let mut focus_field = std::mem::take(&mut self.profile_name_focus);
         // The dialog is taken out for the frame so the popup can edit it
-        // without borrowing the app state, then stored back for the next frame.
+        // without borrowing the app state, then the edited value is stored
+        // back. Snapshotting it here would discard whatever was typed.
         let mut dialog = self.profile_dialog.take();
-        let mut next_dialog = dialog.clone();
         let mut action: Option<ProfileAction> = None;
 
         // egui owns the open flag through `open_bool`, so it can close the popup
@@ -925,9 +931,11 @@ impl PingApp {
         let _popup = egui::containers::Popup::from_response(anchor)
             .open_bool(&mut self.profile_menu_open)
             .close_behavior(egui::containers::PopupCloseBehavior::CloseOnClickOutside)
+            .layout(Layout::top_down(Align::Min))
+            .width(PROFILE_POPUP_WIDTH)
             .frame(Frame::popup(ui.style()).fill(UI_SURFACE))
             .show(|ui| {
-                ui.set_min_width(SIDEBAR_WIDTH - 40.0);
+                ui.set_width(PROFILE_POPUP_WIDTH);
                 let header = ui.label(RichText::new("Profiles").strong().color(UI_TEXT));
                 header.on_hover_text(config::profiles_dir().display().to_string());
                 ui.separator();
@@ -944,7 +952,10 @@ impl PingApp {
                         } else {
                             UI_TEXT
                         };
-                        let icons = PROFILE_ICON_SIZE * 2.0 + ui.spacing().item_spacing.x;
+                        // Name, rename and delete: three widgets, so two
+                        // `item_spacing` gaps must be reserved. Reserving one
+                        // gap made every row ask for more than the popup width.
+                        let icons = PROFILE_ICON_SIZE * 2.0 + ui.spacing().item_spacing.x * 2.0;
                         let name_width = (ui.available_width() - icons).max(60.0);
                         let name_button = ui.add_sized(
                             [name_width, PROFILE_ROW_HEIGHT],
@@ -957,7 +968,7 @@ impl PingApp {
                         let rename =
                             profile_icon_button(ui, ProfileIcon::Rename, UI_TEXT_SECONDARY);
                         if rename.clicked() {
-                            next_dialog = Some(ProfileDialog::Rename {
+                            dialog = Some(ProfileDialog::Rename {
                                 from: name.clone(),
                                 name: name.clone(),
                             });
@@ -965,36 +976,33 @@ impl PingApp {
                         }
                         let delete = profile_icon_button(ui, ProfileIcon::Delete, UI_DANGER);
                         if delete.clicked() {
-                            next_dialog = Some(ProfileDialog::Delete { name: name.clone() });
+                            dialog = Some(ProfileDialog::Delete { name: name.clone() });
                         }
                     });
                 }
 
                 ui.separator();
+                // The inline editor replaces the "+ New profile" row while a
+                // dialog is open.
+                let wants_new = match &dialog {
+                    None => ui
+                        .add_sized(
+                            [ui.available_width(), PROFILE_ROW_HEIGHT],
+                            egui::Button::new("+ New profile"),
+                        )
+                        .clicked(),
+                    Some(_) => false,
+                };
+                // Assigned after the match, which borrows the dialog.
+                let mut close_dialog = false;
                 match &mut dialog {
-                    None => {
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), PROFILE_ROW_HEIGHT],
-                                egui::Button::new("+ New profile"),
-                            )
-                            .clicked()
-                        {
-                            next_dialog = Some(ProfileDialog::Create {
-                                name: String::new(),
-                            });
-                            focus_field = true;
-                        }
-                    }
                     Some(ProfileDialog::Create { name }) => {
                         ui.label(RichText::new("New profile").color(UI_TEXT));
                         let (submit, cancel) = profile_name_field(ui, name, "Create", focus_field);
                         if submit {
                             action = Some(ProfileAction::Create(name.clone()));
                         }
-                        if cancel {
-                            next_dialog = None;
-                        }
+                        close_dialog = cancel;
                     }
                     Some(ProfileDialog::Rename { from, name }) => {
                         ui.label(RichText::new(format!("Rename \"{from}\"")).color(UI_TEXT));
@@ -1005,9 +1013,7 @@ impl PingApp {
                                 to: name.clone(),
                             });
                         }
-                        if cancel {
-                            next_dialog = None;
-                        }
+                        close_dialog = cancel;
                     }
                     Some(ProfileDialog::Delete { name }) => {
                         ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER));
@@ -1028,10 +1034,18 @@ impl PingApp {
                         if confirm {
                             action = Some(ProfileAction::Delete(name.clone()));
                         }
-                        if cancel {
-                            next_dialog = None;
-                        }
+                        close_dialog = cancel;
                     }
+                    None => {}
+                }
+                if wants_new {
+                    dialog = Some(ProfileDialog::Create {
+                        name: String::new(),
+                    });
+                    focus_field = true;
+                }
+                if close_dialog {
+                    dialog = None;
                 }
 
                 if dirty {
@@ -1046,11 +1060,11 @@ impl PingApp {
 
         // Closing the popup drops any inline editor it was showing.
         if was_open && !self.profile_menu_open {
-            next_dialog = None;
+            dialog = None;
             focus_field = false;
         }
         self.profile_name_focus = focus_field;
-        self.profile_dialog = next_dialog;
+        self.profile_dialog = dialog;
 
         if let Some(action) = action {
             // A rejected name keeps the editor open so it can be corrected.
@@ -1279,7 +1293,11 @@ fn profile_name_field(
         let width = (ui.available_width() - 136.0).max(40.0);
         let edit = ui.add_sized(
             [width, PROFILE_ROW_HEIGHT],
-            egui::TextEdit::singleline(name).hint_text("Profile name"),
+            egui::TextEdit::singleline(name)
+                .hint_text("Profile name")
+                // A fixed id keeps the caret in the field when the editor
+                // replaces the "+ New profile" row and shifts its position.
+                .id(egui::Id::new(PROFILE_NAME_FIELD_ID)),
         );
         if focus {
             ui.ctx().memory_mut(|memory| memory.request_focus(edit.id));
