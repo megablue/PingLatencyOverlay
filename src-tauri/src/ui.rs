@@ -918,9 +918,13 @@ impl PingApp {
         let mut next_dialog = dialog.clone();
         let mut action: Option<ProfileAction> = None;
 
-        let popup = egui::containers::Popup::from_response(anchor)
-            .open(self.profile_menu_open)
-            .close_behavior(egui::containers::PopupCloseBehavior::IgnoreClicks)
+        // egui owns the open flag through `open_bool`, so it can close the popup
+        // on a click outside or Escape without treating the click that opened
+        // it as an outside click.
+        let was_open = self.profile_menu_open;
+        let _popup = egui::containers::Popup::from_response(anchor)
+            .open_bool(&mut self.profile_menu_open)
+            .close_behavior(egui::containers::PopupCloseBehavior::CloseOnClickOutside)
             .frame(Frame::popup(ui.style()).fill(UI_SURFACE))
             .show(|ui| {
                 ui.set_min_width(SIDEBAR_WIDTH - 40.0);
@@ -1040,13 +1044,10 @@ impl PingApp {
                 }
             });
 
-        if let Some(popup) = popup {
-            // The popup ignores clicks so it can host editors, so closing is
-            // handled here: the button toggles, anything else outside ends it.
-            if popup.response.clicked_elsewhere() || popup.response.should_close() {
-                self.profile_menu_open = false;
-                next_dialog = None;
-            }
+        // Closing the popup drops any inline editor it was showing.
+        if was_open && !self.profile_menu_open {
+            next_dialog = None;
+            focus_field = false;
         }
         self.profile_name_focus = focus_field;
         self.profile_dialog = next_dialog;
