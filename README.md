@@ -41,17 +41,24 @@ Settings are stored in profiles:
     └── profile_work.json
 ```
 
-Each profile holds one complete set of overlays. The profile popup above
-**Add overlay** lists them and can create, rename, delete and switch between
-them. **Save** writes to the profile that is currently active, and that choice
-is remembered in `globalconfig.json` as `activeProfile` together with the file
-name in `activeProfileFile`. Those two keys are the only record of the active
-profile: the app loads that file on startup, and if it has been deleted or
-renamed away it falls back to the `default` profile instead of picking another
-one on its own.
+Each profile holds one complete set of overlays. The switcher at the top of the
+sidebar opens the profile menu, which lists them and can create, rename, delete
+and switch between them. **Save** and **Discard** sit in the status bar along the
+bottom, so they work from any page, and **Save** writes to the profile that is
+currently active; that choice is remembered in `globalconfig.json` as
+`activeProfile` together with the file name in `activeProfileFile`. Those two
+keys are the only record of the active profile: the app loads that file on
+startup, and if it has been deleted or renamed away it falls back to the
+`default` profile instead of picking another one on its own.
+
+The window itself is three panes and a status bar. The leftmost **rail** switches
+between the **Overlays**, **Profiles** and **Global** pages and collapses to
+icons only; the middle pane lists what the current page is about, headed by the
+profile switcher on the Overlays page; the right pane shows the detail. The
+**Profiles** and **Global** pages arrive in the next releases.
 
 Each profile has two names. The **display name** is what you type and what the
-window title, the sidebar button and the profile popup show
+window title, the switcher and the profile menu show
 (`PingLatencyOverlay - Current Profile: Work VPN`); it is stored in the profile
 file as `profileName` and does not have to be unique. The **id** is the file
 name `profile_<id>.json`, where the id is lowercased and reduced to letters,

@@ -74,12 +74,20 @@ Installer (run from the repository root):
   files are never rewritten.
 - The window title is `PingLatencyOverlay - Current Profile: <name>`, pushed
   with `ViewportCommand::Title` only when it changes (`sync_window_title`).
-- Profile switching is refused while `dirty`; the popup's **Discard** button
-  reloads the active profile from disk. Save/Discard are the only ways to
-  resolve pending edits.
+- Profile switching is refused while `dirty`; **Discard** reloads the active
+  profile from disk. Save/Discard are the only ways to resolve pending edits.
+- The Config window is three panes plus a status bar (`config_ui`): a
+  navigation rail (`show_rail`, `Page`/`PAGES`, `rail_width`), a list pane
+  (`show_list_pane`, which is dropped on the Global page) and a detail pane.
+  Pane switching is never guarded; only profile switching is.
 - The bottom row of the Config window is the **status bar**
-  (`show_status_bar`); transient operation messages appear there beside the
-  right-aligned version label.
+  (`show_status_bar`); **Save** and **Discard** live there, not in a pane, so
+  pending edits can be resolved from any page. Transient operation messages
+  appear beside them, with the version label right-aligned. The status string is
+  cloned before the buttons are drawn, because clicking one needs `&mut self`.
+- The profile switcher (`show_profile_switcher`) heads the Overlays list pane and
+  anchors the existing profile popup. Rail rows and glyphs are painted with
+  `ui.painter()`, not buttons, so the label can sit beside the icon.
 - The root egui viewport starts hidden. Tray **left-click** shows Config; the
   context menu is right-click. Config-window close hides the root viewport; only
   tray Exit closes the app.

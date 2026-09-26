@@ -111,8 +111,9 @@
 - The active profile is loaded on startup to recreate overlays and their
   settings, and it is the target of **Save**.
 - Profiles are created empty, and are listed, renamed and deleted from the
-  profile popup above **Add overlay** in the sidebar. Rows that share a name
-  also show their id, and the delete confirmation names the file it removes.
+  profile menu that opens from the switcher heading the sidebar list. Rows that
+  share a name also show their id, and the delete confirmation names the file it
+  removes.
 - Switching profiles is refused while there are unsaved edits. **Discard**
   reloads the active profile from disk and drops those edits.
 - Deleting the active profile falls back to `default`, or to the first
@@ -126,6 +127,29 @@
   its only entry; other files and subdirectories are preserved.
 - The Config status bar reports successful migration, retained legacy data,
   migration failure, profile import, added profile names and profile fallback.
+
+## Config window layout
+- The Config window has three panes and a status bar.
+- The **navigation rail** is the leftmost pane: one row per page (**Overlays**,
+  **Profiles**, **Global**) plus a chevron that collapses it to icons only. The
+  rail is 148px labelled and 44px collapsed, and its glyphs are painted, so
+  they never depend on font coverage.
+- The **list pane** holds the current page's list, headed by the page's own
+  controls. The Overlays page heads it with the profile switcher, which shows
+  the active profile's display name and opens the profile menu. Its footer holds
+  **Add overlay** and **Pause all**.
+- The **detail pane** holds the current page's detail: the editor for the
+  selected overlay on the Overlays page. The Global page has no list, so the
+  detail pane spans the width the list pane would have used.
+- The **status bar** spans the full width and holds **Save** and **Discard** on
+  the left, the transient message in the middle and the version on the right.
+  Save and Discard live here rather than in a pane so pending edits can be
+  resolved from any page; both are enabled only while there is something to
+  write, which is also how unsaved edits are signalled.
+- Switching pages is always allowed, because the Overlays draft stays in memory.
+  Switching *profile* is refused while there are unsaved edits.
+- The window is 860x660, resizable between 720x480 and 1400x8192, which keeps
+  room for the rail, the list pane and a usable detail pane at the same time.
 
 ## Packaging
 - Target architectures: x64 and ARM64.

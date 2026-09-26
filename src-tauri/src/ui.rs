@@ -12,10 +12,33 @@ use crate::probes::ProbeManager;
 use crate::tray::{self, TrayAction, TrayState};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
-const SIDEBAR_CONTROLS_HEIGHT: f32 = 188.0;
-const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Height of pane 2's footer, which holds only the Overlays page's own actions.
+/// Save and Discard moved to the status bar so they stay reachable from every
+/// page, so this no longer covers them.
+const SIDEBAR_FOOTER_HEIGHT: f32 = 80.0;
+/// Height of the profile switcher that heads pane 2.
+const SIDEBAR_HEADER_HEIGHT: f32 = 40.0;
+const STATUS_BAR_HEIGHT: f32 = 30.0;
+const STATUS_BAR_BUTTON_HEIGHT: f32 = 24.0;
+const STATUS_BAR_BUTTON_WIDTH: f32 = 96.0;
 const PROFILE_ROW_HEIGHT: f32 = 26.0;
 const PROFILE_ICON_SIZE: f32 = 24.0;
+/// Navigation rail widths: labelled, then icon only.
+const RAIL_WIDTH: f32 = 148.0;
+const RAIL_COLLAPSED_WIDTH: f32 = 44.0;
+const RAIL_ROW_HEIGHT: f32 = 40.0;
+const RAIL_ICON_SIZE: f32 = 20.0;
+const RAIL_TEXT_SIZE: f32 = 14.0;
+/// Gap between two panes.
+const PANE_GAP: f32 = 8.0;
+/// Horizontal padding the central frame puts around the panes.
+const PANE_MARGIN: f32 = 12.0;
+const WINDOW_WIDTH: f32 = 860.0;
+const WINDOW_HEIGHT: f32 = 660.0;
+const WINDOW_MIN_WIDTH: f32 = 720.0;
+const WINDOW_MIN_HEIGHT: f32 = 480.0;
+const WINDOW_MAX_WIDTH: f32 = 1400.0;
+const WINDOW_MAX_HEIGHT: f32 = 8192.0;
 /// Stable widget id for the profile name field, so it keeps keyboard focus.
 const PROFILE_NAME_FIELD_ID: &str = "profile-name-field";
 /// Fixed popup width. The popup must never derive its width from
@@ -309,7 +332,43 @@ enum ProfileIcon {
     Delete,
 }
 
+/// The pages the navigation rail switches between.
+///
+/// Pane 2 and pane 3 both change with the page: pane 2 holds the page's list
+/// and pane 3 its detail. Switching pages is free, because the draft of the
+/// Overlays page stays in memory; only switching *profile* is refused while
+/// there are unsaved edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Overlays,
+    Profiles,
+    Global,
+}
+
+impl Page {
+    fn label(self) -> &'static str {
+        match self {
+            Page::Overlays => "Overlays",
+            Page::Profiles => "Profiles",
+            Page::Global => "Global",
+        }
+    }
+}
+
+const PAGES: [Page; 3] = [Page::Overlays, Page::Profiles, Page::Global];
+
+/// Width of the navigation rail, labelled or icon only.
+fn rail_width(collapsed: bool) -> f32 {
+    if collapsed {
+        RAIL_COLLAPSED_WIDTH
+    } else {
+        RAIL_WIDTH
+    }
+}
+
 pub struct PingApp {
+    page: Page,
+    rail_collapsed: bool,
     config: Config,
     active_profile: String,
     profiles: Vec<config::ProfileEntry>,
@@ -364,6 +423,8 @@ impl PingApp {
         // The static title in `run` cannot know the profile, so the real one
         // is sent as soon as the app state exists.
         let mut app = Self {
+            page: Page::Overlays,
+            rail_collapsed: false,
             config,
             active_profile,
             profiles,
@@ -747,12 +808,20 @@ impl PingApp {
         self.tray.set_running(self.running);
     }
 
-    fn show_sidebar(&mut self, ui: &mut Ui) {
-        let available = ui.available_size();
-        let list_height = (available.y - SIDEBAR_CONTROLS_HEIGHT).max(100.0);
+    /// Pane 2 of the Overlays page: the profile switcher, the overlay list and
+    /// the page's own actions.
+    fn show_overlays_page(&mut self, ui: &mut Ui, height: f32) {
+        let list_height = (height - SIDEBAR_HEADER_HEIGHT - SIDEBAR_FOOTER_HEIGHT).max(100.0);
         let row_width = SIDEBAR_WIDTH - 20.0;
 
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            ui.allocate_ui(
+                egui::vec2(SIDEBAR_WIDTH - 8.0, SIDEBAR_HEADER_HEIGHT),
+                |ui| {
+                    self.show_profile_switcher(ui);
+                },
+            );
+            ui.add_space(4.0);
             ui.allocate_ui(egui::vec2(row_width, list_height), |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -911,18 +980,6 @@ impl PingApp {
             });
 
             ui.add_space(6.0);
-            let profile_label = format!("Profile: {}", self.active_profile_name());
-            let profile_button = ui.add_sized(
-                [row_width, 32.0],
-                egui::Button::new(RichText::new(profile_label).color(UI_TEXT)).truncate(),
-            );
-            if profile_button.clicked() {
-                self.profile_menu_open = !self.profile_menu_open;
-                if self.profile_menu_open {
-                    self.refresh_profiles();
-                }
-            }
-            self.show_profile_popup(ui, &profile_button);
             if ui
                 .add_sized([row_width, 32.0], egui::Button::new("Add overlay"))
                 .clicked()
@@ -942,25 +999,129 @@ impl PingApp {
             {
                 self.toggle_running();
             }
-            let mut discard_clicked = false;
-            ui.add_enabled_ui(self.dirty, |ui| {
-                discard_clicked = ui
-                    .add_sized([row_width, 34.0], egui::Button::new("Discard"))
-                    .clicked();
-            });
-            if discard_clicked {
-                self.discard_edits();
+        });
+    }
+
+    /// The profile switcher that heads pane 2: the active profile's display name
+    /// with a painted arrow, opening the profile menu underneath.
+    ///
+    /// The menu anchors on this response, so it opens from the header instead of
+    /// from a button in the footer.
+    fn show_profile_switcher(&mut self, ui: &mut Ui) {
+        let name = self.active_profile_name();
+        let response = ui.add_sized(
+            [ui.available_width(), 32.0],
+            egui::Button::new(RichText::new(&name).color(UI_TEXT)).truncate(),
+        );
+        draw_dropdown_arrow(ui.painter(), response.rect, UI_TEXT_SECONDARY);
+        let response = response.on_hover_text(config::profile_file_name(&self.active_profile));
+        if response.clicked() {
+            self.profile_menu_open = !self.profile_menu_open;
+            if self.profile_menu_open {
+                self.refresh_profiles();
             }
-            let save_button = egui::Button::new("Save")
-                .fill(UI_ACCENT_STRONG)
-                .min_size(egui::vec2(row_width, 34.0));
-            let mut save_clicked = false;
-            ui.add_enabled_ui(self.dirty, |ui| {
-                save_clicked = ui.add_sized([row_width, 34.0], save_button).clicked();
-            });
-            if save_clicked {
-                self.save_edits();
+        }
+        self.show_profile_popup(ui, &response);
+    }
+
+    /// The navigation rail: one row per page plus the collapse toggle.
+    ///
+    /// Rows and glyphs are painted rather than built from buttons, so the label
+    /// can sit beside the icon instead of under it and the collapsed rail needs
+    /// no text at all.
+    fn show_rail(&mut self, ui: &mut Ui) {
+        let collapsed = self.rail_collapsed;
+        let row_width = ui.available_width();
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            ui.add_space(4.0);
+            for page in PAGES {
+                let active = self.page == page;
+                let color = if active { UI_TEXT } else { UI_TEXT_SECONDARY };
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(row_width, RAIL_ROW_HEIGHT),
+                    egui::Sense::click(),
+                );
+                if active {
+                    ui.painter()
+                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SELECTION);
+                } else if response.hovered() {
+                    ui.painter()
+                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SURFACE_ALT);
+                }
+                let icon_rect = if collapsed {
+                    egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(RAIL_ICON_SIZE))
+                } else {
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + 14.0, rect.center().y - RAIL_ICON_SIZE / 2.0),
+                        egui::Vec2::splat(RAIL_ICON_SIZE),
+                    )
+                };
+                draw_nav_icon(
+                    ui.painter(),
+                    icon_rect,
+                    page,
+                    if active { UI_ACCENT } else { UI_TEXT_SECONDARY },
+                );
+                if !collapsed {
+                    ui.painter().text(
+                        egui::pos2(icon_rect.right() + 12.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        page.label(),
+                        egui::FontId::proportional(RAIL_TEXT_SIZE),
+                        color,
+                    );
+                }
+                let response = response.on_hover_text(page.label());
+                if response.clicked() {
+                    self.page = page;
+                }
             }
+            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(row_width, RAIL_ROW_HEIGHT),
+                    egui::Sense::click(),
+                );
+                if response.hovered() {
+                    ui.painter()
+                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SURFACE_ALT);
+                }
+                let icon_rect =
+                    egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(RAIL_ICON_SIZE));
+                draw_collapse_chevron(ui.painter(), icon_rect, collapsed, UI_TEXT_SECONDARY);
+                let hint = if collapsed {
+                    "Expand the navigation rail"
+                } else {
+                    "Collapse the navigation rail"
+                };
+                let response = response.on_hover_text(hint);
+                if response.clicked() {
+                    self.rail_collapsed = !collapsed;
+                }
+            });
+        });
+    }
+
+    /// Pane 2 for the current page. Only the Overlays page has a list so far.
+    fn show_list_pane(&mut self, ui: &mut Ui, height: f32) {
+        match self.page {
+            Page::Overlays => self.show_overlays_page(ui, height),
+            page => self.show_page_placeholder(ui, page),
+        }
+    }
+
+    /// Stand-in for a page whose list or detail is still to come.
+    fn show_page_placeholder(&self, ui: &mut Ui, page: Page) {
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            ui.label(RichText::new(page.label()).heading().color(UI_TEXT));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "The {} page arrives in a later release. The {} page still has everything.",
+                    page.label().to_lowercase(),
+                    Page::Overlays.label().to_lowercase(),
+                ))
+                .color(UI_TEXT_SECONDARY),
+            );
         });
     }
 
@@ -1214,13 +1375,17 @@ impl PingApp {
             });
     }
 
+    /// The Config window: a navigation rail, a list pane and a detail pane.
+    ///
+    /// The Global page has no list, so pane 2 is dropped and the detail pane
+    /// takes its place. The status bar spans the full width underneath.
     fn config_ui(&mut self, ui: &mut Ui) {
         let frame = Frame::central_panel(ui.style())
             .fill(UI_BACKGROUND)
             .inner_margin(egui::Margin {
-                left: 12,
-                right: 12,
-                top: 12,
+                left: PANE_MARGIN as i8,
+                right: PANE_MARGIN as i8,
+                top: PANE_MARGIN as i8,
                 bottom: 0,
             });
         frame.show(ui, |ui| {
@@ -1228,14 +1393,31 @@ impl PingApp {
                 let content_height = (ui.available_height() - STATUS_BAR_HEIGHT).max(160.0);
                 ui.horizontal_top(|ui| {
                     ui.set_height(content_height);
-                    ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
-                        self.show_sidebar(ui);
+                    let rail_left = ui.min_rect().left();
+                    let rail_width = rail_width(self.rail_collapsed);
+                    ui.allocate_ui(egui::vec2(rail_width, content_height), |ui| {
+                        self.show_rail(ui);
                     });
-                    ui.add_space(4.0);
+                    let divider_x = rail_left + rail_width + PANE_GAP / 2.0;
+                    ui.painter().vline(
+                        divider_x,
+                        ui.min_rect().y_range(),
+                        egui::Stroke::new(1.0, UI_BORDER),
+                    );
+                    ui.add_space(PANE_GAP);
+                    if self.page != Page::Global {
+                        ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
+                            self.show_list_pane(ui, content_height);
+                        });
+                        ui.add_space(PANE_GAP);
+                    }
                     ui.vertical(|ui| {
                         ui.set_min_width(ui.available_width());
                         ui.set_height(content_height);
-                        self.show_editor(ui);
+                        match self.page {
+                            Page::Overlays => self.show_editor(ui),
+                            page => self.show_page_placeholder(ui, page),
+                        }
                     });
                 });
                 self.show_status_bar(ui);
@@ -1243,11 +1425,39 @@ impl PingApp {
         });
     }
 
+    /// The status bar spans the whole window, so Save and Discard are reachable
+    /// from every page. Both are enabled only while there is something to write,
+    /// which also makes them the "unsaved edits" indicator.
     fn show_status_bar(&mut self, ui: &mut Ui) {
-        let message = self.status.as_str();
+        let message = self.status.clone();
+        let message = message.as_str();
         let version = format!("v{}", env!("APP_BUILD_VERSION"));
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
             ui.horizontal(|ui| {
+                let mut save_clicked = false;
+                ui.add_enabled_ui(self.dirty, |ui| {
+                    save_clicked = ui
+                        .add_sized(
+                            [STATUS_BAR_BUTTON_WIDTH, STATUS_BAR_BUTTON_HEIGHT],
+                            egui::Button::new(RichText::new("Save").color(UI_TEXT))
+                                .fill(UI_ACCENT_STRONG),
+                        )
+                        .clicked();
+                });
+                let mut discard_clicked = false;
+                ui.add_enabled_ui(self.dirty, |ui| {
+                    discard_clicked = ui
+                        .add_sized(
+                            [STATUS_BAR_BUTTON_WIDTH, STATUS_BAR_BUTTON_HEIGHT],
+                            egui::Button::new("Discard"),
+                        )
+                        .clicked();
+                });
+                if save_clicked {
+                    self.save_edits();
+                } else if discard_clicked {
+                    self.discard_edits();
+                }
                 let response = ui.add(egui::Label::new(message).truncate());
                 if !message.is_empty() {
                     response.on_hover_text(message);
@@ -1974,15 +2184,99 @@ fn position_name(anchor: Anchor) -> &'static str {
     }
 }
 
+/// Painted rail glyphs, so the rail never depends on font coverage.
+fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: Color32) {
+    let stroke = egui::Stroke::new(1.5, color);
+    let unit = rect.width().min(rect.height());
+    let center = rect.center();
+    let radius = egui::CornerRadius::same(2);
+    match page {
+        // Two offset squares, read as a stack of overlays.
+        Page::Overlays => {
+            let size = unit * 0.58;
+            let offset = unit * 0.16;
+            for direction in [1.0, -1.0] {
+                let square = egui::Rect::from_center_size(
+                    center + egui::vec2(offset * direction, -offset * direction),
+                    egui::Vec2::splat(size),
+                );
+                painter.rect_stroke(square, radius, stroke, egui::StrokeKind::Middle);
+            }
+        }
+        // Three stacked cards, read as saved profiles.
+        Page::Profiles => {
+            let width = unit * 0.7;
+            let height = unit * 0.19;
+            let step = unit * 0.3;
+            for row in -1..=1 {
+                let card = egui::Rect::from_center_size(
+                    egui::pos2(center.x, center.y + row as f32 * step),
+                    egui::vec2(width, height),
+                );
+                painter.rect_stroke(card, radius, stroke, egui::StrokeKind::Middle);
+            }
+        }
+        // Three tracks with a knob each, read as global preferences.
+        Page::Global => {
+            let half = unit * 0.35;
+            for (row, knob) in [0.45f32, -0.35, 0.1].into_iter().enumerate() {
+                let y = center.y + row as f32 * unit * 0.28;
+                painter.line_segment(
+                    [
+                        egui::pos2(center.x - half, y),
+                        egui::pos2(center.x + half, y),
+                    ],
+                    stroke,
+                );
+                painter.circle_filled(
+                    egui::pos2(center.x + half * 2.0 * knob, y),
+                    unit * 0.11,
+                    color,
+                );
+            }
+        }
+    }
+}
+
+/// The chevron that collapses the rail, pointing away from where it goes.
+fn draw_collapse_chevron(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    collapsed: bool,
+    color: Color32,
+) {
+    let stroke = egui::Stroke::new(1.5, color);
+    let center = rect.center();
+    let arm = rect.width() * 0.24;
+    let tip = center + egui::vec2(if collapsed { arm } else { -arm }, 0.0);
+    for offset in [-arm, arm] {
+        painter.line_segment([tip, center + egui::vec2(0.0, offset)], stroke);
+    }
+}
+
+/// The painted arrow that marks a widget as opening a menu.
+fn draw_dropdown_arrow(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let tip = egui::pos2(rect.right() - 14.0, rect.center().y + 3.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(tip.x - 5.0, tip.y - 5.0),
+            egui::pos2(tip.x + 5.0, tip.y - 5.0),
+            tip,
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
 pub fn run() {
     crate::overlay::enable_dpi_awareness();
     let native_options = NativeOptions {
         viewport: ViewportBuilder::default()
             .with_app_id("ping-latency-overlay")
             .with_title("PingLatencyOverlay - Config")
-            .with_inner_size(egui::vec2(640.0, 640.0))
-            .with_min_inner_size(egui::vec2(640.0, 480.0))
-            .with_max_inner_size(egui::vec2(640.0, 8192.0))
+            .with_inner_size(egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT))
+            .with_min_inner_size(egui::vec2(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT))
+            .with_max_inner_size(egui::vec2(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT))
             .with_resizable(true)
             .with_visible(false)
             .with_icon(tray::app_icon()),
@@ -2000,10 +2294,40 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status,
-        selected_overlay_for_border, window_title,
+        can_switch_profile, config_notice_status, config_notices_status, rail_width,
+        selected_overlay_for_border, window_title, PAGES, PANE_GAP, PANE_MARGIN, RAIL_WIDTH,
+        SIDEBAR_WIDTH, WINDOW_MIN_WIDTH,
     };
     use crate::config::ConfigNotice;
+
+    /// The rail is the leftmost pane, so the window has to be wide enough for the
+    /// rail, the list pane and a usable detail pane at the same time.
+    #[test]
+    fn the_window_fits_the_rail_the_list_and_the_detail_pane() {
+        let detail =
+            WINDOW_MIN_WIDTH - PANE_MARGIN * 2.0 - RAIL_WIDTH - PANE_GAP - SIDEBAR_WIDTH - PANE_GAP;
+        assert!(
+            detail >= 240.0,
+            "detail pane would be only {detail}px wide at the minimum window size"
+        );
+    }
+
+    #[test]
+    fn the_rail_offers_every_page_once() {
+        let labels: Vec<&str> = PAGES.iter().map(|page| page.label()).collect();
+        assert_eq!(labels, vec!["Overlays", "Profiles", "Global"]);
+        let mut unique = labels.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn the_rail_narrows_to_icons_only() {
+        assert_eq!(rail_width(false), RAIL_WIDTH);
+        assert_eq!(rail_width(true), 44.0);
+        assert!(rail_width(true) < rail_width(false));
+    }
 
     #[test]
     fn hidden_config_does_not_keep_overlay_selected_for_border() {
