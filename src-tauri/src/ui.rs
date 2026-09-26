@@ -13,14 +13,19 @@ use crate::tray::{self, TrayAction, TrayState};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
 /// Height of pane 2's footer, which holds only the Overlays page's own actions.
-/// Save and Discard moved to the status bar so they stay reachable from every
-/// page, so this no longer covers them.
+/// Save and Discard live in the detail pane's footer, so this no longer covers
+/// them.
 const SIDEBAR_FOOTER_HEIGHT: f32 = 80.0;
 /// Height of the profile switcher that heads pane 2.
 const SIDEBAR_HEADER_HEIGHT: f32 = 40.0;
-const STATUS_BAR_HEIGHT: f32 = 30.0;
-const STATUS_BAR_BUTTON_HEIGHT: f32 = 24.0;
-const STATUS_BAR_BUTTON_WIDTH: f32 = 96.0;
+/// Height of the detail pane's sticky footer, which holds Save and Discard. It
+/// mirrors pane 2's footer: both sit under a scrolling list, and keeping the
+/// draft actions next to the thing they act on beats parking them in the status
+/// bar a pane away.
+const DETAIL_FOOTER_HEIGHT: f32 = 44.0;
+const DETAIL_FOOTER_BUTTON_HEIGHT: f32 = 32.0;
+const DETAIL_FOOTER_BUTTON_WIDTH: f32 = 96.0;
+const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PROFILE_ROW_HEIGHT: f32 = 26.0;
 const PROFILE_ICON_SIZE: f32 = 24.0;
 /// Navigation rail widths: labelled, then icon only.
@@ -1375,6 +1380,63 @@ impl PingApp {
             });
     }
 
+    /// Pane 3: the page's own content on top, a sticky Save/Discard footer
+    /// below it. Every page renders a detail pane, so the draft actions stay in
+    /// the same place no matter which page is open.
+    fn show_detail_pane(&mut self, ui: &mut Ui, height: f32) {
+        let content_height = (height - DETAIL_FOOTER_HEIGHT).max(120.0);
+        ui.allocate_ui(
+            egui::vec2(ui.available_width(), content_height),
+            |ui| match self.page {
+                Page::Overlays => self.show_editor(ui),
+                page => self.show_page_placeholder(ui, page),
+            },
+        );
+        ui.add_space(4.0);
+        self.show_detail_footer(ui);
+    }
+
+    /// Save and Discard, right aligned under the detail pane.
+    ///
+    /// They mirror pane 2's footer, which holds that page's own actions, and both
+    /// are enabled only while there is something to write, which is also how
+    /// pending edits stay visible.
+    fn show_detail_footer(&mut self, ui: &mut Ui) {
+        ui.allocate_ui(
+            egui::vec2(ui.available_width(), DETAIL_FOOTER_HEIGHT),
+            |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Right to left, so Save lands rightmost as the primary
+                    // action and Discard sits to its left.
+                    let mut save_clicked = false;
+                    ui.add_enabled_ui(self.dirty, |ui| {
+                        save_clicked = ui
+                            .add_sized(
+                                [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
+                                egui::Button::new(RichText::new("Save").color(UI_TEXT))
+                                    .fill(UI_ACCENT_STRONG),
+                            )
+                            .clicked();
+                    });
+                    let mut discard_clicked = false;
+                    ui.add_enabled_ui(self.dirty, |ui| {
+                        discard_clicked = ui
+                            .add_sized(
+                                [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
+                                egui::Button::new("Discard"),
+                            )
+                            .clicked();
+                    });
+                    if save_clicked {
+                        self.save_edits();
+                    } else if discard_clicked {
+                        self.discard_edits();
+                    }
+                });
+            },
+        );
+    }
+
     /// The Config window: a navigation rail, a list pane and a detail pane.
     ///
     /// The Global page has no list, so pane 2 is dropped and the detail pane
@@ -1414,10 +1476,7 @@ impl PingApp {
                     ui.vertical(|ui| {
                         ui.set_min_width(ui.available_width());
                         ui.set_height(content_height);
-                        match self.page {
-                            Page::Overlays => self.show_editor(ui),
-                            page => self.show_page_placeholder(ui, page),
-                        }
+                        self.show_detail_pane(ui, content_height);
                     });
                 });
                 self.show_status_bar(ui);
@@ -1425,39 +1484,17 @@ impl PingApp {
         });
     }
 
-    /// The status bar spans the whole window, so Save and Discard are reachable
-    /// from every page. Both are enabled only while there is something to write,
-    /// which also makes them the "unsaved edits" indicator.
-    fn show_status_bar(&mut self, ui: &mut Ui) {
-        let message = self.status.clone();
-        let message = message.as_str();
+    /// The status bar spans the whole window and carries transient messages
+    /// beside the right-aligned version label.
+    ///
+    /// Save and Discard used to live here so they would be reachable from every
+    /// page. They are in the detail pane's footer now, next to the edits they
+    /// write, so this only reads state and needs no clone.
+    fn show_status_bar(&self, ui: &mut Ui) {
         let version = format!("v{}", env!("APP_BUILD_VERSION"));
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
             ui.horizontal(|ui| {
-                let mut save_clicked = false;
-                ui.add_enabled_ui(self.dirty, |ui| {
-                    save_clicked = ui
-                        .add_sized(
-                            [STATUS_BAR_BUTTON_WIDTH, STATUS_BAR_BUTTON_HEIGHT],
-                            egui::Button::new(RichText::new("Save").color(UI_TEXT))
-                                .fill(UI_ACCENT_STRONG),
-                        )
-                        .clicked();
-                });
-                let mut discard_clicked = false;
-                ui.add_enabled_ui(self.dirty, |ui| {
-                    discard_clicked = ui
-                        .add_sized(
-                            [STATUS_BAR_BUTTON_WIDTH, STATUS_BAR_BUTTON_HEIGHT],
-                            egui::Button::new("Discard"),
-                        )
-                        .clicked();
-                });
-                if save_clicked {
-                    self.save_edits();
-                } else if discard_clicked {
-                    self.discard_edits();
-                }
+                let message = self.status.as_str();
                 let response = ui.add(egui::Label::new(message).truncate());
                 if !message.is_empty() {
                     response.on_hover_text(message);
@@ -2295,8 +2332,9 @@ pub fn run() {
 mod tests {
     use super::{
         can_switch_profile, config_notice_status, config_notices_status, rail_width,
-        selected_overlay_for_border, window_title, PAGES, PANE_GAP, PANE_MARGIN, RAIL_WIDTH,
-        SIDEBAR_WIDTH, WINDOW_MIN_WIDTH,
+        selected_overlay_for_border, window_title, DETAIL_FOOTER_HEIGHT, PAGES, PANE_GAP,
+        PANE_MARGIN, RAIL_WIDTH, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH,
     };
     use crate::config::ConfigNotice;
 
@@ -2309,6 +2347,17 @@ mod tests {
         assert!(
             detail >= 240.0,
             "detail pane would be only {detail}px wide at the minimum window size"
+        );
+    }
+
+    /// The detail pane ends in a sticky Save/Discard footer, so the scrolling
+    /// part of it has to stay usable at the minimum window height too.
+    #[test]
+    fn the_detail_pane_keeps_its_scrolling_area_above_the_footer() {
+        let scrolling = WINDOW_MIN_HEIGHT - PANE_MARGIN - STATUS_BAR_HEIGHT - DETAIL_FOOTER_HEIGHT;
+        assert!(
+            scrolling >= 200.0,
+            "detail pane would scroll in only {scrolling}px at the minimum window size"
         );
     }
 

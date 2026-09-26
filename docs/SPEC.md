@@ -140,12 +140,14 @@
   **Add overlay** and **Pause all**.
 - The **detail pane** holds the current page's detail: the editor for the
   selected overlay on the Overlays page. The Global page has no list, so the
-  detail pane spans the width the list pane would have used.
-- The **status bar** spans the full width and holds **Save** and **Discard** on
-  the left, the transient message in the middle and the version on the right.
-  Save and Discard live here rather than in a pane so pending edits can be
-  resolved from any page; both are enabled only while there is something to
-  write, which is also how unsaved edits are signalled.
+  detail pane spans the width the list pane would have used. It ends in a sticky
+  footer holding **Discard** and **Save**, right aligned with Save as the filled
+  primary action, under a scrolling detail. Both are enabled only while there is
+  something to write, which is also how unsaved edits are signalled.
+- The **status bar** spans the full width and holds the transient message on the
+  left and the version on the right.
+- Each pane is a scrolling list above a fixed footer, so the draft actions sit
+  next to the content they write instead of a pane away in the status bar.
 - Switching pages is always allowed, because the Overlays draft stays in memory.
   Switching *profile* is refused while there are unsaved edits.
 - The window is 860x660, resizable between 720x480 and 1400x8192, which keeps

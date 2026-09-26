@@ -78,13 +78,17 @@ Installer (run from the repository root):
   profile from disk. Save/Discard are the only ways to resolve pending edits.
 - The Config window is three panes plus a status bar (`config_ui`): a
   navigation rail (`show_rail`, `Page`/`PAGES`, `rail_width`), a list pane
-  (`show_list_pane`, which is dropped on the Global page) and a detail pane.
-  Pane switching is never guarded; only profile switching is.
+  (`show_list_pane`, which is dropped on the Global page) and a detail pane
+  (`show_detail_pane`). Pane switching is never guarded; only profile switching
+  is.
+- Each pane is a scrolling list above a fixed footer, so the draft actions sit
+  next to the content they write. **Save** and **Discard** are the detail pane's
+  sticky footer (`show_detail_footer`, `DETAIL_FOOTER_HEIGHT`), right aligned
+  under a scrolling detail, not the status bar. Both are enabled only while
+  `dirty`, which is also how unsaved edits are signalled.
 - The bottom row of the Config window is the **status bar**
-  (`show_status_bar`); **Save** and **Discard** live there, not in a pane, so
-  pending edits can be resolved from any page. Transient operation messages
-  appear beside them, with the version label right-aligned. The status string is
-  cloned before the buttons are drawn, because clicking one needs `&mut self`.
+  (`show_status_bar`); it only shows the transient operation message and the
+  right-aligned version label, so it takes `&self`.
 - The profile switcher (`show_profile_switcher`) heads the Overlays list pane and
   anchors the existing profile popup. Rail rows and glyphs are painted with
   `ui.painter()`, not buttons, so the label can sit beside the icon.
