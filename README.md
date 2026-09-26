@@ -75,8 +75,13 @@ A separate installer is required for each architecture.
 Settings are stored at:
 
 ```text
-%USERPROFILE%\.PingLatencyOverlay\config.json
+%USERPROFILE%\.config\.PingLatencyOverlay\config.json
 ```
+
+When the new file is missing, the app migrates a legacy
+`%USERPROFILE%\.PingLatencyOverlay\config.json` file. The legacy directory is
+removed only when `config.json` was its only entry; any other user files are
+preserved. The Config status bar reports the migration result.
 
 The config format is shared with the Tauri implementation, so existing overlay
 settings are migrated automatically. Each overlay can optionally enable **Smooth

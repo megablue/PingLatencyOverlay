@@ -301,7 +301,12 @@ impl PingApp {
             style.spacing.scroll.foreground_color = false;
         });
         let position_picker = PositionPicker::new(&cc.egui_ctx);
-        let config = config::load();
+        let loaded = config::load();
+        let config = loaded.config;
+        let status = loaded
+            .notice
+            .map(config_migration_status)
+            .unwrap_or_default();
         let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
 
@@ -327,7 +332,7 @@ impl PingApp {
             selected_id,
             config_visible: show_config,
             running,
-            status: String::new(),
+            status,
             dirty: false,
             confirm_delete: None,
             probes,
@@ -772,22 +777,40 @@ impl PingApp {
                         self.show_editor(ui);
                     });
                 });
-                self.show_status_area(ui);
+                self.show_status_bar(ui);
             });
         });
     }
 
-    fn show_status_area(&mut self, ui: &mut Ui) {
+    fn show_status_bar(&mut self, ui: &mut Ui) {
         let message = self.status.as_str();
         let version = format!("v{}", env!("APP_BUILD_VERSION"));
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::Label::new(message).truncate());
+                let response = ui.add(egui::Label::new(message).truncate());
+                if !message.is_empty() {
+                    response.on_hover_text(message);
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(version).color(UI_TEXT_SECONDARY));
                 });
             });
         });
+    }
+}
+
+fn config_migration_status(notice: config::ConfigNotice) -> String {
+    match notice {
+        config::ConfigNotice::Migrated {
+            legacy_directory_retained: false,
+        } => "Config migrated to ~/.config/.PingLatencyOverlay.".to_string(),
+        config::ConfigNotice::Migrated {
+            legacy_directory_retained: true,
+        } => "Config migrated to ~/.config/.PingLatencyOverlay; legacy directory was retained."
+            .to_string(),
+        config::ConfigNotice::MigrationFailed(error) => {
+            format!("Config migration failed: {error}. Legacy config was kept.")
+        }
     }
 }
 
@@ -1318,12 +1341,31 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::selected_overlay_for_border;
+    use super::{config_migration_status, selected_overlay_for_border};
+    use crate::config::ConfigNotice;
 
     #[test]
     fn hidden_config_does_not_keep_overlay_selected_for_border() {
         let selected = Some("overlay");
         assert_eq!(selected_overlay_for_border(false, selected), None);
         assert_eq!(selected_overlay_for_border(true, selected), Some("overlay"));
+    }
+
+    #[test]
+    fn config_migration_messages_describe_cleanup() {
+        assert_eq!(
+            config_migration_status(ConfigNotice::Migrated {
+                legacy_directory_retained: false,
+            }),
+            "Config migrated to ~/.config/.PingLatencyOverlay."
+        );
+        assert!(config_migration_status(ConfigNotice::Migrated {
+            legacy_directory_retained: true,
+        })
+        .contains("legacy directory was retained"));
+        assert!(config_migration_status(ConfigNotice::MigrationFailed(
+            "permission denied".to_string(),
+        ))
+        .contains("Legacy config was kept"));
     }
 }

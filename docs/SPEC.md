@@ -75,8 +75,14 @@
 - Timeout: configurable, default 1000 ms.
 
 ## Config storage
-- JSON at `~/.PingLatencyOverlay/config.json`.
+- JSON at `~/.config/.PingLatencyOverlay/config.json`.
 - Loaded on startup to recreate overlays and their settings.
+- If the new config file is missing, a legacy
+  `~/.PingLatencyOverlay/config.json` is migrated automatically.
+- The legacy directory is removed only when `config.json` was its only entry;
+  other files and subdirectories are preserved.
+- The Config status bar reports successful migration, retained legacy data, or
+  migration failure.
 
 ## Packaging
 - Target architectures: x64 and ARM64.

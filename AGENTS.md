@@ -9,7 +9,7 @@ product behavior.
 ## Layout
 - `src-tauri/` — the Cargo project; run Cargo commands here.
   - `src/lib.rs` — module wiring and the application entry point.
-  - `src/config.rs` — config schema, defaults, normalization, and JSON persistence.
+  - `src/config.rs` — config schema, persistence, and legacy directory migration.
   - `src/probe.rs` — one-shot ICMP or TCP latency measurement.
   - `src/probes.rs` — long-lived Tokio probe tasks and bounded sample buffers.
   - `src/overlay.rs` — native layered HWND creation, DPI/work-area layout, and
@@ -43,6 +43,12 @@ Installer (run from the repository root):
 - ICMP uses the `ping-rs` crate (Win32 `IcmpSendEcho2`) and does not require
   Administrator. `src/probe.rs` resolves ICMP targets to IPv4; TCP supports
   hostname resolution through Tokio.
+- Config lives at `~/.config/.PingLatencyOverlay/config.json`. When that file is
+  missing, `config.rs` migrates `~/.PingLatencyOverlay/config.json` and only
+  removes the legacy directory when `config.json` was its sole entry.
+- The bottom row of the Config window is the **status bar**
+  (`show_status_bar`); transient operation messages appear there beside the
+  right-aligned version label.
 - The root egui viewport starts hidden. Tray **left-click** shows Config; the
   context menu is right-click. Config-window close hides the root viewport; only
   tray Exit closes the app.

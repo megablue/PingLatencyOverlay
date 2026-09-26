@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -327,30 +327,68 @@ impl Config {
     }
 }
 
-/// `~/.PingLatencyOverlay`
+const CONFIG_FILE: &str = "config.json";
+
+/// Result of loading the configuration, including any one-time migration.
+pub struct ConfigLoad {
+    pub config: Config,
+    pub notice: Option<ConfigNotice>,
+}
+
+/// User-visible result of attempting to migrate the legacy config directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigNotice {
+    Migrated { legacy_directory_retained: bool },
+    MigrationFailed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MigrationOutcome {
+    LegacyDirectoryRemoved,
+    LegacyDirectoryRetained,
+}
+
+/// `~/.config/.PingLatencyOverlay`
 pub fn config_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+        .join(".PingLatencyOverlay")
+}
+
+/// `~/.config/.PingLatencyOverlay/config.json`
+pub fn config_path() -> PathBuf {
+    config_dir().join(CONFIG_FILE)
+}
+
+/// Legacy `~/.PingLatencyOverlay` directory.
+fn legacy_config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".PingLatencyOverlay")
 }
 
-/// `~/.PingLatencyOverlay/config.json`
-pub fn config_path() -> PathBuf {
-    config_dir().join("config.json")
-}
-
-/// Load the config from disk, falling back to defaults on any error.
-pub fn load() -> Config {
-    let mut cfg = match fs::read_to_string(config_path()) {
-        Ok(raw) => {
-            // Tolerate a UTF-8 BOM (e.g. files edited by Notepad/PowerShell).
-            let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
-            serde_json::from_str::<Config>(raw).unwrap_or_default()
+/// Load the new config location, migrating the legacy directory when needed.
+pub fn load() -> ConfigLoad {
+    let path = config_path();
+    let notice = if path.exists() {
+        None
+    } else {
+        match migrate_legacy_config(&config_dir(), &legacy_config_dir()) {
+            Ok(Some(MigrationOutcome::LegacyDirectoryRemoved)) => Some(ConfigNotice::Migrated {
+                legacy_directory_retained: false,
+            }),
+            Ok(Some(MigrationOutcome::LegacyDirectoryRetained)) => Some(ConfigNotice::Migrated {
+                legacy_directory_retained: true,
+            }),
+            Ok(None) => None,
+            Err(error) => Some(ConfigNotice::MigrationFailed(error.to_string())),
         }
-        Err(_) => Config::default(),
     };
-    cfg.normalize();
-    cfg
+
+    let mut config = load_from_path(&path);
+    config.normalize();
+    ConfigLoad { config, notice }
 }
 
 /// Persist the config to disk (creating the directory if needed).
@@ -360,9 +398,133 @@ pub fn save(cfg: &Config) -> io::Result<()> {
     fs::write(config_path(), json)
 }
 
+fn load_from_path(path: &Path) -> Config {
+    match fs::read_to_string(path) {
+        Ok(raw) => parse_config(&raw).unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}
+
+fn parse_config(raw: &str) -> Result<Config, serde_json::Error> {
+    // Tolerate a UTF-8 BOM (e.g. files edited by Notepad/PowerShell).
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    serde_json::from_str(raw)
+}
+
+fn migrate_legacy_config(
+    new_dir: &Path,
+    legacy_dir: &Path,
+) -> io::Result<Option<MigrationOutcome>> {
+    let new_path = new_dir.join(CONFIG_FILE);
+    if new_path.exists() {
+        return Ok(None);
+    }
+
+    let legacy_path = legacy_dir.join(CONFIG_FILE);
+    if !legacy_path.is_file() {
+        return Ok(None);
+    }
+    let legacy_contains_only_config = directory_contains_only_config(legacy_dir)?;
+    fs::create_dir_all(new_dir)?;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temporary_path = new_dir.join(format!(
+        ".{CONFIG_FILE}.migrating-{}-{stamp}",
+        std::process::id()
+    ));
+
+    let migration_result = (|| {
+        let mut source = fs::File::open(&legacy_path)?;
+        let mut destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        io::copy(&mut source, &mut destination)?;
+        destination.sync_all()?;
+        drop(destination);
+
+        let raw = fs::read_to_string(&temporary_path)?;
+        parse_config(&raw)
+            .map(|_| ())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        fs::rename(&temporary_path, &new_path)
+    })();
+    if let Err(error) = migration_result {
+        let _ = fs::remove_file(&temporary_path);
+        if new_path.exists() {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+
+    let legacy_directory_retained = fs::remove_file(&legacy_path).is_err()
+        || !(legacy_contains_only_config && fs::remove_dir(legacy_dir).is_ok());
+    Ok(Some(if legacy_directory_retained {
+        MigrationOutcome::LegacyDirectoryRetained
+    } else {
+        MigrationOutcome::LegacyDirectoryRemoved
+    }))
+}
+
+fn directory_contains_only_config(directory: &Path) -> io::Result<bool> {
+    let mut entries = fs::read_dir(directory)?;
+    let Some(first) = entries.next() else {
+        return Ok(false);
+    };
+    let first = first?;
+    if entries.next().transpose()?.is_some() {
+        return Ok(false);
+    }
+    Ok(first
+        .file_name()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(CONFIG_FILE)
+        && first.file_type()?.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let path = std::env::temp_dir().join(format!(
+                "ping-latency-overlay-{label}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_config(directory: &Path, contents: &str) -> PathBuf {
+        fs::create_dir_all(directory).expect("create config directory");
+        let path = directory.join(CONFIG_FILE);
+        fs::write(&path, contents).expect("write config");
+        path
+    }
+
+    const VALID_CONFIG: &str =
+        r#"{"overlays":[{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}]}"#;
 
     #[test]
     fn new_overlay_uses_documented_defaults() {
@@ -450,6 +612,99 @@ mod tests {
         };
         config.normalize();
         assert_eq!(config.overlays[0].scale, 25);
+    }
+
+    #[test]
+    fn migration_moves_only_config_and_removes_legacy_directory() {
+        let root = TestDir::new("only-config");
+        let legacy = root.path().join("legacy");
+        let new = root.path().join("new");
+        let legacy_path = write_config(&legacy, VALID_CONFIG);
+
+        assert_eq!(
+            migrate_legacy_config(&new, &legacy).expect("migrate config"),
+            Some(MigrationOutcome::LegacyDirectoryRemoved)
+        );
+        assert_eq!(
+            fs::read_to_string(new.join(CONFIG_FILE)).expect("read migrated config"),
+            VALID_CONFIG
+        );
+        assert!(!legacy_path.exists());
+        assert!(!legacy.exists());
+        assert_eq!(
+            migrate_legacy_config(&new, &legacy).expect("repeat migration"),
+            None
+        );
+    }
+
+    #[test]
+    fn migration_retains_legacy_directory_with_extra_files() {
+        let root = TestDir::new("extra-files");
+        let legacy = root.path().join("legacy");
+        let new = root.path().join("new");
+        fs::create_dir_all(&new).expect("create existing new directory");
+        let legacy_path = write_config(&legacy, VALID_CONFIG);
+        let extra = legacy.join("keep-me.txt");
+        fs::write(&extra, "user data").expect("write extra file");
+
+        assert_eq!(
+            migrate_legacy_config(&new, &legacy).expect("migrate config"),
+            Some(MigrationOutcome::LegacyDirectoryRetained)
+        );
+        assert!(new.join(CONFIG_FILE).is_file());
+        assert!(!legacy_path.exists());
+        assert_eq!(
+            fs::read_to_string(extra).expect("read retained file"),
+            "user data"
+        );
+    }
+
+    #[test]
+    fn migration_never_overwrites_an_existing_new_config() {
+        let root = TestDir::new("existing-new");
+        let legacy = root.path().join("legacy");
+        let new = root.path().join("new");
+        let legacy_path = write_config(&legacy, VALID_CONFIG);
+        let new_path = write_config(&new, "{\"overlays\":[]}");
+
+        assert_eq!(
+            migrate_legacy_config(&new, &legacy).expect("check migration"),
+            None
+        );
+        assert_eq!(
+            fs::read_to_string(new_path).expect("read new config"),
+            "{\"overlays\":[]}"
+        );
+        assert!(legacy_path.is_file());
+    }
+
+    #[test]
+    fn migration_ignores_legacy_directory_without_config() {
+        let root = TestDir::new("missing-config");
+        let legacy = root.path().join("legacy");
+        let new = root.path().join("new");
+        fs::create_dir_all(&legacy).expect("create legacy directory");
+        fs::write(legacy.join("keep-me.txt"), "user data").expect("write extra file");
+
+        assert_eq!(
+            migrate_legacy_config(&new, &legacy).expect("check migration"),
+            None
+        );
+        assert!(legacy.join("keep-me.txt").is_file());
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn invalid_legacy_config_is_not_deleted() {
+        let root = TestDir::new("invalid-config");
+        let legacy = root.path().join("legacy");
+        let new = root.path().join("new");
+        let legacy_path = write_config(&legacy, "{not valid json");
+
+        assert!(migrate_legacy_config(&new, &legacy).is_err());
+        assert!(legacy_path.is_file());
+        assert!(!new.join(CONFIG_FILE).exists());
+        assert_eq!(fs::read_dir(&new).expect("read new directory").count(), 0);
     }
 
     #[test]
