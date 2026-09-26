@@ -535,7 +535,7 @@ impl PingApp {
                                     .color(UI_TEXT_SECONDARY),
                             );
                         }
-                        let rows: Vec<(String, String, &'static str, bool)> = self
+                        let rows: Vec<(String, String, Anchor, bool)> = self
                             .config
                             .overlays
                             .iter()
@@ -547,7 +547,7 @@ impl PingApp {
                                     } else {
                                         overlay.name.clone()
                                     },
-                                    position_indicator(overlay.position),
+                                    overlay.position,
                                     overlay.enabled,
                                 )
                             })
@@ -598,45 +598,56 @@ impl PingApp {
                                         });
                                     } else {
                                         ui.horizontal(|ui| {
-                                            let (tab_rect, tab_response) = ui.allocate_exact_size(
-                                                egui::vec2(row_width - 80.0, 28.0),
-                                                egui::Sense::click(),
+                                            let (tab_rect, mut tab_response) = ui
+                                                .allocate_exact_size(
+                                                    egui::vec2(row_width - 80.0, 28.0),
+                                                    egui::Sense::click(),
+                                                );
+                                            let indicator_size = 22.0;
+                                            let indicator_rect = egui::Rect::from_min_size(
+                                                tab_rect.left_top(),
+                                                egui::vec2(indicator_size, tab_rect.height()),
+                                            );
+                                            // Reuse the existing blue palette: muted
+                                            // default, bright active selection.
+                                            let indicator_color =
+                                                if active { UI_ACCENT } else { UI_ACCENT_STRONG };
+                                            draw_position_indicator(
+                                                ui.painter(),
+                                                indicator_rect,
+                                                indicator,
+                                                indicator_color,
+                                            );
+                                            let text_rect = egui::Rect::from_min_max(
+                                                egui::pos2(
+                                                    indicator_rect.right() + 6.0,
+                                                    tab_rect.top(),
+                                                ),
+                                                tab_rect.right_bottom(),
                                             );
                                             let font_id =
                                                 egui::TextStyle::Button.resolve(ui.style());
                                             let mut tab_text = egui::text::LayoutJob::default();
-                                            tab_text.wrap.max_width = tab_rect.width();
+                                            tab_text.wrap.max_width = text_rect.width();
                                             tab_text.wrap.max_rows = 1;
                                             tab_text.wrap.break_anywhere = true;
                                             tab_text.append(
-                                                indicator,
-                                                0.0,
-                                                egui::TextFormat::simple(
-                                                    font_id.clone(),
-                                                    UI_ACCENT,
-                                                ),
-                                            );
-                                            tab_text.append(
-                                                "  ",
-                                                0.0,
-                                                egui::TextFormat::simple(
-                                                    font_id.clone(),
-                                                    UI_ACCENT,
-                                                ),
-                                            );
-                                            tab_text.append(
                                                 &name,
                                                 0.0,
-                                                egui::TextFormat::simple(font_id.clone(), UI_TEXT),
+                                                egui::TextFormat::simple(font_id, UI_TEXT),
                                             );
                                             let galley = ui.painter().layout_job(tab_text);
                                             let text_offset =
-                                                (tab_rect.height() - galley.size().y) / 2.0;
+                                                (text_rect.height() - galley.size().y) / 2.0;
                                             ui.painter().galley(
-                                                tab_rect.left_top() + egui::vec2(0.0, text_offset),
+                                                text_rect.left_top() + egui::vec2(0.0, text_offset),
                                                 galley,
                                                 UI_TEXT,
                                             );
+                                            if tab_response.hovered() {
+                                                tab_response = tab_response
+                                                    .on_hover_text(position_name(indicator));
+                                            }
                                             if tab_response.clicked() {
                                                 self.selected_id = Some(id.clone());
                                             }
@@ -1323,17 +1334,54 @@ fn border_effect_label(effect: BorderEffect) -> &'static str {
     }
 }
 
-fn position_indicator(anchor: Anchor) -> &'static str {
-    match anchor {
-        Anchor::TopLeft => "↖",
-        Anchor::TopCenter => "↑",
-        Anchor::TopRight => "↗",
-        Anchor::CenterLeft => "←",
-        Anchor::Center => "⊚",
-        Anchor::CenterRight => "→",
-        Anchor::BottomLeft => "↙",
-        Anchor::BottomCenter => "↓",
-        Anchor::BottomRight => "↘",
+fn draw_position_indicator(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    anchor: Anchor,
+    color: Color32,
+) {
+    let center = rect.center();
+    let arm = rect.width().min(rect.height()) * 0.30;
+    let stroke = egui::Stroke::new(1.5, color);
+    let direction = match anchor {
+        Anchor::TopLeft => Some(egui::vec2(-1.0, -1.0)),
+        Anchor::TopCenter => Some(egui::vec2(0.0, -1.0)),
+        Anchor::TopRight => Some(egui::vec2(1.0, -1.0)),
+        Anchor::CenterLeft => Some(egui::vec2(-1.0, 0.0)),
+        Anchor::Center => None,
+        Anchor::CenterRight => Some(egui::vec2(1.0, 0.0)),
+        Anchor::BottomLeft => Some(egui::vec2(-1.0, 1.0)),
+        Anchor::BottomCenter => Some(egui::vec2(0.0, 1.0)),
+        Anchor::BottomRight => Some(egui::vec2(1.0, 1.0)),
+    };
+
+    if let Some(direction) = direction {
+        let direction = direction.normalized();
+        let tip = center + direction * arm;
+        let tail = center - direction * arm;
+        let head = arm * 0.55;
+        let perpendicular = egui::vec2(-direction.y, direction.x) * head * 0.7;
+        painter.line_segment([tail, tip], stroke);
+        painter.line_segment([tip, tip - direction * head + perpendicular], stroke);
+        painter.line_segment([tip, tip - direction * head - perpendicular], stroke);
+    } else {
+        let radius = arm * 0.65;
+        let tick = arm * 0.35;
+        painter.circle_stroke(center, radius, stroke);
+        painter.line_segment(
+            [
+                center - egui::vec2(tick, 0.0),
+                center + egui::vec2(tick, 0.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                center - egui::vec2(0.0, tick),
+                center + egui::vec2(0.0, tick),
+            ],
+            stroke,
+        );
     }
 }
 
