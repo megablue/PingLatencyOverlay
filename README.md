@@ -31,16 +31,34 @@ A separate installer is required for each architecture.
 
 ## Configuration
 
-Settings are stored at:
+Settings are stored in profiles:
 
 ```text
-%USERPROFILE%\.config\.PingLatencyOverlay\config.json
+%USERPROFILE%\.config\.PingLatencyOverlay\
+├── globalconfig.json
+└── profiles\
+    ├── profile_default.json
+    └── profile_work.json
 ```
 
-When the new file is missing, the app migrates a legacy
-`%USERPROFILE%\.PingLatencyOverlay\config.json` file. The legacy directory is
-removed only when `config.json` was its only entry; any other user files are
-preserved. The Config status bar reports the migration result.
+Each profile holds one complete set of overlays. The profile popup above
+**Add overlay** lists them and can create, rename, delete and switch between
+them. **Save** writes to the profile that is currently active, and that choice
+is remembered in `globalconfig.json`. Profile files are named
+`profile_<name>.json`, where the name is lowercased and reduced to letters,
+digits, `-` and `_`.
+
+**Save** and **Discard** are the two ways to resolve pending edits: Save writes
+them to the active profile, and Discard reloads it from disk. Switching to
+another profile is refused until one of them is used.
+
+An existing `%USERPROFILE%\.config\.PingLatencyOverlay\config.json` is
+validated and moved to `profiles\profile_default.json` on the first launch, and
+is only deleted once the profile copy is in place. A file that cannot be read
+is kept where it is and the reason is shown in the status bar. When `config.json`
+is missing, a legacy `%USERPROFILE%\.PingLatencyOverlay\config.json` is
+migrated first; that legacy directory is removed only when `config.json` was its
+only entry, so any other user files are preserved.
 
 ## Positioning
 

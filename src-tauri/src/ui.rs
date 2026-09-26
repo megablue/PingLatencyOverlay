@@ -12,8 +12,10 @@ use crate::probes::ProbeManager;
 use crate::tray::{self, TrayAction, TrayState};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
-const SIDEBAR_CONTROLS_HEIGHT: f32 = 116.0;
+const SIDEBAR_CONTROLS_HEIGHT: f32 = 188.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+const PROFILE_ROW_HEIGHT: f32 = 26.0;
+const PROFILE_ICON_SIZE: f32 = 24.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 // Windows 11 Explorer-inspired dark palette.
@@ -278,8 +280,36 @@ enum ShutdownState {
     CloseRequested,
 }
 
+/// Inline editor or confirmation shown at the bottom of the profile popup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProfileDialog {
+    Create { name: String },
+    Rename { from: String, name: String },
+    Delete { name: String },
+}
+
+/// A profile request raised by the popup, applied after it closes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProfileAction {
+    Switch(String),
+    Create(String),
+    Rename { from: String, to: String },
+    Delete(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileIcon {
+    Rename,
+    Delete,
+}
+
 pub struct PingApp {
     config: Config,
+    active_profile: String,
+    profiles: Vec<String>,
+    profile_menu_open: bool,
+    profile_dialog: Option<ProfileDialog>,
+    profile_name_focus: bool,
     selected_id: Option<String>,
     config_visible: bool,
     running: bool,
@@ -303,10 +333,9 @@ impl PingApp {
         let position_picker = PositionPicker::new(&cc.egui_ctx);
         let loaded = config::load();
         let config = loaded.config;
-        let status = loaded
-            .notice
-            .map(config_migration_status)
-            .unwrap_or_default();
+        let status = config_notices_status(&loaded.notices);
+        let active_profile = loaded.active_profile;
+        let profiles = loaded.profiles;
         let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
 
@@ -329,6 +358,11 @@ impl PingApp {
 
         Ok(Self {
             config,
+            active_profile,
+            profiles,
+            profile_menu_open: false,
+            profile_dialog: None,
+            profile_name_focus: false,
             selected_id,
             config_visible: show_config,
             running,
@@ -455,7 +489,9 @@ impl PingApp {
     fn persist_current(&mut self) -> bool {
         let mut next = self.config.clone();
         next.normalize();
-        match config::save(&next) {
+        // Profiles are the only configuration storage now; the previous
+        // single-file config.json was moved into the profiles directory.
+        match config::save_profile(&self.active_profile, &next) {
             Ok(()) => {
                 self.apply_saved_config(next);
                 self.dirty = false;
@@ -510,6 +546,139 @@ impl PingApp {
     fn save_edits(&mut self) {
         if self.persist_current() {
             self.status = "Saved.".to_string();
+        }
+    }
+
+    /// Drop unsaved edits by reloading the active profile from disk.
+    fn discard_edits(&mut self) {
+        match config::load_profile(&self.active_profile) {
+            Ok(mut stored) => {
+                stored.normalize();
+                self.apply_saved_config(stored);
+                self.dirty = false;
+                self.status = "Changes discarded.".to_string();
+            }
+            Err(error) => {
+                self.status = format!(
+                    "Could not reload profile \"{}\": {error}",
+                    self.active_profile
+                );
+            }
+        }
+    }
+
+    fn refresh_profiles(&mut self) {
+        self.profiles = config::list_profiles();
+    }
+
+    /// Make another profile the active one and remember the choice.
+    fn switch_profile(&mut self, name: &str) {
+        self.profile_menu_open = false;
+        if name == self.active_profile {
+            return;
+        }
+        if !can_switch_profile(self.dirty) {
+            self.status = "Save or discard your changes before switching profiles.".to_string();
+            return;
+        }
+        match config::load_profile(name) {
+            Ok(mut stored) => {
+                stored.normalize();
+                self.active_profile = name.to_string();
+                if let Err(error) = config::set_active_profile(&self.active_profile) {
+                    self.status = format!("Could not update globalconfig.json: {error}");
+                }
+                self.selected_id = stored.overlays.first().map(|overlay| overlay.id.clone());
+                self.apply_saved_config(stored);
+                self.dirty = false;
+                self.status = format!("Loaded profile \"{name}\".");
+            }
+            Err(error) => {
+                self.status = format!("Could not load profile \"{name}\": {error}");
+            }
+        }
+        self.refresh_profiles();
+    }
+
+    /// Create a new empty profile, then load it. Returns false when the name
+    /// was rejected.
+    fn create_profile(&mut self, name: &str) -> bool {
+        match config::create_profile(name) {
+            Ok(slug) => {
+                self.refresh_profiles();
+                if can_switch_profile(self.dirty) {
+                    self.switch_profile(&slug);
+                } else {
+                    self.status = format!(
+                        "Created profile \"{slug}\". Save or discard your changes to load it."
+                    );
+                }
+                true
+            }
+            Err(error) => {
+                self.status = format!("Could not create a profile: {error}");
+                false
+            }
+        }
+    }
+
+    /// Rename a profile. Returns false when the new name was rejected.
+    fn rename_profile(&mut self, from: &str, to: &str) -> bool {
+        if to.trim() == from {
+            return true;
+        }
+        match config::rename_profile(from, to) {
+            Ok(slug) => {
+                if self.active_profile == from {
+                    self.active_profile = slug.clone();
+                    if let Err(error) = config::set_active_profile(&self.active_profile) {
+                        self.status = format!("Could not update globalconfig.json: {error}");
+                    }
+                }
+                self.refresh_profiles();
+                self.status = format!("Renamed profile \"{from}\" to \"{slug}\".");
+                true
+            }
+            Err(error) => {
+                self.status = format!("Could not rename the profile: {error}");
+                false
+            }
+        }
+    }
+
+    fn delete_profile(&mut self, name: &str) {
+        if self.profiles.len() <= 1 {
+            self.status = "A profile cannot be deleted while it is the only one.".to_string();
+            return;
+        }
+        if name == self.active_profile && !can_switch_profile(self.dirty) {
+            self.status =
+                "Save or discard your changes before deleting the active profile.".to_string();
+            return;
+        }
+        if let Err(error) = config::delete_profile(name) {
+            self.status = format!("Could not delete profile \"{name}\": {error}");
+            return;
+        }
+        self.refresh_profiles();
+        if name == self.active_profile {
+            // Prefer the default profile, otherwise fall back to whatever is
+            // left so the app always has a configuration.
+            let fallback = if self
+                .profiles
+                .iter()
+                .any(|profile| profile == config::DEFAULT_PROFILE)
+            {
+                config::DEFAULT_PROFILE.to_string()
+            } else {
+                self.profiles
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| config::DEFAULT_PROFILE.to_string())
+            };
+            self.switch_profile(&fallback);
+        } else {
+            self.status = format!("Deleted profile \"{name}\".");
         }
     }
 
@@ -683,6 +852,18 @@ impl PingApp {
             });
 
             ui.add_space(6.0);
+            let profile_label = format!("Profile: {}", self.active_profile);
+            let profile_button = ui.add_sized(
+                [row_width, 32.0],
+                egui::Button::new(RichText::new(profile_label).color(UI_TEXT)),
+            );
+            if profile_button.clicked() {
+                self.profile_menu_open = !self.profile_menu_open;
+                if self.profile_menu_open {
+                    self.refresh_profiles();
+                }
+            }
+            self.show_profile_popup(ui, &profile_button);
             if ui
                 .add_sized([row_width, 32.0], egui::Button::new("Add overlay"))
                 .clicked()
@@ -702,6 +883,15 @@ impl PingApp {
             {
                 self.toggle_running();
             }
+            let mut discard_clicked = false;
+            ui.add_enabled_ui(self.dirty, |ui| {
+                discard_clicked = ui
+                    .add_sized([row_width, 34.0], egui::Button::new("Discard"))
+                    .clicked();
+            });
+            if discard_clicked {
+                self.discard_edits();
+            }
             let save_button = egui::Button::new("Save")
                 .fill(UI_ACCENT_STRONG)
                 .min_size(egui::vec2(row_width, 34.0));
@@ -713,6 +903,176 @@ impl PingApp {
                 self.save_edits();
             }
         });
+    }
+
+    /// Profile picker shown under the profile button. Create, rename and
+    /// delete live inside the menu so the sidebar keeps a single control.
+    fn show_profile_popup(&mut self, ui: &mut Ui, anchor: &egui::Response) {
+        let active = self.active_profile.clone();
+        let profiles = self.profiles.clone();
+        let dirty = self.dirty;
+        let mut focus_field = std::mem::take(&mut self.profile_name_focus);
+        // The dialog is taken out for the frame so the popup can edit it
+        // without borrowing the app state, then stored back for the next frame.
+        let mut dialog = self.profile_dialog.take();
+        let mut next_dialog = dialog.clone();
+        let mut action: Option<ProfileAction> = None;
+
+        let popup = egui::containers::Popup::from_response(anchor)
+            .open(self.profile_menu_open)
+            .close_behavior(egui::containers::PopupCloseBehavior::IgnoreClicks)
+            .frame(Frame::popup(ui.style()).fill(UI_SURFACE))
+            .show(|ui| {
+                ui.set_min_width(SIDEBAR_WIDTH - 40.0);
+                let header = ui.label(RichText::new("Profiles").strong().color(UI_TEXT));
+                header.on_hover_text(config::profiles_dir().display().to_string());
+                ui.separator();
+
+                for name in &profiles {
+                    ui.horizontal(|ui| {
+                        let current = *name == active;
+                        // Pending edits dim every other profile, because
+                        // switching is refused until the draft is saved.
+                        let color = if current {
+                            UI_ACCENT
+                        } else if dirty {
+                            UI_TEXT_SECONDARY
+                        } else {
+                            UI_TEXT
+                        };
+                        let icons = PROFILE_ICON_SIZE * 2.0 + ui.spacing().item_spacing.x;
+                        let name_width = (ui.available_width() - icons).max(60.0);
+                        let name_button = ui.add_sized(
+                            [name_width, PROFILE_ROW_HEIGHT],
+                            egui::Button::new(RichText::new(name.as_str()).color(color)),
+                        );
+                        if name_button.clicked() {
+                            action = Some(ProfileAction::Switch(name.clone()));
+                        }
+                        name_button.on_hover_text(config::profile_file_name(name));
+                        let rename =
+                            profile_icon_button(ui, ProfileIcon::Rename, UI_TEXT_SECONDARY);
+                        if rename.clicked() {
+                            next_dialog = Some(ProfileDialog::Rename {
+                                from: name.clone(),
+                                name: name.clone(),
+                            });
+                            focus_field = true;
+                        }
+                        let delete = profile_icon_button(ui, ProfileIcon::Delete, UI_DANGER);
+                        if delete.clicked() {
+                            next_dialog = Some(ProfileDialog::Delete { name: name.clone() });
+                        }
+                    });
+                }
+
+                ui.separator();
+                match &mut dialog {
+                    None => {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), PROFILE_ROW_HEIGHT],
+                                egui::Button::new("+ New profile"),
+                            )
+                            .clicked()
+                        {
+                            next_dialog = Some(ProfileDialog::Create {
+                                name: String::new(),
+                            });
+                            focus_field = true;
+                        }
+                    }
+                    Some(ProfileDialog::Create { name }) => {
+                        ui.label(RichText::new("New profile").color(UI_TEXT));
+                        let (submit, cancel) = profile_name_field(ui, name, "Create", focus_field);
+                        if submit {
+                            action = Some(ProfileAction::Create(name.clone()));
+                        }
+                        if cancel {
+                            next_dialog = None;
+                        }
+                    }
+                    Some(ProfileDialog::Rename { from, name }) => {
+                        ui.label(RichText::new(format!("Rename \"{from}\"")).color(UI_TEXT));
+                        let (submit, cancel) = profile_name_field(ui, name, "Rename", focus_field);
+                        if submit {
+                            action = Some(ProfileAction::Rename {
+                                from: from.clone(),
+                                to: name.clone(),
+                            });
+                        }
+                        if cancel {
+                            next_dialog = None;
+                        }
+                    }
+                    Some(ProfileDialog::Delete { name }) => {
+                        ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER));
+                        let mut confirm = false;
+                        let mut cancel = false;
+                        ui.horizontal(|ui| {
+                            confirm = ui
+                                .add_sized(
+                                    [70.0, PROFILE_ROW_HEIGHT],
+                                    egui::Button::new(RichText::new("Delete").color(UI_TEXT))
+                                        .fill(UI_DANGER_STRONG),
+                                )
+                                .clicked();
+                            cancel = ui
+                                .add_sized([60.0, PROFILE_ROW_HEIGHT], egui::Button::new("Cancel"))
+                                .clicked();
+                        });
+                        if confirm {
+                            action = Some(ProfileAction::Delete(name.clone()));
+                        }
+                        if cancel {
+                            next_dialog = None;
+                        }
+                    }
+                }
+
+                if dirty {
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Save or discard changes before switching profiles.")
+                            .small()
+                            .color(UI_TEXT_SECONDARY),
+                    );
+                }
+            });
+
+        if let Some(popup) = popup {
+            // The popup ignores clicks so it can host editors, so closing is
+            // handled here: the button toggles, anything else outside ends it.
+            if popup.response.clicked_elsewhere() || popup.response.should_close() {
+                self.profile_menu_open = false;
+                next_dialog = None;
+            }
+        }
+        self.profile_name_focus = focus_field;
+        self.profile_dialog = next_dialog;
+
+        if let Some(action) = action {
+            // A rejected name keeps the editor open so it can be corrected.
+            if self.apply_profile_action(action) {
+                self.profile_dialog = None;
+            }
+        }
+    }
+
+    /// Apply a profile request. Returns false when it was rejected.
+    fn apply_profile_action(&mut self, action: ProfileAction) -> bool {
+        match action {
+            ProfileAction::Switch(name) => {
+                self.switch_profile(&name);
+                true
+            }
+            ProfileAction::Create(name) => self.create_profile(&name),
+            ProfileAction::Rename { from, to } => self.rename_profile(&from, &to),
+            ProfileAction::Delete(name) => {
+                self.delete_profile(&name);
+                true
+            }
+        }
     }
 
     fn show_editor(&mut self, ui: &mut Ui) {
@@ -810,7 +1170,17 @@ impl PingApp {
     }
 }
 
-fn config_migration_status(notice: config::ConfigNotice) -> String {
+/// One-time startup results, rendered into the Config status bar.
+fn config_notices_status(notices: &[config::ConfigNotice]) -> String {
+    notices
+        .iter()
+        .map(config_notice_status)
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn config_notice_status(notice: &config::ConfigNotice) -> String {
     match notice {
         config::ConfigNotice::Migrated {
             legacy_directory_retained: false,
@@ -822,7 +1192,108 @@ fn config_migration_status(notice: config::ConfigNotice) -> String {
         config::ConfigNotice::MigrationFailed(error) => {
             format!("Config migration failed: {error}. Legacy config was kept.")
         }
+        config::ConfigNotice::ProfileImported => {
+            "config.json moved to profiles/profile_default.json.".to_string()
+        }
+        config::ConfigNotice::ProfileImportSkipped => {
+            "config.json was kept because a default profile already exists.".to_string()
+        }
+        config::ConfigNotice::ProfileImportFailed(error) => {
+            format!("Profile import failed: {error}. config.json was kept.")
+        }
+        config::ConfigNotice::ProfileFallback { profile, reason } => {
+            format!("Could not use profile \"{profile}\" ({reason}); using the default profile.")
+        }
+        config::ConfigNotice::GlobalConfigFailed(error) => {
+            format!("Could not update globalconfig.json: {error}")
+        }
     }
+}
+
+/// Pending edits must be resolved before another profile can be loaded.
+fn can_switch_profile(dirty: bool) -> bool {
+    !dirty
+}
+
+/// A square button with a painted, font-independent profile icon.
+fn profile_icon_button(ui: &mut Ui, icon: ProfileIcon, color: Color32) -> egui::Response {
+    let response = ui.add_sized(
+        [PROFILE_ICON_SIZE, PROFILE_ICON_SIZE],
+        egui::Button::new(RichText::new("")),
+    );
+    draw_profile_icon(ui.painter(), response.rect, icon, color);
+    response
+}
+
+/// Vector icons for the profile menu so they never depend on font glyphs.
+fn draw_profile_icon(painter: &egui::Painter, rect: egui::Rect, icon: ProfileIcon, color: Color32) {
+    let center = rect.center();
+    let stroke = egui::Stroke::new(1.4, color);
+    let arm = rect.width().min(rect.height()) * 0.24;
+    match icon {
+        ProfileIcon::Delete => {
+            painter.line_segment(
+                [
+                    center + egui::vec2(-arm, -arm),
+                    center + egui::vec2(arm, arm),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center + egui::vec2(arm, -arm),
+                    center + egui::vec2(-arm, arm),
+                ],
+                stroke,
+            );
+        }
+        ProfileIcon::Rename => {
+            // A slanted pencil: barrel edges, ferrule, then the nib.
+            let along = egui::vec2(1.0, -1.0).normalized();
+            let across = egui::vec2(-along.y, along.x);
+            let base = center + along * arm;
+            let neck = center - along * arm * 0.1;
+            let nib = center - along * arm * 0.95;
+            painter.line_segment([base, neck + across * arm * 0.45], stroke);
+            painter.line_segment([base, neck - across * arm * 0.45], stroke);
+            painter.line_segment(
+                [neck + across * arm * 0.45, neck - across * arm * 0.45],
+                stroke,
+            );
+            painter.line_segment([neck, nib], stroke);
+        }
+    }
+}
+
+/// A single-line profile name editor with a submit and a cancel button.
+fn profile_name_field(
+    ui: &mut Ui,
+    name: &mut String,
+    submit_label: &str,
+    focus: bool,
+) -> (bool, bool) {
+    let mut submit = false;
+    let mut cancel = false;
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - 136.0).max(40.0);
+        let edit = ui.add_sized(
+            [width, PROFILE_ROW_HEIGHT],
+            egui::TextEdit::singleline(name).hint_text("Profile name"),
+        );
+        if focus {
+            ui.ctx().memory_mut(|memory| memory.request_focus(edit.id));
+        }
+        // Enter submits while the name field has focus.
+        let enter = edit.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        submit = enter
+            || ui
+                .add_sized([64.0, PROFILE_ROW_HEIGHT], egui::Button::new(submit_label))
+                .clicked();
+        cancel = ui
+            .add_sized([56.0, PROFILE_ROW_HEIGHT], egui::Button::new("Cancel"))
+            .clicked();
+    });
+    (submit, cancel)
 }
 
 fn selected_overlay_for_border(config_visible: bool, selected_id: Option<&str>) -> Option<&str> {
@@ -1424,7 +1895,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_migration_status, selected_overlay_for_border};
+    use super::{
+        can_switch_profile, config_notice_status, config_notices_status,
+        selected_overlay_for_border,
+    };
     use crate::config::ConfigNotice;
 
     #[test]
@@ -1437,18 +1911,58 @@ mod tests {
     #[test]
     fn config_migration_messages_describe_cleanup() {
         assert_eq!(
-            config_migration_status(ConfigNotice::Migrated {
+            config_notice_status(&ConfigNotice::Migrated {
                 legacy_directory_retained: false,
             }),
             "Config migrated to ~/.config/.PingLatencyOverlay."
         );
-        assert!(config_migration_status(ConfigNotice::Migrated {
+        assert!(config_notice_status(&ConfigNotice::Migrated {
             legacy_directory_retained: true,
         })
         .contains("legacy directory was retained"));
-        assert!(config_migration_status(ConfigNotice::MigrationFailed(
-            "permission denied".to_string(),
+        assert!(config_notice_status(&ConfigNotice::MigrationFailed(
+            "permission denied".to_string()
         ))
         .contains("Legacy config was kept"));
+    }
+
+    #[test]
+    fn profile_notices_are_reported_in_the_status_bar() {
+        let imported = config_notice_status(&ConfigNotice::ProfileImported);
+        assert!(imported.contains("profiles/profile_default.json"));
+
+        let skipped = config_notice_status(&ConfigNotice::ProfileImportSkipped);
+        assert!(skipped.contains("config.json was kept"));
+
+        let failed =
+            config_notice_status(&ConfigNotice::ProfileImportFailed("bad json".to_string()));
+        assert!(failed.contains("config.json was kept"));
+
+        let fallback = config_notice_status(&ConfigNotice::ProfileFallback {
+            profile: "work".to_string(),
+            reason: "not found".to_string(),
+        });
+        assert!(fallback.contains("\"work\""));
+        assert!(fallback.contains("not found"));
+    }
+
+    #[test]
+    fn several_notices_are_joined_into_one_status_message() {
+        let notices = [
+            ConfigNotice::Migrated {
+                legacy_directory_retained: false,
+            },
+            ConfigNotice::ProfileImported,
+        ];
+        let status = config_notices_status(&notices);
+        assert!(status.contains("Config migrated"));
+        assert!(status.contains("profile_default.json"));
+        assert_eq!(config_notices_status(&[]), "");
+    }
+
+    #[test]
+    fn unsaved_edits_block_switching_profiles() {
+        assert!(!can_switch_profile(true));
+        assert!(can_switch_profile(false));
     }
 }

@@ -9,7 +9,8 @@ product behavior.
 ## Layout
 - `src-tauri/` — the Cargo project; run Cargo commands here.
   - `src/lib.rs` — module wiring and the application entry point.
-  - `src/config.rs` — config schema, persistence, and legacy directory migration.
+  - `src/config.rs` — config schema, profiles, persistence, and directory
+    migration.
   - `src/probe.rs` — one-shot ICMP or TCP latency measurement.
   - `src/probes.rs` — long-lived Tokio probe tasks and bounded sample buffers.
   - `src/overlay.rs` — native layered HWND creation, DPI/work-area layout, and
@@ -49,6 +50,17 @@ Installer (run from the repository root):
 - `horizontalMarginPx` and `verticalMarginPx` are signed screen-axis offsets.
   Edge anchors measure inward from the work-area edge; centered axes measure
   from the center. Legacy `marginPx` is mapped per anchor during normalization.
+- Config lives at `~/.config/.PingLatencyOverlay/`. `profiles/` holds one
+  `profile_<name>.json` per profile and is the only place overlays are saved;
+  `globalconfig.json` holds app-wide preferences and is created as `{}`, with
+  `activeProfile` added only once a non-default profile is selected. When that
+  file is missing, `config.rs` migrates `~/.PingLatencyOverlay/config.json`,
+  then moves `config.json` to `profiles/profile_default.json` and deletes it
+  only after the copy succeeds. All of this lives in `Store` in `config.rs`,
+  which takes its root directory so tests can point it at a temp folder.
+- Profile switching is refused while `dirty`; the popup's **Discard** button
+  reloads the active profile from disk. Save/Discard are the only ways to
+  resolve pending edits.
 - The bottom row of the Config window is the **status bar**
   (`show_status_bar`); transient operation messages appear there beside the
   right-aligned version label.

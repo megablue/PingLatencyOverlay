@@ -82,14 +82,30 @@
 - Timeout: configurable, default 1000 ms.
 
 ## Config storage
-- JSON at `~/.config/.PingLatencyOverlay/config.json`.
-- Loaded on startup to recreate overlays and their settings.
-- If the new config file is missing, a legacy
-  `~/.PingLatencyOverlay/config.json` is migrated automatically.
-- The legacy directory is removed only when `config.json` was its only entry;
-  other files and subdirectories are preserved.
-- The Config status bar reports successful migration, retained legacy data, or
-  migration failure.
+- Settings live in profile files under
+  `~/.config/.PingLatencyOverlay/profiles`, one file per profile, named
+  `profile_<name>.json`.
+- `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
+  preferences. It is created as `{}` and stays empty until something needs to
+  be stored; the active profile is recorded as `activeProfile` and an absent
+  key means the `default` profile.
+- The active profile is loaded on startup to recreate overlays and their
+  settings, and it is the target of **Save**.
+- Profiles are created empty, and are listed, renamed and deleted from the
+  profile popup above **Add overlay** in the sidebar.
+- Switching profiles is refused while there are unsaved edits. **Discard**
+  reloads the active profile from disk and drops those edits.
+- Deleting the active profile falls back to `default`, or to the first
+  remaining profile when `default` is gone. The last remaining profile cannot
+  be deleted.
+- An existing `config.json` is validated and moved to
+  `profiles/profile_default.json`, and only then removed. A file that fails
+  validation is left in place and the problem is reported.
+- If `config.json` is missing, a legacy `~/.PingLatencyOverlay/config.json` is
+  migrated first. The legacy directory is removed only when `config.json` was
+  its only entry; other files and subdirectories are preserved.
+- The Config status bar reports successful migration, retained legacy data,
+  migration failure, profile import and profile fallback.
 
 ## Packaging
 - Target architectures: x64 and ARM64.
