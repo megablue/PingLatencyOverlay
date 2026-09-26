@@ -158,6 +158,7 @@ mod tests {
         overlay.timeout_ms = 1;
         let mut config = Config {
             overlays: vec![overlay.clone()],
+            ..Config::default()
         };
         manager.apply_config(&config);
         let first = manager.tasks[&overlay.id].id();

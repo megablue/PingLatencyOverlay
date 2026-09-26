@@ -61,6 +61,13 @@ pub const DEFAULT_BG_OPACITY: u32 = 0;
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
+    /// Name shown in the window title, the sidebar and the profile menu.
+    ///
+    /// It is free-form and does not have to be unique: the profile id in the
+    /// file name is the only unique part, so this may be absent in files
+    /// written before profiles had display names.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_name: String,
     #[serde(default)]
     pub overlays: Vec<OverlayConfig>,
 }
@@ -332,6 +339,7 @@ fn anchor_has_vertical_edge(anchor: Anchor) -> bool {
 impl Config {
     /// Clamp values that the UI might send out of range.
     pub fn normalize(&mut self) {
+        self.profile_name = normalize_profile_name(&self.profile_name);
         for o in &mut self.overlays {
             o.window_seconds = o.window_seconds.max(MIN_WINDOW_SECONDS);
             o.scale = o.scale.clamp(1, MAX_SCALE_INPUT);
@@ -391,13 +399,29 @@ const ACTIVE_PROFILE_KEY: &str = "activeProfile";
 /// Profile used when nothing else is stored, and the fallback after a failure.
 pub const DEFAULT_PROFILE: &str = "default";
 const MAX_PROFILE_NAME_LEN: usize = 48;
+/// Largest accepted profile display name, in characters. Display names never
+/// reach the file system, so this only keeps the UI from growing unbounded.
+const MAX_PROFILE_DISPLAY_NAME_LEN: usize = 64;
+/// Highest postfix tried when a profile file name is already taken.
+const MAX_PROFILE_POSTFIX: u32 = 9999;
+/// JSON key holding a profile's display name.
+const PROFILE_NAME_KEY: &str = "profileName";
 
 /// Result of loading the configuration, including any one-time migrations.
 pub struct ConfigLoad {
     pub config: Config,
     pub active_profile: String,
-    pub profiles: Vec<String>,
+    pub profiles: Vec<ProfileEntry>,
     pub notices: Vec<ConfigNotice>,
+}
+
+/// A profile in the profiles directory: its id and the name shown in the UI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileEntry {
+    /// Canonical slug taken from the file name, unique per profile.
+    pub id: String,
+    /// Display name read from inside the file.
+    pub name: String,
 }
 
 /// User-visible results of the one-time startup migrations.
@@ -412,6 +436,10 @@ pub enum ConfigNotice {
     /// A default profile already existed, so `config.json` was left in place.
     ProfileImportSkipped,
     ProfileImportFailed(String),
+    /// Profile files that had no display name were given a derived one.
+    ProfileNamesBackfilled {
+        count: usize,
+    },
     ProfileFallback {
         profile: String,
         reason: String,
@@ -459,10 +487,17 @@ impl Store {
     }
 
     fn profile_path(&self, name: &str) -> io::Result<PathBuf> {
-        let slug = canonical_profile_name(name)?;
-        Ok(self
-            .profiles_dir()
-            .join(format!("{PROFILE_PREFIX}{slug}{PROFILE_EXTENSION}")))
+        Ok(self.profile_file_path(&canonical_profile_name(name)?))
+    }
+
+    /// Path of a profile id that is already canonical.
+    ///
+    /// Ids are built here instead of through `profile_path` because a postfix
+    /// can make an id longer than the sanitizer's own length cap, and the
+    /// sanitizer would then truncate it back to a different name.
+    fn profile_file_path(&self, slug: &str) -> PathBuf {
+        self.profiles_dir()
+            .join(format!("{PROFILE_PREFIX}{slug}{PROFILE_EXTENSION}"))
     }
 
     /// Every readable profile in the profiles directory, sorted by name.
@@ -498,6 +533,81 @@ impl Store {
         profiles
     }
 
+    /// Every readable profile with the display name stored inside it.
+    ///
+    /// A file that cannot be read still appears in the list under a name
+    /// derived from its id, so it can be selected and reported on.
+    fn list_profiles_detailed(&self) -> Vec<ProfileEntry> {
+        self.list_profiles()
+            .into_iter()
+            .map(|id| {
+                let name = self
+                    .read_profile_name(&id)
+                    .unwrap_or_else(|| prettify_profile_id(&id));
+                ProfileEntry { id, name }
+            })
+            .collect()
+    }
+
+    /// The display name stored in a profile file, if it has a usable one.
+    fn read_profile_name(&self, id: &str) -> Option<String> {
+        let raw = fs::read_to_string(self.profile_file_path(id)).ok()?;
+        let value = serde_json::from_str::<serde_json::Value>(strip_bom(&raw)).ok()?;
+        let name = normalize_profile_name(value.get(PROFILE_NAME_KEY)?.as_str()?);
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
+    /// Store a derived display name in every profile file that lacks one.
+    ///
+    /// Returns how many files were updated. Unreadable files are left alone so
+    /// a broken profile is still reported when it is selected.
+    fn backfill_profile_names(&self) -> usize {
+        let mut updated = 0;
+        for id in self.list_profiles() {
+            if self.read_profile_name(&id).is_some() {
+                continue;
+            }
+            let Ok(mut config) = self.load_profile(&id) else {
+                continue;
+            };
+            config.profile_name = prettify_profile_id(&id);
+            if self.save_profile(&id, &config).is_ok() {
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    /// The first free id for `base`, so a taken file name never overwrites a
+    /// profile that is not being replaced.
+    ///
+    /// Display names may repeat, so the collision is resolved by appending
+    /// `_2`, `_3` and so on to the id. `replace` is the file a rename is
+    /// allowed to overwrite, which keeps "rename to the same name" in place.
+    fn unique_profile_id(&self, base: &str, replace: Option<&Path>) -> io::Result<String> {
+        let taken = |slug: &str| {
+            let path = self.profile_file_path(slug);
+            path.exists() && replace != Some(path.as_path())
+        };
+        if !taken(base) {
+            return Ok(base.to_string());
+        }
+        for postfix in 2..=MAX_PROFILE_POSTFIX {
+            let candidate = with_postfix(base, postfix);
+            if !taken(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("No free profile id is left for \"{base}\"."),
+        ))
+    }
+
     /// Read, validate and normalize one profile file.
     fn load_profile(&self, name: &str) -> io::Result<Config> {
         let path = self.profile_path(name)?;
@@ -511,42 +621,57 @@ impl Store {
     /// Write one profile file atomically.
     fn save_profile(&self, name: &str, config: &Config) -> io::Result<()> {
         let json = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
-        write_atomic(&self.profile_path(name)?, &json)
+        write_atomic(
+            &self.profile_file_path(&canonical_profile_name(name)?),
+            &json,
+        )
     }
 
-    /// Create an empty profile and return its canonical name.
-    fn create_profile(&self, name: &str) -> io::Result<String> {
-        let slug = canonical_profile_name(name)?;
-        if self.profile_path(&slug)?.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("A profile named \"{slug}\" already exists."),
-            ));
-        }
-        self.save_profile(&slug, &Config::default())?;
-        Ok(slug)
+    /// Create an empty profile under a display name and return its id and name.
+    ///
+    /// The display name is stored in the new file and does not have to be
+    /// unique; only the id is, so a taken file name gets a postfix instead of
+    /// an error.
+    fn create_profile(&self, display_name: &str) -> io::Result<ProfileEntry> {
+        let base = canonical_profile_name(display_name)?;
+        fs::create_dir_all(self.profiles_dir())?;
+        let id = self.unique_profile_id(&base, None)?;
+        let name = stored_profile_name(display_name, &id);
+        let mut config = Config {
+            profile_name: name.clone(),
+            ..Config::default()
+        };
+        config.normalize();
+        self.save_profile(&id, &config)?;
+        Ok(ProfileEntry { id, name })
     }
 
-    /// Rename a profile file and return the new canonical name.
-    fn rename_profile(&self, from: &str, to: &str) -> io::Result<String> {
-        let from_path = self.profile_path(from)?;
+    /// Rename a profile, store the new display name in it, and return the id
+    /// and name it ended up with.
+    ///
+    /// The file is moved first so the overlays are never rewritten in place,
+    /// and the new name is written afterwards because it lives in the file.
+    fn rename_profile(&self, from: &str, display_name: &str) -> io::Result<ProfileEntry> {
+        let from_id = canonical_profile_name(from)?;
+        let from_path = self.profile_file_path(&from_id);
         if !from_path.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("There is no profile named \"{from}\"."),
             ));
         }
-        let slug = canonical_profile_name(to)?;
-        let to_path = self.profile_path(&slug)?;
-        if to_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("A profile named \"{slug}\" already exists."),
-            ));
-        }
+        let base = canonical_profile_name(display_name)?;
         fs::create_dir_all(self.profiles_dir())?;
-        fs::rename(&from_path, &to_path)?;
-        Ok(slug)
+        let id = self.unique_profile_id(&base, Some(from_path.as_path()))?;
+        let name = stored_profile_name(display_name, &id);
+        let mut config = self.load_profile(from)?;
+        config.profile_name = name.clone();
+        config.normalize();
+        if id != from_id {
+            fs::rename(&from_path, self.profile_file_path(&id))?;
+        }
+        self.save_profile(&id, &config)?;
+        Ok(ProfileEntry { id, name })
     }
 
     fn delete_profile(&self, name: &str) -> io::Result<()> {
@@ -651,6 +776,13 @@ impl Store {
             notices.push(ConfigNotice::GlobalConfigFailed(error.to_string()));
         }
 
+        // Profile files written before profiles had display names get one
+        // derived from their id, so every list and title has a name to show.
+        let backfilled = self.backfill_profile_names();
+        if backfilled > 0 {
+            notices.push(ConfigNotice::ProfileNamesBackfilled { count: backfilled });
+        }
+
         let profiles = self.list_profiles();
         let stored_active = self
             .read_global_config()
@@ -692,7 +824,10 @@ impl Store {
             Some(resolved) => resolved,
             // Nothing readable on disk: start from a fresh default profile.
             None => {
-                let mut fresh = Config::default();
+                let mut fresh = Config {
+                    profile_name: prettify_profile_id(DEFAULT_PROFILE),
+                    ..Config::default()
+                };
                 fresh.normalize();
                 if let Err(error) = self.save_profile(DEFAULT_PROFILE, &fresh) {
                     notices.push(ConfigNotice::ProfileImportFailed(error.to_string()));
@@ -720,7 +855,7 @@ impl Store {
         ConfigLoad {
             config,
             active_profile,
-            profiles: self.list_profiles(),
+            profiles: self.list_profiles_detailed(),
             notices,
         }
     }
@@ -781,6 +916,67 @@ pub fn sanitize_profile_name(raw: &str) -> Result<String, String> {
     Ok(slug)
 }
 
+/// Clean a display name for storage and display.
+///
+/// Display names are free-form and never reach the file system, so only
+/// surrounding whitespace, control characters and the length cap are removed.
+fn normalize_profile_name(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_PROFILE_DISPLAY_NAME_LEN)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Turn a slug into a readable default name: `home-net_2` becomes `Home Net 2`.
+fn prettify_profile_id(id: &str) -> String {
+    let mut name = String::new();
+    for word in id.split(['-', '_']).filter(|word| !word.is_empty()) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        let mut characters = word.chars();
+        if let Some(first) = characters.next() {
+            name.extend(first.to_uppercase());
+            name.push_str(characters.as_str());
+        }
+    }
+    if name.is_empty() {
+        id.to_string()
+    } else {
+        name
+    }
+}
+
+/// The display name to store for a profile, derived from its id when empty.
+fn stored_profile_name(display_name: &str, id: &str) -> String {
+    let name = normalize_profile_name(display_name);
+    if name.is_empty() {
+        prettify_profile_id(id)
+    } else {
+        name
+    }
+}
+
+/// The name to show for a loaded profile.
+///
+/// Files written before profiles had display names have none, so one derived
+/// from the id is used instead.
+pub fn display_name(config: &Config, id: &str) -> String {
+    stored_profile_name(&config.profile_name, id)
+}
+
+/// Append a postfix to a slug while staying inside the length cap, so the
+/// result is still a canonical id that the profile list accepts.
+fn with_postfix(base: &str, postfix: u32) -> String {
+    let tail = format!("_{postfix}");
+    let keep = MAX_PROFILE_NAME_LEN.saturating_sub(tail.len());
+    let base: String = base.chars().take(keep).collect();
+    format!("{}{tail}", base.trim_end_matches('-'))
+}
+
 /// The file name that stores a profile, shown as UI help text.
 pub fn profile_file_name(name: &str) -> String {
     match sanitize_profile_name(name) {
@@ -789,9 +985,9 @@ pub fn profile_file_name(name: &str) -> String {
     }
 }
 
-/// Every readable profile in the profiles directory, sorted by name.
-pub fn list_profiles() -> Vec<String> {
-    store().list_profiles()
+/// Every readable profile in the profiles directory, sorted by id.
+pub fn list_profiles_detailed() -> Vec<ProfileEntry> {
+    store().list_profiles_detailed()
 }
 
 /// Read, validate and normalize one profile file.
@@ -804,14 +1000,18 @@ pub fn save_profile(name: &str, config: &Config) -> io::Result<()> {
     store().save_profile(name, config)
 }
 
-/// Create an empty profile and return its canonical name.
-pub fn create_profile(name: &str) -> io::Result<String> {
-    store().create_profile(name)
+/// Create an empty profile under a display name and return its id and name.
+///
+/// The name does not have to be unique; a taken file name gets a postfix.
+pub fn create_profile(display_name: &str) -> io::Result<ProfileEntry> {
+    store().create_profile(display_name)
 }
 
-/// Rename a profile file and return the new canonical name.
-pub fn rename_profile(from: &str, to: &str) -> io::Result<String> {
-    store().rename_profile(from, to)
+/// Rename a profile to a new display name and return its id and name.
+///
+/// The name does not have to be unique; a taken file name gets a postfix.
+pub fn rename_profile(from: &str, display_name: &str) -> io::Result<ProfileEntry> {
+    store().rename_profile(from, display_name)
 }
 
 /// Delete one profile file.
@@ -1148,6 +1348,7 @@ mod tests {
             let overlay: OverlayConfig = serde_json::from_str(&raw).expect("legacy config");
             let mut config = Config {
                 overlays: vec![overlay],
+                ..Config::default()
             };
             config.normalize();
             let overlay = &config.overlays[0];
@@ -1166,6 +1367,7 @@ mod tests {
         overlay.legacy_margin_px = Some(20);
         let mut config = Config {
             overlays: vec![overlay],
+            ..Config::default()
         };
         config.normalize();
         let value = serde_json::to_value(&config.overlays[0]).expect("serialized config");
@@ -1181,6 +1383,7 @@ mod tests {
                 scale: 25,
                 ..OverlayConfig::new()
             }],
+            ..Config::default()
         };
         config.normalize();
         assert_eq!(config.overlays[0].scale, 25);
@@ -1298,6 +1501,7 @@ mod tests {
                 bg_opacity: 200,
                 ..OverlayConfig::new()
             }],
+            ..Config::default()
         };
         config.normalize();
         let overlay = &config.overlays[0];
@@ -1335,7 +1539,19 @@ mod tests {
                 id: id.to_string(),
                 ..OverlayConfig::new()
             }],
+            ..Config::default()
         }
+    }
+
+    /// Expected profile list from `(id, display name)` pairs.
+    fn entries(names: &[(&str, &str)]) -> Vec<ProfileEntry> {
+        names
+            .iter()
+            .map(|(id, name)| ProfileEntry {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+            })
+            .collect()
     }
 
     #[test]
@@ -1376,7 +1592,7 @@ mod tests {
         let loaded = store.load(&root.path().join("missing-legacy"));
 
         assert_eq!(loaded.active_profile, DEFAULT_PROFILE);
-        assert_eq!(loaded.profiles, vec![DEFAULT_PROFILE.to_string()]);
+        assert_eq!(loaded.profiles, entries(&[(DEFAULT_PROFILE, "Default")]));
         assert_eq!(loaded.config.overlays.len(), 1);
         assert_eq!(loaded.config.overlays[0].id, "legacy");
         assert!(loaded.notices.contains(&ConfigNotice::ProfileImported));
@@ -1460,7 +1676,7 @@ mod tests {
         let loaded = store.load(&root.path().join("missing-legacy"));
 
         assert_eq!(loaded.active_profile, DEFAULT_PROFILE);
-        assert_eq!(loaded.profiles, vec![DEFAULT_PROFILE.to_string()]);
+        assert_eq!(loaded.profiles, entries(&[(DEFAULT_PROFILE, "Default")]));
         assert!(loaded.config.overlays.is_empty());
         assert!(loaded.notices.is_empty());
         assert_eq!(
@@ -1485,7 +1701,7 @@ mod tests {
         assert_eq!(loaded.active_profile, "work-vpn");
         assert_eq!(
             loaded.profiles,
-            vec![DEFAULT_PROFILE.to_string(), "work-vpn".to_string()]
+            entries(&[(DEFAULT_PROFILE, "Default"), ("work-vpn", "Work VPN")])
         );
         assert!(loaded.notices.is_empty());
         assert_eq!(
@@ -1538,9 +1754,9 @@ mod tests {
 
         assert_eq!(loaded.active_profile, DEFAULT_PROFILE);
         assert_eq!(loaded.config.overlays.len(), 1);
-        assert!(matches!(
-            loaded.notices.as_slice(),
-            [ConfigNotice::ProfileFallback { profile, .. }] if profile == "work"
+        assert!(loaded.notices.iter().any(
+            |notice| matches!(notice, ConfigNotice::ProfileFallback { profile, .. } if profile
+                    == "work")
         ));
     }
 
@@ -1573,36 +1789,186 @@ mod tests {
         store.load(&root.path().join("missing-legacy"));
 
         let created = store.create_profile("Work VPN").expect("create profile");
-        assert_eq!(created, "work-vpn");
-        assert!(store
-            .load_profile("work-vpn")
-            .expect("load created profile")
-            .overlays
-            .is_empty());
-        assert!(store.create_profile("work vpn").is_err(), "same slug");
+        assert_eq!(created.id, "work-vpn");
+        assert_eq!(created.name, "Work VPN");
+        let config = store
+            .load_profile(&created.id)
+            .expect("load created profile");
+        assert!(config.overlays.is_empty());
+        assert_eq!(config.profile_name, "Work VPN");
 
         store
             .save_profile("work-vpn", &one_overlay_config("kept"))
             .expect("save profile");
         let renamed = store.rename_profile("work-vpn", "Office").expect("rename");
-        assert_eq!(renamed, "office");
+        assert_eq!(renamed.id, "office");
+        assert_eq!(renamed.name, "Office");
+        let renamed_config = store.load_profile("office").expect("load renamed profile");
+        assert_eq!(renamed_config.overlays[0].id, "kept");
         assert_eq!(
-            store
-                .load_profile("office")
-                .expect("load renamed profile")
-                .overlays[0]
-                .id,
-            "kept"
+            renamed_config.profile_name, "Office",
+            "the new name is stored in the file"
         );
         assert!(
-            store.rename_profile("office", "default").is_err(),
-            "collision"
+            store.load_profile("work-vpn").is_err(),
+            "the old id is gone"
         );
         assert!(store.rename_profile("missing", "any").is_err());
 
         store.delete_profile("office").expect("delete profile");
         assert_eq!(store.list_profiles(), vec![DEFAULT_PROFILE.to_string()]);
         assert!(store.load_profile("office").is_err());
+    }
+
+    #[test]
+    fn duplicate_profile_names_get_a_postfix() {
+        let root = TestDir::new("duplicates");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+
+        for expected in ["home", "home_2", "home_3"] {
+            let created = store.create_profile("Home").expect("create profile");
+            assert_eq!(created.id, expected);
+            assert_eq!(created.name, "Home");
+        }
+
+        // Display names may repeat, so only the ids differ.
+        for id in ["home", "home_2", "home_3"] {
+            let config = store.load_profile(id).expect("load profile");
+            assert_eq!(config.profile_name, "Home");
+            assert!(config.overlays.is_empty());
+        }
+        assert_eq!(
+            store.list_profiles_detailed(),
+            entries(&[
+                ("default", "Default"),
+                ("home", "Home"),
+                ("home_2", "Home"),
+                ("home_3", "Home"),
+            ])
+        );
+    }
+
+    #[test]
+    fn renaming_onto_a_taken_name_keeps_the_existing_profile() {
+        let root = TestDir::new("rename-collision");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        store.create_profile("Home").expect("create home");
+        store.create_profile("Office").expect("create office");
+        store
+            .save_profile("office", &one_overlay_config("office-overlay"))
+            .expect("save office");
+
+        let renamed = store.rename_profile("office", "Home").expect("rename");
+
+        assert_eq!(renamed.id, "home_2", "the taken id gets a postfix");
+        assert_eq!(renamed.name, "Home");
+        assert_eq!(
+            store.load_profile("home_2").expect("load renamed").overlays[0].id,
+            "office-overlay",
+            "the overlays move with the file"
+        );
+        assert_eq!(
+            store
+                .load_profile("home")
+                .expect("load untouched")
+                .profile_name,
+            "Home"
+        );
+        assert!(store.load_profile("office").is_err(), "the old id is gone");
+    }
+
+    #[test]
+    fn renaming_a_profile_to_its_own_name_keeps_the_file() {
+        let root = TestDir::new("rename-self");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        store.create_profile("Home Net").expect("create profile");
+
+        for name in ["Home Net", "home net", "HOME-NET"] {
+            let renamed = store.rename_profile("home-net", name).expect("rename");
+            assert_eq!(
+                renamed.id, "home-net",
+                "the same id is not a collision with itself"
+            );
+        }
+        assert_eq!(store.list_profiles().len(), 2, "no postfix file appears");
+        assert_eq!(
+            store
+                .load_profile("home-net")
+                .expect("load profile")
+                .profile_name,
+            "HOME-NET",
+            "the name is free-form, only the id is normalized"
+        );
+    }
+
+    #[test]
+    fn postfixes_stay_inside_the_id_length_cap() {
+        let long = "x".repeat(MAX_PROFILE_NAME_LEN);
+        let with_postfix_value = with_postfix(&long, 2);
+        assert_eq!(
+            with_postfix_value.len(),
+            MAX_PROFILE_NAME_LEN,
+            "the id stays canonical so the profile list accepts it"
+        );
+        assert!(with_postfix_value.ends_with("_2"));
+        assert_eq!(
+            sanitize_profile_name(&with_postfix_value).as_deref(),
+            Ok(with_postfix_value.as_str())
+        );
+    }
+
+    #[test]
+    fn display_names_fall_back_to_the_id() {
+        assert_eq!(prettify_profile_id("home-net_2"), "Home Net 2");
+        assert_eq!(prettify_profile_id("default"), "Default");
+        assert_eq!(
+            display_name(&Config::default(), "work_vpn"),
+            "Work Vpn",
+            "a file written before profiles had names still shows something"
+        );
+        let config = Config {
+            profile_name: "  Home\u{7} Net  ".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(display_name(&config, "home"), "Home Net");
+    }
+
+    #[test]
+    fn existing_profiles_without_a_name_get_one_on_load() {
+        let root = TestDir::new("backfill");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        write_profile(&store, "work-vpn", r#"{"overlays":[]}"#);
+        let broken = write_profile(&store, "broken", "{not json");
+
+        let loaded = store.load(&root.path().join("missing-legacy"));
+
+        assert!(loaded
+            .notices
+            .contains(&ConfigNotice::ProfileNamesBackfilled { count: 1 }));
+        assert_eq!(
+            loaded.profiles,
+            entries(&[
+                ("broken", "Broken"),
+                ("default", "Default"),
+                ("work-vpn", "Work Vpn"),
+            ]),
+            "an unreadable profile is still listed under a derived name"
+        );
+        assert_eq!(
+            fs::read_to_string(broken).expect("read broken profile"),
+            "{not json",
+            "a file that cannot be parsed is never rewritten"
+        );
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.profile_path("work-vpn").expect("path"))
+                .expect("read profile"),
+        )
+        .expect("parse profile");
+        assert_eq!(value["profileName"], "Work Vpn");
     }
 
     #[test]

@@ -44,9 +44,18 @@ Settings are stored in profiles:
 Each profile holds one complete set of overlays. The profile popup above
 **Add overlay** lists them and can create, rename, delete and switch between
 them. **Save** writes to the profile that is currently active, and that choice
-is remembered in `globalconfig.json`. Profile files are named
-`profile_<name>.json`, where the name is lowercased and reduced to letters,
-digits, `-` and `_`.
+is remembered in `globalconfig.json`.
+
+Each profile has two names. The **display name** is what you type and what the
+window title, the sidebar button and the profile popup show
+(`PingLatencyOverlay - Current Profile: Work VPN`); it is stored in the profile
+file as `profileName` and does not have to be unique. The **id** is the file
+name `profile_<id>.json`, where the id is lowercased and reduced to letters,
+digits, `-` and `_`. Because only the id has to be unique, creating or renaming
+a profile never overwrites another one: a taken id gets a postfix, so two
+profiles named *Work VPN* live in `profile_work.json` and
+`profile_work_2.json`. Profiles saved before names existed are given one
+derived from their id on the next launch.
 
 **Save** and **Discard** are the two ways to resolve pending edits: Save writes
 them to the active profile, and Discard reloads it from disk. Switching to

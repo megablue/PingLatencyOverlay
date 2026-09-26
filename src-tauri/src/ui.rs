@@ -291,7 +291,7 @@ enum ShutdownState {
 enum ProfileDialog {
     Create { name: String },
     Rename { from: String, name: String },
-    Delete { name: String },
+    Delete { id: String, name: String },
 }
 
 /// A profile request raised by the popup, applied after it closes.
@@ -312,7 +312,8 @@ enum ProfileIcon {
 pub struct PingApp {
     config: Config,
     active_profile: String,
-    profiles: Vec<String>,
+    profiles: Vec<config::ProfileEntry>,
+    last_title: String,
     profile_menu_open: bool,
     profile_dialog: Option<ProfileDialog>,
     profile_name_focus: bool,
@@ -360,12 +361,13 @@ impl PingApp {
             egui::ViewportId::ROOT,
             egui::ViewportCommand::Visible(show_config),
         );
-        cc.egui_ctx.request_repaint();
-
-        Ok(Self {
+        // The static title in `run` cannot know the profile, so the real one
+        // is sent as soon as the app state exists.
+        let mut app = Self {
             config,
             active_profile,
             profiles,
+            last_title: String::new(),
             profile_menu_open: false,
             profile_dialog: None,
             profile_name_focus: false,
@@ -381,7 +383,44 @@ impl PingApp {
             position_picker,
             _runtime: Some(runtime),
             shutdown_state: ShutdownState::Running,
-        })
+        };
+        app.sync_window_title(&cc.egui_ctx);
+        cc.egui_ctx.request_repaint();
+        Ok(app)
+    }
+
+    /// The window title, which names the profile that is currently loaded.
+    fn window_title(&self) -> String {
+        window_title(&self.active_profile_name())
+    }
+
+    /// Push the title to the window when the active profile's name changed.
+    fn sync_window_title(&mut self, ctx: &Context) {
+        let title = self.window_title();
+        if title == self.last_title {
+            return;
+        }
+        self.last_title = title.clone();
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Title(title));
+    }
+
+    /// The display name of the loaded profile.
+    fn active_profile_name(&self) -> String {
+        self.profile_name(&self.active_profile)
+    }
+
+    /// The name to show for a profile id.
+    ///
+    /// The refreshed list is authoritative because it also covers renames of
+    /// the active profile, which the in-memory config does not know about yet.
+    fn profile_name(&self, id: &str) -> String {
+        if let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) {
+            return profile.name.clone();
+        }
+        if id == self.active_profile {
+            return config::display_name(&self.config, id);
+        }
+        id.to_string()
     }
 
     fn set_config_visible(&mut self, ctx: &Context, visible: bool) {
@@ -574,49 +613,52 @@ impl PingApp {
     }
 
     fn refresh_profiles(&mut self) {
-        self.profiles = config::list_profiles();
+        self.profiles = config::list_profiles_detailed();
     }
 
     /// Make another profile the active one and remember the choice.
-    fn switch_profile(&mut self, name: &str) {
+    fn switch_profile(&mut self, id: &str) {
         self.profile_menu_open = false;
-        if name == self.active_profile {
+        if id == self.active_profile {
             return;
         }
         if !can_switch_profile(self.dirty) {
             self.status = "Save or discard your changes before switching profiles.".to_string();
             return;
         }
-        match config::load_profile(name) {
+        match config::load_profile(id) {
             Ok(mut stored) => {
                 stored.normalize();
-                self.active_profile = name.to_string();
+                self.active_profile = id.to_string();
                 if let Err(error) = config::set_active_profile(&self.active_profile) {
                     self.status = format!("Could not update globalconfig.json: {error}");
                 }
                 self.selected_id = stored.overlays.first().map(|overlay| overlay.id.clone());
                 self.apply_saved_config(stored);
                 self.dirty = false;
-                self.status = format!("Loaded profile \"{name}\".");
+                // Read after the load, so a name that is only stored in the
+                // file is the one reported.
+                self.refresh_profiles();
+                self.status = format!("Loaded profile \"{}\".", self.active_profile_name());
             }
             Err(error) => {
-                self.status = format!("Could not load profile \"{name}\": {error}");
+                self.status = format!("Could not load profile \"{id}\": {error}");
             }
         }
-        self.refresh_profiles();
     }
 
     /// Create a new empty profile, then load it. Returns false when the name
     /// was rejected.
-    fn create_profile(&mut self, name: &str) -> bool {
-        match config::create_profile(name) {
-            Ok(slug) => {
+    fn create_profile(&mut self, display_name: &str) -> bool {
+        match config::create_profile(display_name) {
+            Ok(created) => {
                 self.refresh_profiles();
                 if can_switch_profile(self.dirty) {
-                    self.switch_profile(&slug);
+                    self.switch_profile(&created.id);
                 } else {
                     self.status = format!(
-                        "Created profile \"{slug}\". Save or discard your changes to load it."
+                        "Created profile \"{}\" ({}). Save or discard your changes to load it.",
+                        created.name, created.id
                     );
                 }
                 true
@@ -629,20 +671,30 @@ impl PingApp {
     }
 
     /// Rename a profile. Returns false when the new name was rejected.
-    fn rename_profile(&mut self, from: &str, to: &str) -> bool {
-        if to.trim() == from {
-            return true;
-        }
-        match config::rename_profile(from, to) {
-            Ok(slug) => {
+    fn rename_profile(&mut self, from: &str, display_name: &str) -> bool {
+        match config::rename_profile(from, display_name) {
+            Ok(renamed) => {
                 if self.active_profile == from {
-                    self.active_profile = slug.clone();
+                    self.active_profile = renamed.id.clone();
+                    // Keep the draft in step with the file, so the next Save
+                    // cannot write the previous name back into it.
+                    self.config.profile_name = renamed.name.clone();
                     if let Err(error) = config::set_active_profile(&self.active_profile) {
                         self.status = format!("Could not update globalconfig.json: {error}");
                     }
                 }
                 self.refresh_profiles();
-                self.status = format!("Renamed profile \"{from}\" to \"{slug}\".");
+                // Names may repeat, so the id is reported when the file moved.
+                let moved = config::sanitize_profile_name(from).ok().as_deref()
+                    != Some(renamed.id.as_str());
+                self.status = if moved {
+                    format!(
+                        "Renamed profile \"{from}\" to \"{}\" ({}).",
+                        renamed.name, renamed.id
+                    )
+                } else {
+                    format!("Renamed profile \"{from}\" to \"{}\".", renamed.name)
+                };
                 true
             }
             Err(error) => {
@@ -652,34 +704,35 @@ impl PingApp {
         }
     }
 
-    fn delete_profile(&mut self, name: &str) {
+    fn delete_profile(&mut self, id: &str) {
         if self.profiles.len() <= 1 {
             self.status = "A profile cannot be deleted while it is the only one.".to_string();
             return;
         }
-        if name == self.active_profile && !can_switch_profile(self.dirty) {
+        if id == self.active_profile && !can_switch_profile(self.dirty) {
             self.status =
                 "Save or discard your changes before deleting the active profile.".to_string();
             return;
         }
-        if let Err(error) = config::delete_profile(name) {
-            self.status = format!("Could not delete profile \"{name}\": {error}");
+        let name = self.profile_name(id);
+        if let Err(error) = config::delete_profile(id) {
+            self.status = format!("Could not delete profile \"{id}\": {error}");
             return;
         }
         self.refresh_profiles();
-        if name == self.active_profile {
+        if id == self.active_profile {
             // Prefer the default profile, otherwise fall back to whatever is
             // left so the app always has a configuration.
             let fallback = if self
                 .profiles
                 .iter()
-                .any(|profile| profile == config::DEFAULT_PROFILE)
+                .any(|profile| profile.id == config::DEFAULT_PROFILE)
             {
                 config::DEFAULT_PROFILE.to_string()
             } else {
                 self.profiles
                     .first()
-                    .cloned()
+                    .map(|profile| profile.id.clone())
                     .unwrap_or_else(|| config::DEFAULT_PROFILE.to_string())
             };
             self.switch_profile(&fallback);
@@ -858,10 +911,10 @@ impl PingApp {
             });
 
             ui.add_space(6.0);
-            let profile_label = format!("Profile: {}", self.active_profile);
+            let profile_label = format!("Profile: {}", self.active_profile_name());
             let profile_button = ui.add_sized(
                 [row_width, 32.0],
-                egui::Button::new(RichText::new(profile_label).color(UI_TEXT)),
+                egui::Button::new(RichText::new(profile_label).color(UI_TEXT)).truncate(),
             );
             if profile_button.clicked() {
                 self.profile_menu_open = !self.profile_menu_open;
@@ -940,9 +993,9 @@ impl PingApp {
                 header.on_hover_text(config::profiles_dir().display().to_string());
                 ui.separator();
 
-                for name in &profiles {
+                for profile in &profiles {
                     ui.horizontal(|ui| {
-                        let current = *name == active;
+                        let current = profile.id == active;
                         // Pending edits dim every other profile, because
                         // switching is refused until the draft is saved.
                         let color = if current {
@@ -952,6 +1005,19 @@ impl PingApp {
                         } else {
                             UI_TEXT
                         };
+                        // Display names may repeat, so a row that shares its
+                        // name with another one also shows its id.
+                        let shared_name = profiles
+                            .iter()
+                            .filter(|other| other.name == profile.name)
+                            .count()
+                            > 1;
+                        let text = if shared_name {
+                            format!("{} ({})", profile.name, profile.id)
+                        } else {
+                            profile.name.clone()
+                        };
+                        let label = RichText::new(text).color(color);
                         // Name, rename and delete: three widgets, so two
                         // `item_spacing` gaps must be reserved. Reserving one
                         // gap made every row ask for more than the popup width.
@@ -959,24 +1025,27 @@ impl PingApp {
                         let name_width = (ui.available_width() - icons).max(60.0);
                         let name_button = ui.add_sized(
                             [name_width, PROFILE_ROW_HEIGHT],
-                            egui::Button::new(RichText::new(name.as_str()).color(color)),
+                            egui::Button::new(label).truncate(),
                         );
                         if name_button.clicked() {
-                            action = Some(ProfileAction::Switch(name.clone()));
+                            action = Some(ProfileAction::Switch(profile.id.clone()));
                         }
-                        name_button.on_hover_text(config::profile_file_name(name));
+                        name_button.on_hover_text(config::profile_file_name(&profile.id));
                         let rename =
                             profile_icon_button(ui, ProfileIcon::Rename, UI_TEXT_SECONDARY);
                         if rename.clicked() {
                             dialog = Some(ProfileDialog::Rename {
-                                from: name.clone(),
-                                name: name.clone(),
+                                from: profile.id.clone(),
+                                name: profile.name.clone(),
                             });
                             focus_field = true;
                         }
                         let delete = profile_icon_button(ui, ProfileIcon::Delete, UI_DANGER);
                         if delete.clicked() {
-                            dialog = Some(ProfileDialog::Delete { name: name.clone() });
+                            dialog = Some(ProfileDialog::Delete {
+                                id: profile.id.clone(),
+                                name: profile.name.clone(),
+                            });
                         }
                     });
                 }
@@ -1015,8 +1084,14 @@ impl PingApp {
                         }
                         close_dialog = cancel;
                     }
-                    Some(ProfileDialog::Delete { name }) => {
+                    Some(ProfileDialog::Delete { id, name }) => {
                         ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER));
+                        // Names may repeat, so the file confirms what goes.
+                        ui.label(
+                            RichText::new(config::profile_file_name(id))
+                                .small()
+                                .color(UI_TEXT_SECONDARY),
+                        );
                         let mut confirm = false;
                         let mut cancel = false;
                         ui.horizontal(|ui| {
@@ -1032,7 +1107,7 @@ impl PingApp {
                                 .clicked();
                         });
                         if confirm {
-                            action = Some(ProfileAction::Delete(name.clone()));
+                            action = Some(ProfileAction::Delete(id.clone()));
                         }
                         close_dialog = cancel;
                     }
@@ -1216,6 +1291,10 @@ fn config_notice_status(notice: &config::ConfigNotice) -> String {
         config::ConfigNotice::ProfileImportFailed(error) => {
             format!("Profile import failed: {error}. config.json was kept.")
         }
+        config::ConfigNotice::ProfileNamesBackfilled { count } => {
+            let plural = if *count == 1 { "profile" } else { "profiles" };
+            format!("Added a display name to {count} existing {plural}.")
+        }
         config::ConfigNotice::ProfileFallback { profile, reason } => {
             format!("Could not use profile \"{profile}\" ({reason}); using the default profile.")
         }
@@ -1228,6 +1307,11 @@ fn config_notice_status(notice: &config::ConfigNotice) -> String {
 /// Pending edits must be resolved before another profile can be loaded.
 fn can_switch_profile(dirty: bool) -> bool {
     !dirty
+}
+
+/// The Config window title, which names the active profile.
+fn window_title(profile_name: &str) -> String {
+    format!("PingLatencyOverlay - Current Profile: {profile_name}")
 }
 
 /// A square button with a painted, font-independent profile icon.
@@ -1340,6 +1424,7 @@ impl App for PingApp {
         }
 
         self.sync_overlays();
+        self.sync_window_title(ctx);
         ctx.request_repaint_after(self.repaint_interval());
     }
 
@@ -1916,7 +2001,7 @@ pub fn run() {
 mod tests {
     use super::{
         can_switch_profile, config_notice_status, config_notices_status,
-        selected_overlay_for_border,
+        selected_overlay_for_border, window_title,
     };
     use crate::config::ConfigNotice;
 
@@ -1983,5 +2068,30 @@ mod tests {
     fn unsaved_edits_block_switching_profiles() {
         assert!(!can_switch_profile(true));
         assert!(can_switch_profile(false));
+    }
+
+    #[test]
+    fn the_window_title_names_the_active_profile() {
+        assert_eq!(
+            window_title("Home Net"),
+            "PingLatencyOverlay - Current Profile: Home Net"
+        );
+        assert_eq!(
+            window_title("default"),
+            "PingLatencyOverlay - Current Profile: default",
+            "a name that is not stored yet still shows the id"
+        );
+    }
+
+    #[test]
+    fn added_profile_names_are_reported_once() {
+        assert_eq!(
+            config_notice_status(&ConfigNotice::ProfileNamesBackfilled { count: 1 }),
+            "Added a display name to 1 existing profile."
+        );
+        assert!(
+            config_notice_status(&ConfigNotice::ProfileNamesBackfilled { count: 3 })
+                .contains("3 existing profiles")
+        );
     }
 }

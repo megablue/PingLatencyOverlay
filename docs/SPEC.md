@@ -84,7 +84,17 @@
 ## Config storage
 - Settings live in profile files under
   `~/.config/.PingLatencyOverlay/profiles`, one file per profile, named
-  `profile_<name>.json`.
+  `profile_<id>.json`. The id is a lowercase slug and is the only unique part
+  of a profile.
+- Every profile file carries its own name in the `profileName` key. It is
+  free-form, keeps the case it was typed in, and does not have to be unique; it
+  is what the window title, the sidebar button and the profile popup show.
+  Files written before names existed get one derived from their id on the next
+  launch.
+- Creating or renaming a profile never overwrites another profile file. When
+  the id derived from the new name is taken, the file is stored with the first
+  free postfix instead: `profile_home_2.json`, `profile_home_3.json`, and so
+  on. A profile renamed to a name that resolves to its own id keeps its file.
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
   be stored; the active profile is recorded as `activeProfile` and an absent
@@ -92,7 +102,8 @@
 - The active profile is loaded on startup to recreate overlays and their
   settings, and it is the target of **Save**.
 - Profiles are created empty, and are listed, renamed and deleted from the
-  profile popup above **Add overlay** in the sidebar.
+  profile popup above **Add overlay** in the sidebar. Rows that share a name
+  also show their id, and the delete confirmation names the file it removes.
 - Switching profiles is refused while there are unsaved edits. **Discard**
   reloads the active profile from disk and drops those edits.
 - Deleting the active profile falls back to `default`, or to the first
@@ -105,7 +116,7 @@
   migrated first. The legacy directory is removed only when `config.json` was
   its only entry; other files and subdirectories are preserved.
 - The Config status bar reports successful migration, retained legacy data,
-  migration failure, profile import and profile fallback.
+  migration failure, profile import, added profile names and profile fallback.
 
 ## Packaging
 - Target architectures: x64 and ARM64.

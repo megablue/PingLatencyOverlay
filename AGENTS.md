@@ -51,13 +51,24 @@ Installer (run from the repository root):
   Edge anchors measure inward from the work-area edge; centered axes measure
   from the center. Legacy `marginPx` is mapped per anchor during normalization.
 - Config lives at `~/.config/.PingLatencyOverlay/`. `profiles/` holds one
-  `profile_<name>.json` per profile and is the only place overlays are saved;
+  `profile_<id>.json` per profile and is the only place overlays are saved;
   `globalconfig.json` holds app-wide preferences and is created as `{}`, with
   `activeProfile` added only once a non-default profile is selected. When that
   file is missing, `config.rs` migrates `~/.PingLatencyOverlay/config.json`,
   then moves `config.json` to `profiles/profile_default.json` and deletes it
   only after the copy succeeds. All of this lives in `Store` in `config.rs`,
   which takes its root directory so tests can point it at a temp folder.
+- A profile has two names. The id is the file name and the only unique part; the
+  free-form `profileName` inside the file is what the title bar, sidebar and
+  popup show, and it may repeat. Collisions are resolved by postfixing the id
+  (`profile_work_2.json`) instead of refusing, and `create_profile` /
+  `rename_profile` return the `ProfileEntry` that resulted. `with_postfix`
+  keeps the id inside the sanitizer's length cap so `list_profiles` still
+  accepts it. `Store::backfill_profile_names` writes a derived name into
+  existing files at startup and reports it as a `ConfigNotice`; unreadable
+  files are never rewritten.
+- The window title is `PingLatencyOverlay - Current Profile: <name>`, pushed
+  with `ViewportCommand::Title` only when it changes (`sync_window_title`).
 - Profile switching is refused while `dirty`; the popup's **Discard** button
   reloads the active profile from disk. Save/Discard are the only ways to
   resolve pending edits.
