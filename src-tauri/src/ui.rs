@@ -32,6 +32,8 @@ const PROFILE_ACTION_WIDTH: f32 = 200.0;
 /// Space kept free at the right of a profile row for its overlay count and the
 /// active dot, so a long name truncates instead of running under them.
 const PROFILE_ROW_TRAILING: f32 = 52.0;
+/// Inner margin of a profile row's frame, which also comes out of its width.
+const PROFILE_ROW_MARGIN: f32 = 4.0;
 /// Navigation rail widths: labelled, then icon only.
 const RAIL_WIDTH: f32 = 148.0;
 const RAIL_COLLAPSED_WIDTH: f32 = 44.0;
@@ -1111,48 +1113,55 @@ impl PingApp {
                             };
                             egui::Frame::group(ui.style())
                                 .fill(background)
-                                .inner_margin(egui::Margin::same(4))
+                                .inner_margin(egui::Margin::same(PROFILE_ROW_MARGIN as i8))
                                 .show(ui, |ui| {
-                                    // The count and the dot live in a gutter at
-                                    // the right, so a long name truncates instead
-                                    // of running underneath them.
-                                    let name_width =
-                                        (row_width - 8.0 - PROFILE_ROW_TRAILING).max(80.0);
-                                    let response = ui.add_sized(
-                                        [name_width, PROFILE_ROW_HEIGHT],
-                                        egui::Button::new(RichText::new(label).color(
-                                            if is_active {
-                                                UI_ACCENT
-                                            } else if dirty {
-                                                UI_TEXT_SECONDARY
-                                            } else {
-                                                UI_TEXT
-                                            },
-                                        ))
-                                        .truncate(),
-                                    );
-                                    if response.clicked() {
-                                        self.selected_profile = Some(id.clone());
-                                    }
-                                    response.on_hover_text(config::profile_file_name(&id));
-                                    let trailing = ui.allocate_response(
-                                        egui::vec2(PROFILE_ROW_TRAILING, PROFILE_ROW_HEIGHT),
-                                        egui::Sense::hover(),
-                                    );
-                                    let painter = ui.painter();
-                                    painter.text(
-                                        trailing.rect.left_top()
-                                            + egui::vec2(4.0, trailing.rect.height() / 2.0),
-                                        egui::Align2::LEFT_CENTER,
-                                        count.to_string(),
-                                        egui::TextStyle::Small.resolve(ui.style()),
-                                        UI_TEXT_SECONDARY,
-                                    );
-                                    if is_active {
-                                        // A dot, because the accent name alone is
-                                        // a weak cue in a long list.
-                                        draw_active_dot(painter, trailing.rect, UI_ACCENT);
-                                    }
+                                    // The row is laid out left to right, because a
+                                    // frame lays its content out top down and the
+                                    // gutter would drop onto the next line.
+                                    ui.horizontal(|ui| {
+                                        // The count and the dot live in a gutter at
+                                        // the right, so a long name truncates instead
+                                        // of running underneath them.
+                                        let name_width = profile_name_width(
+                                            row_width,
+                                            ui.spacing().item_spacing.x,
+                                        );
+                                        let response = ui.add_sized(
+                                            [name_width, PROFILE_ROW_HEIGHT],
+                                            egui::Button::new(RichText::new(label).color(
+                                                if is_active {
+                                                    UI_ACCENT
+                                                } else if dirty {
+                                                    UI_TEXT_SECONDARY
+                                                } else {
+                                                    UI_TEXT
+                                                },
+                                            ))
+                                            .truncate(),
+                                        );
+                                        if response.clicked() {
+                                            self.selected_profile = Some(id.clone());
+                                        }
+                                        response.on_hover_text(config::profile_file_name(&id));
+                                        let trailing = ui.allocate_response(
+                                            egui::vec2(PROFILE_ROW_TRAILING, PROFILE_ROW_HEIGHT),
+                                            egui::Sense::hover(),
+                                        );
+                                        let painter = ui.painter();
+                                        painter.text(
+                                            trailing.rect.left_top()
+                                                + egui::vec2(4.0, trailing.rect.height() / 2.0),
+                                            egui::Align2::LEFT_CENTER,
+                                            count.to_string(),
+                                            egui::TextStyle::Small.resolve(ui.style()),
+                                            UI_TEXT_SECONDARY,
+                                        );
+                                        if is_active {
+                                            // A dot, because the accent name alone is
+                                            // a weak cue in a long list.
+                                            draw_active_dot(painter, trailing.rect, UI_ACCENT);
+                                        }
+                                    });
                                 });
                         }
                     });
@@ -1253,14 +1262,18 @@ impl PingApp {
                     if switch_clicked {
                         action = Some(ProfileAction::Switch(entry.id.clone()));
                     }
-                    if dirty {
-                        ui.add_space(2.0);
-                        ui.label(
-                            RichText::new("Save or discard changes before switching profiles.")
-                                .small()
-                                .color(UI_TEXT_SECONDARY),
-                        );
-                    }
+                }
+                if dirty {
+                    // This page has no Save button of its own, so it has to say
+                    // where the pending edits are and what to do with them.
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "The Overlays page has unsaved changes. Save or discard them there.",
+                        )
+                        .small()
+                        .color(UI_TEXT_SECONDARY),
+                    );
                 }
 
                 ui.add_space(6.0);
@@ -1381,7 +1394,16 @@ impl PingApp {
                         color,
                     );
                 }
-                let response = response.on_hover_text(page.label());
+                let mut hint = page.label().to_string();
+                if page == Page::Overlays && self.dirty {
+                    // The other pages have no Save button, so the rail is what
+                    // says a draft is waiting on the Overlays page.
+                    if !active {
+                        draw_active_dot(ui.painter(), rect, UI_ACCENT);
+                    }
+                    hint.push_str(" — unsaved changes");
+                }
+                let response = response.on_hover_text(hint);
                 if response.clicked() {
                     self.page = page;
                 }
@@ -1719,11 +1741,19 @@ impl PingApp {
             });
     }
 
-    /// Pane 3: the page's own content on top, a sticky Save/Discard footer
-    /// below it. Every page renders a detail pane, so the draft actions stay in
-    /// the same place no matter which page is open.
+    /// Pane 3: the page's own content, plus the sticky Save/Discard footer on the
+    /// pages that stage a draft.
+    ///
+    /// The footer is not drawn on the Profiles page, which has nothing to save, so
+    /// that page's detail gets the full height. Its unsaved-overlay hint and the
+    /// dot on the Overlays rail row are what make a pending draft visible there.
     fn show_detail_pane(&mut self, ui: &mut Ui, height: f32) {
-        let content_height = (height - DETAIL_FOOTER_HEIGHT).max(120.0);
+        let has_footer = page_has_detail_footer(self.page);
+        let content_height = if has_footer {
+            (height - DETAIL_FOOTER_HEIGHT).max(120.0)
+        } else {
+            height
+        };
         ui.allocate_ui(
             egui::vec2(ui.available_width(), content_height),
             |ui| match self.page {
@@ -1732,8 +1762,10 @@ impl PingApp {
                 page => self.show_page_placeholder(ui, page),
             },
         );
-        ui.add_space(4.0);
-        self.show_detail_footer(ui);
+        if has_footer {
+            ui.add_space(4.0);
+            self.show_detail_footer(ui);
+        }
     }
 
     /// Save and Discard, right aligned under the detail pane.
@@ -1915,6 +1947,27 @@ fn profile_row_label(profile: &config::ProfileEntry, profiles: &[config::Profile
         format!("{} ({})", profile.name, profile.id)
     } else {
         profile.name.clone()
+    }
+}
+
+/// Width of the name button in a profile row.
+///
+/// The frame's margin, the gap between the two widgets and the trailing gutter all
+/// come out of the row, so the name truncates instead of pushing the overlay count
+/// and the active dot out of the pane.
+fn profile_name_width(row_width: f32, gap: f32) -> f32 {
+    (row_width - PROFILE_ROW_MARGIN * 2.0 - PROFILE_ROW_TRAILING - gap).max(80.0)
+}
+
+/// Whether a page's detail pane ends in the sticky Save/Discard footer.
+///
+/// Only a page that stages a draft gets one: the Overlays page writes the active
+/// profile and the Global page writes `globalconfig.json`, while the Profiles page
+/// changes profile files as soon as an action is confirmed and has nothing to save.
+fn page_has_detail_footer(page: Page) -> bool {
+    match page {
+        Page::Overlays | Page::Global => true,
+        Page::Profiles => false,
     }
 }
 
@@ -2645,9 +2698,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, profile_row_label,
-        rail_width, selected_overlay_for_border, window_title, DETAIL_FOOTER_HEIGHT, PAGES,
-        PANE_GAP, PANE_MARGIN, RAIL_WIDTH, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT,
+        can_switch_profile, config_notice_status, config_notices_status, page_has_detail_footer,
+        profile_name_width, profile_row_label, rail_width, selected_overlay_for_border,
+        window_title, Page, DETAIL_FOOTER_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_MARGIN,
+        PROFILE_ROW_TRAILING, RAIL_WIDTH, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT,
         WINDOW_MIN_WIDTH,
     };
     use crate::config::{ConfigNotice, ProfileEntry};
@@ -2673,6 +2727,31 @@ mod tests {
             scrolling >= 200.0,
             "detail pane would scroll in only {scrolling}px at the minimum window size"
         );
+    }
+
+    /// The name, the `item_spacing` gap and the count/dot gutter all come out
+    /// of a profile row's width, so forgetting one of them overflows the row.
+    #[test]
+    fn a_profile_row_fits_its_pane() {
+        let row_width = SIDEBAR_WIDTH - 20.0;
+        let gap = 8.0;
+        let used = profile_name_width(row_width, gap)
+            + gap
+            + PROFILE_ROW_TRAILING
+            + PROFILE_ROW_MARGIN * 2.0;
+        assert!(
+            used <= row_width,
+            "a profile row needs {used}px but the pane offers {row_width}px"
+        );
+    }
+
+    /// Only a page that stages a draft carries the Save/Discard footer. The
+    /// Profiles page acts on files straight away, so it has nothing to save.
+    #[test]
+    fn only_the_overlays_and_global_pages_carry_the_detail_footer() {
+        assert!(page_has_detail_footer(Page::Overlays));
+        assert!(page_has_detail_footer(Page::Global));
+        assert!(!page_has_detail_footer(Page::Profiles));
     }
 
     #[test]

@@ -46,7 +46,10 @@ list pane opens the profile menu, which switches between them and links to the
 Profiles page, where profiles are created, renamed, duplicated and deleted.
 **Save** and **Discard** sit in a sticky footer under the right-hand pane, so
 they sit right next to the settings they write, and **Save** writes to the
-profile that is currently active; that choice is remembered in
+profile that is currently active. The footer belongs to the pages that stage a
+draft, so the Profiles page has none: it acts on profile files immediately, and
+while you have unsaved overlay edits it says so and dots the Overlays row in the
+rail. The active profile is remembered in
 `globalconfig.json` as `activeProfile` together with the file name in
 `activeProfileFile`. Those two keys are the only record of the active profile:
 the app loads that file on startup, and if it has been deleted or renamed away it
@@ -56,8 +59,8 @@ The window itself is three panes and a status bar. The leftmost **rail** switche
 between the **Overlays**, **Profiles** and **Global** pages and collapses to
 icons only; the middle pane lists what the current page is about, headed by the
 profile switcher on the Overlays page and by the profile list on the Profiles
-page; the right pane shows the detail, and both panes end in a fixed footer under
-a scrolling list. Selecting a profile in the list only selects it — the **Profiles**
+page; the right pane shows the detail, and a pane's own actions sit in a fixed
+footer under its scrolling list. Selecting a profile in the list only selects it — the **Profiles**
 page has a separate **Switch to this profile** button, because switching is
 refused while you have unsaved edits. The **Global** page arrives in the next
 release.

@@ -81,11 +81,20 @@ Installer (run from the repository root):
   (`show_list_pane`, which is dropped on the Global page) and a detail pane
   (`show_detail_pane`). Pane switching is never guarded; only profile switching
   is.
-- Each pane is a scrolling list above a fixed footer, so the draft actions sit
-  next to the content they write. **Save** and **Discard** are the detail pane's
+- Each pane is a scrolling area above a fixed footer, so a pane's own actions sit
+  next to the content they act on. **Save** and **Discard** are the detail pane's
   sticky footer (`show_detail_footer`, `DETAIL_FOOTER_HEIGHT`), right aligned
   under a scrolling detail, not the status bar. Both are enabled only while
-  `dirty`, which is also how unsaved edits are signalled.
+  `dirty`, which is also how unsaved edits are signalled. `page_has_detail_footer`
+  decides which pages carry it: only a page that stages a draft, so Overlays and
+  Global do and Profiles does not.
+- A row that reserves a gutter (the profile rows reserve `PROFILE_ROW_TRAILING`
+  for the count and active dot) must lay it out in a `ui.horizontal` and subtract
+  `ui.spacing().item_spacing.x` in the remaining width. A `Frame` lays its
+  content out top down, so adding the gutter to the same `Ui` drops it onto the
+  next line and leaves an empty column; forgetting the gap overflows the row by
+  the gap width. Both mistakes shipped once. `profile_name_width` and
+  `a_profile_row_fits_its_pane` exist to keep the arithmetic honest.
 - The bottom row of the Config window is the **status bar**
   (`show_status_bar`); it only shows the transient operation message and the
   right-aligned version label, so it takes `&self`.

@@ -154,14 +154,22 @@
   overlay count and **Switch to this profile**, **Rename**, **Duplicate** and
   **Delete** on the Profiles page. Rename, Duplicate and Delete open their editor
   in place of that detail. The Global page has no list, so the detail pane spans
-  the width the list pane would have used. It ends in a sticky footer holding
-  **Discard** and **Save**, right aligned with Save as the filled primary action,
-  under a scrolling detail. Both are enabled only while there is something to
-  write, which is also how unsaved edits are signalled.
+  the width the list pane would have used.
+- The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
+  right aligned with Save as the filled primary action, under a scrolling detail.
+  Both are enabled only while there is something to write, which is also how
+  unsaved edits are signalled. Only a page that stages a draft carries it: the
+  Overlays and Global pages do, the Profiles page does not, because it acts on
+  profile files immediately. On the Profiles page the pending-draft hint in the
+  detail names the Overlays page as the place to resolve it, and the rail's
+  Overlays row carries a dot and an "unsaved changes" hover while one is open.
 - The **status bar** spans the full width and holds the transient message on the
   left and the version on the right.
-- Each pane is a scrolling list above a fixed footer, so the draft actions sit
-  next to the content they write instead of a pane away in the status bar.
+- Both panes are a scrolling area above a fixed footer, so a pane's own actions
+  sit next to the content they act on instead of a pane away in the status bar.
+- A profile row reserves a gutter for its overlay count and active dot, so a long
+  display name truncates rather than running underneath them. The name, the gap
+  between widgets and the gutter all come out of the row's width.
 - Switching pages is always allowed, because the Overlays draft stays in memory.
   Switching *profile* is refused while there are unsaved edits.
 - The window is 860x660, resizable between 720x480 and 1400x8192, which keeps
