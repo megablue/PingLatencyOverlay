@@ -97,8 +97,17 @@
   on. A profile renamed to a name that resolves to its own id keeps its file.
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
-  be stored; the active profile is recorded as `activeProfile` and an absent
-  key means the `default` profile.
+  be stored.
+- The active profile is recorded in that file as `activeProfile` (the id) plus
+  `activeProfileFile` (the `profile_<id>.json` name), and both keys are removed
+  when the active profile is `default`, so an absent key means `default`.
+- On startup those two keys are the only source for what to load. The stored
+  file name is used first, then the stored id, which keeps older files written
+  before the file name existed working. A pointer that does not resolve, or
+  points at a file that is gone or unreadable, falls back to `default` and the
+  stale keys are cleared. No other profile is ever picked by scanning the
+  directory, and a missing `default` on a first run is not a fallback: it is
+  created empty.
 - The active profile is loaded on startup to recreate overlays and their
   settings, and it is the target of **Save**.
 - Profiles are created empty, and are listed, renamed and deleted from the

@@ -44,7 +44,11 @@ Settings are stored in profiles:
 Each profile holds one complete set of overlays. The profile popup above
 **Add overlay** lists them and can create, rename, delete and switch between
 them. **Save** writes to the profile that is currently active, and that choice
-is remembered in `globalconfig.json`.
+is remembered in `globalconfig.json` as `activeProfile` together with the file
+name in `activeProfileFile`. Those two keys are the only record of the active
+profile: the app loads that file on startup, and if it has been deleted or
+renamed away it falls back to the `default` profile instead of picking another
+one on its own.
 
 Each profile has two names. The **display name** is what you type and what the
 window title, the sidebar button and the profile popup show

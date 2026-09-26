@@ -396,6 +396,7 @@ const PROFILE_PREFIX: &str = "profile_";
 const PROFILE_EXTENSION: &str = ".json";
 const GLOBAL_CONFIG_FILE: &str = "globalconfig.json";
 const ACTIVE_PROFILE_KEY: &str = "activeProfile";
+const ACTIVE_PROFILE_FILE_KEY: &str = "activeProfileFile";
 /// Profile used when nothing else is stored, and the fallback after a failure.
 pub const DEFAULT_PROFILE: &str = "default";
 const MAX_PROFILE_NAME_LEN: usize = 48;
@@ -422,6 +423,16 @@ pub struct ProfileEntry {
     pub id: String,
     /// Display name read from inside the file.
     pub name: String,
+}
+
+/// The active profile pointer as stored in `globalconfig.json`.
+///
+/// Either half can be missing: a build that predates `activeProfileFile`
+/// wrote only the id, and a hand-edited file may keep just one of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StoredActive {
+    id: Option<String>,
+    file: Option<String>,
 }
 
 /// User-visible results of the one-time startup migrations.
@@ -498,6 +509,18 @@ impl Store {
     fn profile_file_path(&self, slug: &str) -> PathBuf {
         self.profiles_dir()
             .join(format!("{PROFILE_PREFIX}{slug}{PROFILE_EXTENSION}"))
+    }
+
+    /// The id a stored profile file name refers to, if it names one.
+    ///
+    /// The name has to match `profile_<slug>.json` with a canonical slug, so a
+    /// hand-edited path can never be used to read a file outside the profiles
+    /// directory.
+    fn profile_id_from_file_name(&self, file_name: &str) -> Option<String> {
+        let stem = file_name
+            .strip_prefix(PROFILE_PREFIX)?
+            .strip_suffix(PROFILE_EXTENSION)?;
+        sanitize_profile_name(stem).ok()
     }
 
     /// Every readable profile in the profiles directory, sorted by name.
@@ -680,9 +703,11 @@ impl Store {
 
     /// Remember the active profile for the next launch.
     ///
-    /// The key is removed when the default profile is active, so a fresh
-    /// install keeps `globalconfig.json` as an empty object until something is
-    /// actually stored.
+    /// Both the id and the file name are stored, and the file name is the only
+    /// thing [`Store::load`] needs to find the profile again. Both keys are
+    /// removed when the default profile is active, so a fresh install keeps
+    /// `globalconfig.json` as an empty object until something is actually
+    /// stored.
     fn set_active_profile(&self, name: &str) -> io::Result<()> {
         let slug = canonical_profile_name(name)?;
         // Preserve any other keys so future global preferences are not lost.
@@ -695,11 +720,37 @@ impl Store {
         };
         if slug == DEFAULT_PROFILE {
             object.remove(ACTIVE_PROFILE_KEY);
+            object.remove(ACTIVE_PROFILE_FILE_KEY);
         } else {
             object.insert(ACTIVE_PROFILE_KEY.to_string(), serde_json::json!(slug));
+            object.insert(
+                ACTIVE_PROFILE_FILE_KEY.to_string(),
+                serde_json::json!(profile_file_name(&slug)),
+            );
         }
         let json = serde_json::to_string_pretty(&value).map_err(io::Error::other)?;
         write_atomic(&self.global_config_path(), &json)
+    }
+
+    /// Where `globalconfig.json` says the active profile is.
+    ///
+    /// The file name is authoritative, because it is what the profile list and
+    /// every file operation agree on. The id is only a fallback for a
+    /// `globalconfig.json` written by a build that did not store it yet.
+    fn stored_active_profile(&self) -> StoredActive {
+        let value = self.read_global_config();
+        let string = |key: &str| {
+            value
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        StoredActive {
+            id: string(ACTIVE_PROFILE_KEY),
+            file: string(ACTIVE_PROFILE_FILE_KEY),
+        }
     }
 
     fn ensure_global_config(&self) -> io::Result<()> {
@@ -783,40 +834,62 @@ impl Store {
             notices.push(ConfigNotice::ProfileNamesBackfilled { count: backfilled });
         }
 
-        let profiles = self.list_profiles();
-        let stored_active = self
-            .read_global_config()
-            .get(ACTIVE_PROFILE_KEY)
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        // A stored name that is not a usable slug counts as unusable.
-        let mut fallback = match &stored_active {
-            Some(stored) if sanitize_profile_name(stored).as_deref() != Ok(stored.as_str()) => {
-                Some((stored.clone(), "its stored name is not valid".to_string()))
+        // `globalconfig.json` is the only source for what to load: the stored
+        // file name first, then the stored id for a file written by a build
+        // that did not store one. Nothing else is scanned, so a profile the
+        // user never selected can never come back on its own.
+        let stored = self.stored_active_profile();
+        let mut candidates: Vec<String> = Vec::new();
+        let mut fallback: Option<(String, String)> = None;
+        // The first pointer that resolves to something is the one reported when
+        // it turns out to be unusable.
+        let add = |id: String, candidates: &mut Vec<String>| {
+            if !candidates.contains(&id) {
+                candidates.push(id);
             }
-            _ => None,
         };
+        if let Some(file) = stored.file.as_deref() {
+            match self.profile_id_from_file_name(file) {
+                Some(id) => add(id, &mut candidates),
+                None => {
+                    fallback = Some((
+                        file.to_string(),
+                        "its stored file name is not a profile file".to_string(),
+                    ));
+                }
+            }
+        }
+        if let Some(id) = stored.id.as_deref() {
+            match sanitize_profile_name(id) {
+                Ok(_) => add(id.to_string(), &mut candidates),
+                Err(_) if fallback.is_none() => {
+                    fallback = Some((id.to_string(), "its stored name is not valid".to_string()));
+                }
+                Err(_) => {}
+            }
+        }
+        // The default profile is always the last resort.
+        add(DEFAULT_PROFILE.to_string(), &mut candidates);
 
         let mut loaded = None;
-        if let Some(name) = stored_active
-            .as_deref()
-            .filter(|name| sanitize_profile_name(name).as_deref() == Ok(*name))
-        {
-            match self.load_profile(name) {
-                Ok(config) => loaded = Some((name.to_string(), config)),
-                Err(error) => fallback = Some((name.to_string(), error.to_string())),
-            }
-        }
-        if loaded.is_none() && profiles.iter().any(|name| name == DEFAULT_PROFILE) {
-            if let Ok(config) = self.load_profile(DEFAULT_PROFILE) {
-                loaded = Some((DEFAULT_PROFILE.to_string(), config));
-            }
-        }
-        if loaded.is_none() {
-            if let Some(name) = profiles.first() {
-                if let Ok(config) = self.load_profile(name) {
-                    loaded = Some((name.clone(), config));
+        for id in &candidates {
+            if !self.profile_file_path(id).is_file() {
+                // A missing default profile is the first-run case, which the
+                // fresh config below creates, not a fallback worth reporting.
+                if fallback.is_none() && id != DEFAULT_PROFILE {
+                    fallback = Some((id.clone(), "it is no longer on disk".to_string()));
                 }
+                continue;
+            }
+            match self.load_profile(id) {
+                Ok(config) => {
+                    loaded = Some((id.clone(), config));
+                    break;
+                }
+                Err(error) if fallback.is_none() => {
+                    fallback = Some((id.clone(), error.to_string()));
+                }
+                Err(_) => {}
             }
         }
 
@@ -842,11 +915,9 @@ impl Store {
 
         // An absent key already means the default profile, so a fresh install
         // never has to rewrite globalconfig.json.
-        let stored_matches = match stored_active.as_deref() {
-            None => active_profile != DEFAULT_PROFILE,
-            Some(stored) => stored != active_profile,
-        };
-        if stored_matches {
+        let wanted_id = (active_profile != DEFAULT_PROFILE).then_some(active_profile.as_str());
+        let wanted_file = wanted_id.map(profile_file_name);
+        if stored.id.as_deref() != wanted_id || stored.file.as_deref() != wanted_file.as_deref() {
             if let Err(error) = self.set_active_profile(&active_profile) {
                 notices.push(ConfigNotice::GlobalConfigFailed(error.to_string()));
             }
@@ -1704,13 +1775,117 @@ mod tests {
             entries(&[(DEFAULT_PROFILE, "Default"), ("work-vpn", "Work VPN")])
         );
         assert!(loaded.notices.is_empty());
+        let global: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.global_config_path()).expect("read global config"),
+        )
+        .expect("parse global config");
+        assert_eq!(global["activeProfile"], "work-vpn");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                &fs::read_to_string(store.global_config_path()).expect("read global config")
-            )
-            .expect("parse global config")["activeProfile"],
-            "work-vpn"
+            global[ACTIVE_PROFILE_FILE_KEY], "profile_work-vpn.json",
+            "the file name is stored next to the id"
         );
+    }
+
+    #[test]
+    fn the_stored_file_name_finds_the_profile_without_an_id() {
+        let root = TestDir::new("active-file");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        let mut config = one_overlay_config("work");
+        config.profile_name = "Work".to_string();
+        store.save_profile("work", &config).expect("write profile");
+        fs::write(
+            store.global_config_path(),
+            format!(r#"{{"{ACTIVE_PROFILE_FILE_KEY}":"profile_work.json"}}"#),
+        )
+        .expect("write global config");
+
+        let loaded = store.load(&root.path().join("missing-legacy"));
+
+        assert_eq!(loaded.active_profile, "work");
+        assert_eq!(loaded.config.overlays.len(), 1);
+        assert!(loaded.notices.is_empty());
+        let global: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.global_config_path()).expect("read global config"),
+        )
+        .expect("parse global config");
+        assert_eq!(global[ACTIVE_PROFILE_FILE_KEY], "profile_work.json");
+    }
+
+    #[test]
+    fn a_postfixed_profile_id_round_trips_through_the_stored_file_name() {
+        let root = TestDir::new("active-postfix");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        store.create_profile("Home").expect("create profile");
+        let postfixed = store.create_profile("Home").expect("create duplicate");
+        assert_eq!(postfixed.id, "home_2");
+        let mut config = one_overlay_config("home");
+        config.profile_name = "Home".to_string();
+        store
+            .save_profile(&postfixed.id, &config)
+            .expect("write duplicate");
+        store
+            .set_active_profile(&postfixed.id)
+            .expect("set active profile");
+
+        let loaded = store.load(&root.path().join("missing-legacy"));
+
+        assert_eq!(loaded.active_profile, "home_2");
+        assert_eq!(loaded.config.overlays.len(), 1);
+        assert_eq!(
+            loaded.config.profile_name, "Home",
+            "the duplicate keeps the same display name"
+        );
+        assert!(loaded.notices.is_empty());
+    }
+
+    #[test]
+    fn a_deleted_stored_profile_falls_back_to_the_default_not_to_another_one() {
+        let root = TestDir::new("active-deleted");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        write_profile(&store, "work", VALID_CONFIG);
+        write_profile(&store, "other", VALID_CONFIG);
+        write_profile(&store, DEFAULT_PROFILE, r#"{"overlays":[]}"#);
+        store
+            .set_active_profile("work")
+            .expect("set active profile");
+        store.delete_profile("work").expect("delete profile");
+
+        let loaded = store.load(&root.path().join("missing-legacy"));
+
+        assert_eq!(
+            loaded.active_profile, DEFAULT_PROFILE,
+            "the stored key is the only source, so no other profile is picked"
+        );
+        assert!(loaded.config.overlays.is_empty());
+        assert_eq!(
+            fs::read_to_string(store.global_config_path()).expect("read global config"),
+            "{}",
+            "the stale pointer is cleared"
+        );
+    }
+
+    #[test]
+    fn a_stored_file_name_that_is_not_a_profile_file_falls_back() {
+        let root = TestDir::new("active-bad-file");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        write_profile(&store, DEFAULT_PROFILE, VALID_CONFIG);
+        fs::write(
+            store.global_config_path(),
+            r#"{"activeProfileFile":"../escape.json"}"#,
+        )
+        .expect("write global config");
+
+        let loaded = store.load(&root.path().join("missing-legacy"));
+
+        assert_eq!(loaded.active_profile, DEFAULT_PROFILE);
+        assert!(loaded.notices.iter().any(
+            |notice| matches!(notice, ConfigNotice::ProfileFallback { profile, .. } if profile
+                    == "../escape.json")
+        ));
     }
 
     #[test]
@@ -1737,6 +1912,10 @@ mod tests {
         assert!(
             value.get("activeProfile").is_none(),
             "the default profile is implied by an absent key"
+        );
+        assert!(
+            value.get(ACTIVE_PROFILE_FILE_KEY).is_none(),
+            "the file name is cleared together with the id"
         );
     }
 

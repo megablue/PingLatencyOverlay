@@ -53,11 +53,16 @@ Installer (run from the repository root):
 - Config lives at `~/.config/.PingLatencyOverlay/`. `profiles/` holds one
   `profile_<id>.json` per profile and is the only place overlays are saved;
   `globalconfig.json` holds app-wide preferences and is created as `{}`, with
-  `activeProfile` added only once a non-default profile is selected. When that
-  file is missing, `config.rs` migrates `~/.PingLatencyOverlay/config.json`,
-  then moves `config.json` to `profiles/profile_default.json` and deletes it
-  only after the copy succeeds. All of this lives in `Store` in `config.rs`,
-  which takes its root directory so tests can point it at a temp folder.
+  `activeProfile` plus `activeProfileFile` added only once a non-default
+  profile is selected. When that file is missing, `config.rs` migrates
+  `~/.PingLatencyOverlay/config.json`, then moves `config.json` to
+  `profiles/profile_default.json` and deletes it only after the copy succeeds.
+  All of this lives in `Store` in `config.rs`, which takes its root directory so
+  tests can point it at a temp folder.
+- `globalconfig.json` is the only source for the active profile. `Store::load`
+  builds a candidate list from the stored file name, then the stored id, then
+  `default`, and never scans the directory for a substitute. A missing `default`
+  on a first run is the fresh-config case, not a `ProfileFallback`.
 - A profile has two names. The id is the file name and the only unique part; the
   free-form `profileName` inside the file is what the title bar, sidebar and
   popup show, and it may repeat. Collisions are resolved by postfixing the id
