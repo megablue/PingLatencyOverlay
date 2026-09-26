@@ -110,10 +110,11 @@
   created empty.
 - The active profile is loaded on startup to recreate overlays and their
   settings, and it is the target of **Save**.
-- Profiles are created empty, and are listed, renamed and deleted from the
-  profile menu that opens from the switcher heading the sidebar list. Rows that
-  share a name also show their id, and the delete confirmation names the file it
-  removes.
+- Profiles are created empty, and are listed, renamed, duplicated and deleted on
+  the Profiles page. **Duplicate** copies the source profile's overlays into a
+  new file and leaves the source untouched; the copy is not loaded, so switching
+  to it stays a deliberate action. Rows that share a name also show their id, and
+  the delete confirmation names the file it removes.
 - Switching profiles is refused while there are unsaved edits. **Discard**
   reloads the active profile from disk and drops those edits.
 - Deleting the active profile falls back to `default`, or to the first
@@ -137,13 +138,26 @@
 - The **list pane** holds the current page's list, headed by the page's own
   controls. The Overlays page heads it with the profile switcher, which shows
   the active profile's display name and opens the profile menu. Its footer holds
-  **Add overlay** and **Pause all**.
+  **Add overlay** and **Pause all**. The Profiles page lists every profile with
+  its overlay count and an accent dot on the active one, and its footer holds
+  **+ New profile**.
+- A profile row in the list **selects** its profile; it never loads it. Loading is
+  the separate **Switch to this profile** action in the detail pane, because
+  switching is refused while there are unsaved edits and a list selection should
+  not have that side effect.
+- The **profile menu** under the switcher only switches, and ends with
+  **Manage profiles**, which opens the Profiles page. Create, rename, duplicate
+  and delete live on that page instead, where they have room for a real name
+  field rather than an editor crammed into a menu.
 - The **detail pane** holds the current page's detail: the editor for the
-  selected overlay on the Overlays page. The Global page has no list, so the
-  detail pane spans the width the list pane would have used. It ends in a sticky
-  footer holding **Discard** and **Save**, right aligned with Save as the filled
-  primary action, under a scrolling detail. Both are enabled only while there is
-  something to write, which is also how unsaved edits are signalled.
+  selected overlay on the Overlays page, and the selected profile's name, file,
+  overlay count and **Switch to this profile**, **Rename**, **Duplicate** and
+  **Delete** on the Profiles page. Rename, Duplicate and Delete open their editor
+  in place of that detail. The Global page has no list, so the detail pane spans
+  the width the list pane would have used. It ends in a sticky footer holding
+  **Discard** and **Save**, right aligned with Save as the filled primary action,
+  under a scrolling detail. Both are enabled only while there is something to
+  write, which is also how unsaved edits are signalled.
 - The **status bar** spans the full width and holds the transient message on the
   left and the version on the right.
 - Each pane is a scrolling list above a fixed footer, so the draft actions sit

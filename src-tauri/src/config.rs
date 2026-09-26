@@ -697,6 +697,29 @@ impl Store {
         Ok(ProfileEntry { id, name })
     }
 
+    /// Copy a profile's overlays into a new profile and return its id and name.
+    ///
+    /// The source file is only read, never moved, and the new id is postfixed
+    /// when the name is taken, exactly like [`Store::create_profile`].
+    fn duplicate_profile(&self, from: &str, display_name: &str) -> io::Result<ProfileEntry> {
+        let from_id = canonical_profile_name(from)?;
+        if !self.profile_file_path(&from_id).is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("There is no profile named \"{from}\"."),
+            ));
+        }
+        let base = canonical_profile_name(display_name)?;
+        fs::create_dir_all(self.profiles_dir())?;
+        let id = self.unique_profile_id(&base, None)?;
+        let name = stored_profile_name(display_name, &id);
+        let mut config = self.load_profile(&from_id)?;
+        config.profile_name = name.clone();
+        config.normalize();
+        self.save_profile(&id, &config)?;
+        Ok(ProfileEntry { id, name })
+    }
+
     fn delete_profile(&self, name: &str) -> io::Result<()> {
         fs::remove_file(self.profile_path(name)?)
     }
@@ -1083,6 +1106,11 @@ pub fn create_profile(display_name: &str) -> io::Result<ProfileEntry> {
 /// The name does not have to be unique; a taken file name gets a postfix.
 pub fn rename_profile(from: &str, display_name: &str) -> io::Result<ProfileEntry> {
     store().rename_profile(from, display_name)
+}
+
+/// Copy a profile's overlays into a new profile and return its id and name.
+pub fn duplicate_profile(from: &str, display_name: &str) -> io::Result<ProfileEntry> {
+    store().duplicate_profile(from, display_name)
 }
 
 /// Delete one profile file.
@@ -1997,6 +2025,43 @@ mod tests {
         store.delete_profile("office").expect("delete profile");
         assert_eq!(store.list_profiles(), vec![DEFAULT_PROFILE.to_string()]);
         assert!(store.load_profile("office").is_err());
+    }
+
+    #[test]
+    fn a_profile_can_be_duplicated() {
+        let root = TestDir::new("duplicate");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+        store.create_profile("Home").expect("create profile");
+        // `create_profile` wrote the name, but saving a config built by hand
+        // replaces the whole file, so the name is set again here.
+        let mut source_config = one_overlay_config("kept");
+        source_config.profile_name = "Home".to_string();
+        store
+            .save_profile("home", &source_config)
+            .expect("save profile");
+
+        let copy = store
+            .duplicate_profile("home", "Home 2")
+            .expect("duplicate");
+        // A space becomes a dash in the id, while the display name keeps it.
+        assert_eq!(copy.id, "home-2");
+        assert_eq!(copy.name, "Home 2");
+        let copied = store.load_profile("home-2").expect("load copy");
+        assert_eq!(copied.overlays[0].id, "kept", "overlays are copied");
+        assert_eq!(copied.profile_name, "Home 2", "the copy is named");
+        let source = store.load_profile("home").expect("load source");
+        assert_eq!(source.profile_name, "Home", "the source keeps its own name");
+        assert_eq!(source.overlays[0].id, "kept");
+
+        // Duplicating again with the same name postfixes the id, like any other
+        // collision, and leaves the source alone.
+        let second = store
+            .duplicate_profile("home", "Home 2")
+            .expect("duplicate again");
+        assert_eq!(second.id, "home-2_2");
+        assert_eq!(store.list_profiles_detailed().len(), 4);
+        assert!(store.duplicate_profile("missing", "Any").is_err());
     }
 
     #[test]

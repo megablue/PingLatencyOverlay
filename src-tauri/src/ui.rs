@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 
@@ -27,7 +28,10 @@ const DETAIL_FOOTER_BUTTON_HEIGHT: f32 = 32.0;
 const DETAIL_FOOTER_BUTTON_WIDTH: f32 = 96.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PROFILE_ROW_HEIGHT: f32 = 26.0;
-const PROFILE_ICON_SIZE: f32 = 24.0;
+const PROFILE_ACTION_WIDTH: f32 = 200.0;
+/// Space kept free at the right of a profile row for its overlay count and the
+/// active dot, so a long name truncates instead of running under them.
+const PROFILE_ROW_TRAILING: f32 = 52.0;
 /// Navigation rail widths: labelled, then icon only.
 const RAIL_WIDTH: f32 = 148.0;
 const RAIL_COLLAPSED_WIDTH: f32 = 44.0;
@@ -314,27 +318,23 @@ enum ShutdownState {
     CloseRequested,
 }
 
-/// Inline editor or confirmation shown at the bottom of the profile popup.
+/// Inline editor or confirmation shown in the Profiles page detail pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProfileDialog {
     Create { name: String },
     Rename { from: String, name: String },
+    Duplicate { from: String, name: String },
     Delete { id: String, name: String },
 }
 
-/// A profile request raised by the popup, applied after it closes.
+/// A profile request raised by a page, applied after the widget closes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProfileAction {
     Switch(String),
     Create(String),
     Rename { from: String, to: String },
+    Duplicate { from: String, to: String },
     Delete(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProfileIcon {
-    Rename,
-    Delete,
 }
 
 /// The pages the navigation rail switches between.
@@ -377,6 +377,8 @@ pub struct PingApp {
     config: Config,
     active_profile: String,
     profiles: Vec<config::ProfileEntry>,
+    profile_overlay_counts: HashMap<String, usize>,
+    selected_profile: Option<String>,
     last_title: String,
     profile_menu_open: bool,
     profile_dialog: Option<ProfileDialog>,
@@ -431,8 +433,12 @@ impl PingApp {
             page: Page::Overlays,
             rail_collapsed: false,
             config,
+            // Cloned before the id is moved into `active_profile`, so the
+            // Profiles page opens on whatever is already loaded.
+            selected_profile: Some(active_profile.clone()),
             active_profile,
             profiles,
+            profile_overlay_counts: HashMap::new(),
             last_title: String::new(),
             profile_menu_open: false,
             profile_dialog: None,
@@ -678,13 +684,30 @@ impl PingApp {
         }
     }
 
+    /// Re-read the profile list, and with it the overlay count every profile
+    /// row shows.
+    ///
+    /// The counts need one file read per profile, so this only runs on a user
+    /// action: opening the switcher, entering the Profiles page or changing a
+    /// profile. Never per frame.
     fn refresh_profiles(&mut self) {
         self.profiles = config::list_profiles_detailed();
+        self.profile_overlay_counts = self
+            .profiles
+            .iter()
+            .map(|profile| {
+                let count = config::load_profile(&profile.id)
+                    .map(|config| config.overlays.len())
+                    .unwrap_or_default();
+                (profile.id.clone(), count)
+            })
+            .collect();
     }
 
     /// Make another profile the active one and remember the choice.
     fn switch_profile(&mut self, id: &str) {
         self.profile_menu_open = false;
+        self.selected_profile = Some(id.to_string());
         if id == self.active_profile {
             return;
         }
@@ -719,6 +742,7 @@ impl PingApp {
         match config::create_profile(display_name) {
             Ok(created) => {
                 self.refresh_profiles();
+                self.selected_profile = Some(created.id.clone());
                 if can_switch_profile(self.dirty) {
                     self.switch_profile(&created.id);
                 } else {
@@ -749,6 +773,9 @@ impl PingApp {
                         self.status = format!("Could not update globalconfig.json: {error}");
                     }
                 }
+                // A rename can move the file, so the selection follows the id
+                // rather than pointing at a profile that no longer exists.
+                self.selected_profile = Some(renamed.id.clone());
                 self.refresh_profiles();
                 // Names may repeat, so the id is reported when the file moved.
                 let moved = config::sanitize_profile_name(from).ok().as_deref()
@@ -770,10 +797,39 @@ impl PingApp {
         }
     }
 
+    /// Copy a profile's overlays into a new profile. Returns false when the name
+    /// was rejected.
+    ///
+    /// The copy is not loaded: switching is a separate, deliberate action, and
+    /// doing it here would discard nothing but would still be a surprise.
+    fn duplicate_profile(&mut self, from: &str, display_name: &str) -> bool {
+        match config::duplicate_profile(from, display_name) {
+            Ok(created) => {
+                self.refresh_profiles();
+                self.selected_profile = Some(created.id.clone());
+                self.status = format!(
+                    "Duplicated profile \"{}\" as \"{}\" ({}).",
+                    self.profile_name(from),
+                    created.name,
+                    created.id
+                );
+                true
+            }
+            Err(error) => {
+                self.status = format!("Could not duplicate the profile: {error}");
+                false
+            }
+        }
+    }
+
     fn delete_profile(&mut self, id: &str) {
         if self.profiles.len() <= 1 {
             self.status = "A profile cannot be deleted while it is the only one.".to_string();
             return;
+        }
+        // Move the selection off the profile that is about to disappear.
+        if self.selected_profile.as_deref() == Some(id) {
+            self.selected_profile = Some(self.active_profile.clone());
         }
         if id == self.active_profile && !can_switch_profile(self.dirty) {
             self.status =
@@ -1007,6 +1063,255 @@ impl PingApp {
         });
     }
 
+    /// Pane 2 of the Profiles page: the list of profiles and a create button.
+    ///
+    /// Selecting a row only selects it. Loading it is a separate action in the
+    /// detail pane, because switching is refused while there are unsaved edits
+    /// and a two-pane list should not have that side effect.
+    fn show_profiles_page(&mut self, ui: &mut Ui, height: f32) {
+        let list_height = (height - SIDEBAR_FOOTER_HEIGHT).max(100.0);
+        let row_width = SIDEBAR_WIDTH - 20.0;
+        let active = self.active_profile.clone();
+        let selected = self.selected_profile.clone();
+        let profiles = self.profiles.clone();
+        let counts = self.profile_overlay_counts.clone();
+        let dirty = self.dirty;
+
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH - 8.0, list_height), |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if profiles.is_empty() {
+                            ui.label(
+                                RichText::new("No profiles yet. Create one to get started.")
+                                    .color(UI_TEXT_SECONDARY),
+                            );
+                        }
+                        let rows: Vec<(String, String, bool, bool, usize)> = profiles
+                            .iter()
+                            .map(|profile| {
+                                let is_active = profile.id == active;
+                                let count = counts.get(&profile.id).copied().unwrap_or(0);
+                                (
+                                    profile.id.clone(),
+                                    profile_row_label(profile, &profiles),
+                                    is_active,
+                                    selected.as_deref() == Some(profile.id.as_str()),
+                                    count,
+                                )
+                            })
+                            .collect();
+
+                        for (id, label, is_active, is_selected, count) in rows {
+                            let background = if is_selected {
+                                UI_SELECTION
+                            } else {
+                                UI_SURFACE_ALT
+                            };
+                            egui::Frame::group(ui.style())
+                                .fill(background)
+                                .inner_margin(egui::Margin::same(4))
+                                .show(ui, |ui| {
+                                    // The count and the dot live in a gutter at
+                                    // the right, so a long name truncates instead
+                                    // of running underneath them.
+                                    let name_width =
+                                        (row_width - 8.0 - PROFILE_ROW_TRAILING).max(80.0);
+                                    let response = ui.add_sized(
+                                        [name_width, PROFILE_ROW_HEIGHT],
+                                        egui::Button::new(RichText::new(label).color(
+                                            if is_active {
+                                                UI_ACCENT
+                                            } else if dirty {
+                                                UI_TEXT_SECONDARY
+                                            } else {
+                                                UI_TEXT
+                                            },
+                                        ))
+                                        .truncate(),
+                                    );
+                                    if response.clicked() {
+                                        self.selected_profile = Some(id.clone());
+                                    }
+                                    response.on_hover_text(config::profile_file_name(&id));
+                                    let trailing = ui.allocate_response(
+                                        egui::vec2(PROFILE_ROW_TRAILING, PROFILE_ROW_HEIGHT),
+                                        egui::Sense::hover(),
+                                    );
+                                    let painter = ui.painter();
+                                    painter.text(
+                                        trailing.rect.left_top()
+                                            + egui::vec2(4.0, trailing.rect.height() / 2.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        count.to_string(),
+                                        egui::TextStyle::Small.resolve(ui.style()),
+                                        UI_TEXT_SECONDARY,
+                                    );
+                                    if is_active {
+                                        // A dot, because the accent name alone is
+                                        // a weak cue in a long list.
+                                        draw_active_dot(painter, trailing.rect, UI_ACCENT);
+                                    }
+                                });
+                        }
+                    });
+            });
+
+            ui.add_space(6.0);
+            if ui
+                .add_sized([row_width, 32.0], egui::Button::new("+ New profile"))
+                .clicked()
+            {
+                self.profile_dialog = Some(ProfileDialog::Create {
+                    name: String::new(),
+                });
+                self.profile_name_focus = true;
+            }
+        });
+    }
+
+    /// Pane 3 of the Profiles page: the selected profile's name, file and the
+    /// actions that change it.
+    ///
+    /// An open editor or confirmation replaces the detail, so the pane never
+    /// shows a form and the profile it acts on at the same time.
+    fn show_profile_detail(&mut self, ui: &mut Ui) {
+        if self.show_profile_dialog(ui) {
+            return;
+        }
+        let Some(id) = self.selected_profile.clone() else {
+            ui.label(
+                RichText::new("Select a profile, or create a new one.").color(UI_TEXT_SECONDARY),
+            );
+            return;
+        };
+        let entry = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+            .unwrap_or_else(|| config::ProfileEntry {
+                id: id.clone(),
+                name: id.clone(),
+            });
+        let is_active = entry.id == self.active_profile;
+        let count = self
+            .profile_overlay_counts
+            .get(&entry.id)
+            .copied()
+            .unwrap_or(0);
+        let only_profile = self.profiles.len() <= 1;
+        let dirty = self.dirty;
+        let mut action: Option<ProfileAction> = None;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(if entry.name.is_empty() {
+                        "(unnamed profile)"
+                    } else {
+                        &entry.name
+                    })
+                    .heading()
+                    .color(UI_TEXT),
+                );
+                ui.add_space(2.0);
+                // Names may repeat, so the file is what identifies the profile.
+                ui.label(
+                    RichText::new(config::profile_file_name(&entry.id))
+                        .small()
+                        .color(UI_TEXT_SECONDARY),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{count} overlay{}",
+                        if count == 1 { "" } else { "s" }
+                    ))
+                    .small()
+                    .color(UI_TEXT_SECONDARY),
+                );
+                ui.add_space(8.0);
+
+                if is_active {
+                    ui.label(RichText::new("This is the active profile.").color(UI_TEXT_SECONDARY));
+                } else {
+                    let mut switch_clicked = false;
+                    ui.add_enabled_ui(can_switch_profile(dirty), |ui| {
+                        switch_clicked = ui
+                            .add_sized(
+                                [PROFILE_ACTION_WIDTH, 32.0],
+                                egui::Button::new(
+                                    RichText::new("Switch to this profile").color(UI_TEXT),
+                                )
+                                .fill(UI_ACCENT_STRONG),
+                            )
+                            .clicked();
+                    });
+                    if switch_clicked {
+                        action = Some(ProfileAction::Switch(entry.id.clone()));
+                    }
+                    if dirty {
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Save or discard changes before switching profiles.")
+                                .small()
+                                .color(UI_TEXT_SECONDARY),
+                        );
+                    }
+                }
+
+                ui.add_space(6.0);
+                if ui
+                    .add_sized([PROFILE_ACTION_WIDTH, 32.0], egui::Button::new("Rename"))
+                    .clicked()
+                {
+                    self.profile_dialog = Some(ProfileDialog::Rename {
+                        from: entry.id.clone(),
+                        name: entry.name.clone(),
+                    });
+                    self.profile_name_focus = true;
+                }
+                if ui
+                    .add_sized([PROFILE_ACTION_WIDTH, 32.0], egui::Button::new("Duplicate"))
+                    .clicked()
+                {
+                    // Seeded with a distinct name, because duplicating onto the
+                    // source's own name would just be a rename.
+                    self.profile_dialog = Some(ProfileDialog::Duplicate {
+                        from: entry.id.clone(),
+                        name: format!("{} copy", entry.name),
+                    });
+                    self.profile_name_focus = true;
+                }
+                let mut delete_clicked = false;
+                ui.add_enabled_ui(!only_profile, |ui| {
+                    delete_clicked = ui
+                        .add_sized(
+                            [PROFILE_ACTION_WIDTH, 32.0],
+                            egui::Button::new(RichText::new("Delete").color(UI_DANGER))
+                                .fill(UI_SURFACE_ALT),
+                        )
+                        .clicked();
+                });
+                if delete_clicked {
+                    self.profile_dialog = Some(ProfileDialog::Delete {
+                        id: entry.id.clone(),
+                        name: entry.name.clone(),
+                    });
+                }
+            });
+
+        if let Some(action) = action {
+            // A rejected request keeps the page as it was.
+            if self.apply_profile_action(action) {
+                self.profile_dialog = None;
+            }
+        }
+    }
+
     /// The profile switcher that heads pane 2: the active profile's display name
     /// with a painted arrow, opening the profile menu underneath.
     ///
@@ -1106,10 +1411,11 @@ impl PingApp {
         });
     }
 
-    /// Pane 2 for the current page. Only the Overlays page has a list so far.
+    /// Pane 2 for the current page. The Global page has no list.
     fn show_list_pane(&mut self, ui: &mut Ui, height: f32) {
         match self.page {
             Page::Overlays => self.show_overlays_page(ui, height),
+            Page::Profiles => self.show_profiles_page(ui, height),
             page => self.show_page_placeholder(ui, page),
         }
     }
@@ -1130,23 +1436,22 @@ impl PingApp {
         });
     }
 
-    /// Profile picker shown under the profile button. Create, rename and
-    /// delete live inside the menu so the sidebar keeps a single control.
+    /// Profile switcher menu shown under the pane 2 header.
+    ///
+    /// The menu only switches, because switching is the one profile action that
+    /// can be wrong: it is refused while there are unsaved edits. Creating,
+    /// renaming, duplicating and deleting need room for an editor and a
+    /// confirmation, so they live on the Profiles page.
     fn show_profile_popup(&mut self, ui: &mut Ui, anchor: &egui::Response) {
         let active = self.active_profile.clone();
         let profiles = self.profiles.clone();
         let dirty = self.dirty;
-        let mut focus_field = std::mem::take(&mut self.profile_name_focus);
-        // The dialog is taken out for the frame so the popup can edit it
-        // without borrowing the app state, then the edited value is stored
-        // back. Snapshotting it here would discard whatever was typed.
-        let mut dialog = self.profile_dialog.take();
-        let mut action: Option<ProfileAction> = None;
+        let mut switch_to: Option<String> = None;
+        let mut manage_clicked = false;
 
         // egui owns the open flag through `open_bool`, so it can close the popup
         // on a click outside or Escape without treating the click that opened
         // it as an outside click.
-        let was_open = self.profile_menu_open;
         let _popup = egui::containers::Popup::from_response(anchor)
             .open_bool(&mut self.profile_menu_open)
             .close_behavior(egui::containers::PopupCloseBehavior::CloseOnClickOutside)
@@ -1160,133 +1465,38 @@ impl PingApp {
                 ui.separator();
 
                 for profile in &profiles {
-                    ui.horizontal(|ui| {
-                        let current = profile.id == active;
-                        // Pending edits dim every other profile, because
-                        // switching is refused until the draft is saved.
-                        let color = if current {
-                            UI_ACCENT
-                        } else if dirty {
-                            UI_TEXT_SECONDARY
-                        } else {
-                            UI_TEXT
-                        };
-                        // Display names may repeat, so a row that shares its
-                        // name with another one also shows its id.
-                        let shared_name = profiles
-                            .iter()
-                            .filter(|other| other.name == profile.name)
-                            .count()
-                            > 1;
-                        let text = if shared_name {
-                            format!("{} ({})", profile.name, profile.id)
-                        } else {
-                            profile.name.clone()
-                        };
-                        let label = RichText::new(text).color(color);
-                        // Name, rename and delete: three widgets, so two
-                        // `item_spacing` gaps must be reserved. Reserving one
-                        // gap made every row ask for more than the popup width.
-                        let icons = PROFILE_ICON_SIZE * 2.0 + ui.spacing().item_spacing.x * 2.0;
-                        let name_width = (ui.available_width() - icons).max(60.0);
-                        let name_button = ui.add_sized(
-                            [name_width, PROFILE_ROW_HEIGHT],
-                            egui::Button::new(label).truncate(),
-                        );
-                        if name_button.clicked() {
-                            action = Some(ProfileAction::Switch(profile.id.clone()));
-                        }
-                        name_button.on_hover_text(config::profile_file_name(&profile.id));
-                        let rename =
-                            profile_icon_button(ui, ProfileIcon::Rename, UI_TEXT_SECONDARY);
-                        if rename.clicked() {
-                            dialog = Some(ProfileDialog::Rename {
-                                from: profile.id.clone(),
-                                name: profile.name.clone(),
-                            });
-                            focus_field = true;
-                        }
-                        let delete = profile_icon_button(ui, ProfileIcon::Delete, UI_DANGER);
-                        if delete.clicked() {
-                            dialog = Some(ProfileDialog::Delete {
-                                id: profile.id.clone(),
-                                name: profile.name.clone(),
-                            });
-                        }
-                    });
+                    let current = profile.id == active;
+                    // Pending edits dim every other profile, because
+                    // switching is refused until the draft is saved.
+                    let color = if current {
+                        UI_ACCENT
+                    } else if dirty {
+                        UI_TEXT_SECONDARY
+                    } else {
+                        UI_TEXT
+                    };
+                    let row = ui.add_sized(
+                        [ui.available_width(), PROFILE_ROW_HEIGHT],
+                        egui::Button::new(
+                            RichText::new(profile_row_label(profile, &profiles)).color(color),
+                        )
+                        .truncate(),
+                    );
+                    if row.clicked() {
+                        switch_to = Some(profile.id.clone());
+                    }
+                    row.on_hover_text(config::profile_file_name(&profile.id));
                 }
 
                 ui.separator();
-                // The inline editor replaces the "+ New profile" row while a
-                // dialog is open.
-                let wants_new = match &dialog {
-                    None => ui
-                        .add_sized(
-                            [ui.available_width(), PROFILE_ROW_HEIGHT],
-                            egui::Button::new("+ New profile"),
-                        )
-                        .clicked(),
-                    Some(_) => false,
-                };
-                // Assigned after the match, which borrows the dialog.
-                let mut close_dialog = false;
-                match &mut dialog {
-                    Some(ProfileDialog::Create { name }) => {
-                        ui.label(RichText::new("New profile").color(UI_TEXT));
-                        let (submit, cancel) = profile_name_field(ui, name, "Create", focus_field);
-                        if submit {
-                            action = Some(ProfileAction::Create(name.clone()));
-                        }
-                        close_dialog = cancel;
-                    }
-                    Some(ProfileDialog::Rename { from, name }) => {
-                        ui.label(RichText::new(format!("Rename \"{from}\"")).color(UI_TEXT));
-                        let (submit, cancel) = profile_name_field(ui, name, "Rename", focus_field);
-                        if submit {
-                            action = Some(ProfileAction::Rename {
-                                from: from.clone(),
-                                to: name.clone(),
-                            });
-                        }
-                        close_dialog = cancel;
-                    }
-                    Some(ProfileDialog::Delete { id, name }) => {
-                        ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER));
-                        // Names may repeat, so the file confirms what goes.
-                        ui.label(
-                            RichText::new(config::profile_file_name(id))
-                                .small()
-                                .color(UI_TEXT_SECONDARY),
-                        );
-                        let mut confirm = false;
-                        let mut cancel = false;
-                        ui.horizontal(|ui| {
-                            confirm = ui
-                                .add_sized(
-                                    [70.0, PROFILE_ROW_HEIGHT],
-                                    egui::Button::new(RichText::new("Delete").color(UI_TEXT))
-                                        .fill(UI_DANGER_STRONG),
-                                )
-                                .clicked();
-                            cancel = ui
-                                .add_sized([60.0, PROFILE_ROW_HEIGHT], egui::Button::new("Cancel"))
-                                .clicked();
-                        });
-                        if confirm {
-                            action = Some(ProfileAction::Delete(id.clone()));
-                        }
-                        close_dialog = cancel;
-                    }
-                    None => {}
-                }
-                if wants_new {
-                    dialog = Some(ProfileDialog::Create {
-                        name: String::new(),
-                    });
-                    focus_field = true;
-                }
-                if close_dialog {
-                    dialog = None;
+                if ui
+                    .add_sized(
+                        [ui.available_width(), PROFILE_ROW_HEIGHT],
+                        egui::Button::new("Manage profiles"),
+                    )
+                    .clicked()
+                {
+                    manage_clicked = true;
                 }
 
                 if dirty {
@@ -1299,10 +1509,137 @@ impl PingApp {
                 }
             });
 
-        // Closing the popup drops any inline editor it was showing.
-        if was_open && !self.profile_menu_open {
+        // The menu is only a switcher, so the request runs after it closes.
+        if manage_clicked {
+            self.page = Page::Profiles;
+            self.profile_menu_open = false;
+        }
+        if let Some(id) = switch_to {
+            self.switch_profile(&id);
+        }
+    }
+
+    /// The inline editor or confirmation for a profile request, drawn in place
+    /// of the Profiles detail. Returns true while one is open.
+    ///
+    /// The dialog is taken out for the frame so the editor can mutate it
+    /// without borrowing the app state, then the edited value is stored back.
+    /// Snapshotting it here would discard whatever was typed.
+    fn show_profile_dialog(&mut self, ui: &mut Ui) -> bool {
+        if self.profile_dialog.is_none() {
+            return false;
+        }
+        // Taken, not copied: the field is focused exactly once, when the editor
+        // opens, so a later frame must not steal the caret.
+        let focus_field = std::mem::take(&mut self.profile_name_focus);
+        let mut dialog = self.profile_dialog.take();
+        let mut action: Option<ProfileAction> = None;
+        // Assigned after the match, which borrows the dialog.
+        let mut close_dialog = false;
+
+        match &mut dialog {
+            Some(ProfileDialog::Create { name }) => {
+                ui.add_space(4.0);
+                ui.label(RichText::new("New profile").heading().color(UI_TEXT));
+                ui.label(
+                    RichText::new("A new profile starts empty and gets its own file.")
+                        .small()
+                        .color(UI_TEXT_SECONDARY),
+                );
+                let (submit, cancel) = profile_name_field(ui, name, "Create", focus_field);
+                if submit {
+                    action = Some(ProfileAction::Create(name.clone()));
+                }
+                close_dialog = cancel;
+            }
+            Some(ProfileDialog::Rename { from, name }) => {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Rename profile").heading().color(UI_TEXT));
+                // Names may repeat, so the file is shown: a taken name gives the
+                // new profile a postfixed file instead of an error.
+                ui.label(
+                    RichText::new(format!(
+                        "{} will be written as a new file if the name is taken.",
+                        config::profile_file_name(from)
+                    ))
+                    .small()
+                    .color(UI_TEXT_SECONDARY),
+                );
+                let (submit, cancel) = profile_name_field(ui, name, "Rename", focus_field);
+                if submit {
+                    action = Some(ProfileAction::Rename {
+                        from: from.clone(),
+                        to: name.clone(),
+                    });
+                }
+                close_dialog = cancel;
+            }
+            Some(ProfileDialog::Duplicate { from, name }) => {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Duplicate profile").heading().color(UI_TEXT));
+                ui.label(
+                    RichText::new(format!(
+                        "The overlays of {} are copied into a new profile.",
+                        config::profile_file_name(from)
+                    ))
+                    .small()
+                    .color(UI_TEXT_SECONDARY),
+                );
+                let (submit, cancel) = profile_name_field(ui, name, "Duplicate", focus_field);
+                if submit {
+                    action = Some(ProfileAction::Duplicate {
+                        from: from.clone(),
+                        to: name.clone(),
+                    });
+                }
+                close_dialog = cancel;
+            }
+            Some(ProfileDialog::Delete { id, name }) => {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("Delete \"{name}\"?"))
+                        .heading()
+                        .color(UI_DANGER),
+                );
+                // Names may repeat, so the file confirms what goes.
+                ui.label(
+                    RichText::new(config::profile_file_name(id))
+                        .small()
+                        .color(UI_TEXT_SECONDARY),
+                );
+                if id == &self.active_profile {
+                    ui.label(
+                        RichText::new("This is the active profile, so another one is loaded next.")
+                            .small()
+                            .color(UI_TEXT_SECONDARY),
+                    );
+                }
+                let mut confirm = false;
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    confirm = ui
+                        .add_sized(
+                            [96.0, DETAIL_FOOTER_BUTTON_HEIGHT],
+                            egui::Button::new(RichText::new("Delete").color(UI_TEXT))
+                                .fill(UI_DANGER_STRONG),
+                        )
+                        .clicked();
+                    cancel = ui
+                        .add_sized(
+                            [96.0, DETAIL_FOOTER_BUTTON_HEIGHT],
+                            egui::Button::new("Cancel"),
+                        )
+                        .clicked();
+                });
+                if confirm {
+                    action = Some(ProfileAction::Delete(id.clone()));
+                }
+                close_dialog = cancel;
+            }
+            None => {}
+        }
+        if close_dialog {
             dialog = None;
-            focus_field = false;
         }
         self.profile_name_focus = focus_field;
         self.profile_dialog = dialog;
@@ -1313,6 +1650,7 @@ impl PingApp {
                 self.profile_dialog = None;
             }
         }
+        self.profile_dialog.is_some()
     }
 
     /// Apply a profile request. Returns false when it was rejected.
@@ -1324,6 +1662,7 @@ impl PingApp {
             }
             ProfileAction::Create(name) => self.create_profile(&name),
             ProfileAction::Rename { from, to } => self.rename_profile(&from, &to),
+            ProfileAction::Duplicate { from, to } => self.duplicate_profile(&from, &to),
             ProfileAction::Delete(name) => {
                 self.delete_profile(&name);
                 true
@@ -1389,6 +1728,7 @@ impl PingApp {
             egui::vec2(ui.available_width(), content_height),
             |ui| match self.page {
                 Page::Overlays => self.show_editor(ui),
+                Page::Profiles => self.show_profile_detail(ui),
                 page => self.show_page_placeholder(ui, page),
             },
         );
@@ -1561,54 +1901,28 @@ fn window_title(profile_name: &str) -> String {
     format!("PingLatencyOverlay - Current Profile: {profile_name}")
 }
 
-/// A square button with a painted, font-independent profile icon.
-fn profile_icon_button(ui: &mut Ui, icon: ProfileIcon, color: Color32) -> egui::Response {
-    let response = ui.add_sized(
-        [PROFILE_ICON_SIZE, PROFILE_ICON_SIZE],
-        egui::Button::new(RichText::new("")),
-    );
-    draw_profile_icon(ui.painter(), response.rect, icon, color);
-    response
+/// Row text for a profile.
+///
+/// Display names may repeat, so a row that shares its name with another one also
+/// shows its id, which is the only part that is unique.
+fn profile_row_label(profile: &config::ProfileEntry, profiles: &[config::ProfileEntry]) -> String {
+    let shared_name = profiles
+        .iter()
+        .filter(|other| other.name == profile.name)
+        .count()
+        > 1;
+    if shared_name {
+        format!("{} ({})", profile.name, profile.id)
+    } else {
+        profile.name.clone()
+    }
 }
 
-/// Vector icons for the profile menu so they never depend on font glyphs.
-fn draw_profile_icon(painter: &egui::Painter, rect: egui::Rect, icon: ProfileIcon, color: Color32) {
-    let center = rect.center();
-    let stroke = egui::Stroke::new(1.4, color);
-    let arm = rect.width().min(rect.height()) * 0.24;
-    match icon {
-        ProfileIcon::Delete => {
-            painter.line_segment(
-                [
-                    center + egui::vec2(-arm, -arm),
-                    center + egui::vec2(arm, arm),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    center + egui::vec2(arm, -arm),
-                    center + egui::vec2(-arm, arm),
-                ],
-                stroke,
-            );
-        }
-        ProfileIcon::Rename => {
-            // A slanted pencil: barrel edges, ferrule, then the nib.
-            let along = egui::vec2(1.0, -1.0).normalized();
-            let across = egui::vec2(-along.y, along.x);
-            let base = center + along * arm;
-            let neck = center - along * arm * 0.1;
-            let nib = center - along * arm * 0.95;
-            painter.line_segment([base, neck + across * arm * 0.45], stroke);
-            painter.line_segment([base, neck - across * arm * 0.45], stroke);
-            painter.line_segment(
-                [neck + across * arm * 0.45, neck - across * arm * 0.45],
-                stroke,
-            );
-            painter.line_segment([neck, nib], stroke);
-        }
-    }
+/// A filled dot in the top right of a row, marking the active profile.
+fn draw_active_dot(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let radius = 3.5;
+    let center = egui::pos2(rect.right() - radius - 6.0, rect.top() + radius + 6.0);
+    painter.circle_filled(center, radius, color);
 }
 
 /// A single-line profile name editor with a submit and a cancel button.
@@ -2331,12 +2645,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, rail_width,
-        selected_overlay_for_border, window_title, DETAIL_FOOTER_HEIGHT, PAGES, PANE_GAP,
-        PANE_MARGIN, RAIL_WIDTH, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT,
+        can_switch_profile, config_notice_status, config_notices_status, profile_row_label,
+        rail_width, selected_overlay_for_border, window_title, DETAIL_FOOTER_HEIGHT, PAGES,
+        PANE_GAP, PANE_MARGIN, RAIL_WIDTH, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT,
         WINDOW_MIN_WIDTH,
     };
-    use crate::config::ConfigNotice;
+    use crate::config::{ConfigNotice, ProfileEntry};
 
     /// The rail is the leftmost pane, so the window has to be wide enough for the
     /// rail, the list pane and a usable detail pane at the same time.
@@ -2369,6 +2683,35 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn a_shared_profile_name_shows_its_id() {
+        let profiles = vec![
+            ProfileEntry {
+                id: "home".to_string(),
+                name: "Home".to_string(),
+            },
+            ProfileEntry {
+                id: "home_2".to_string(),
+                name: "Home".to_string(),
+            },
+            ProfileEntry {
+                id: "office".to_string(),
+                name: "Office".to_string(),
+            },
+        ];
+        assert_eq!(profile_row_label(&profiles[0], &profiles), "Home (home)");
+        assert_eq!(
+            profile_row_label(&profiles[1], &profiles),
+            "Home (home_2)",
+            "the id is the only part that differs"
+        );
+        assert_eq!(
+            profile_row_label(&profiles[2], &profiles),
+            "Office",
+            "a unique name needs no id"
+        );
     }
 
     #[test]

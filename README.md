@@ -42,25 +42,28 @@ Settings are stored in profiles:
 ```
 
 Each profile holds one complete set of overlays. The switcher at the top of the
-sidebar opens the profile menu, which lists them and can create, rename, delete
-and switch between them. **Save** and **Discard** sit in a sticky footer under
-the right-hand pane, so they sit right next to the settings they write, and
-**Save** writes to the profile that is currently active; that choice is
-remembered in `globalconfig.json` as
-`activeProfile` together with the file name in `activeProfileFile`. Those two
-keys are the only record of the active profile: the app loads that file on
-startup, and if it has been deleted or renamed away it falls back to the
-`default` profile instead of picking another one on its own.
+list pane opens the profile menu, which switches between them and links to the
+Profiles page, where profiles are created, renamed, duplicated and deleted.
+**Save** and **Discard** sit in a sticky footer under the right-hand pane, so
+they sit right next to the settings they write, and **Save** writes to the
+profile that is currently active; that choice is remembered in
+`globalconfig.json` as `activeProfile` together with the file name in
+`activeProfileFile`. Those two keys are the only record of the active profile:
+the app loads that file on startup, and if it has been deleted or renamed away it
+falls back to the `default` profile instead of picking another one on its own.
 
 The window itself is three panes and a status bar. The leftmost **rail** switches
 between the **Overlays**, **Profiles** and **Global** pages and collapses to
 icons only; the middle pane lists what the current page is about, headed by the
-profile switcher on the Overlays page; the right pane shows the detail, and both
-panes end in a fixed footer under a scrolling list. The **Profiles** and
-**Global** pages arrive in the next releases.
+profile switcher on the Overlays page and by the profile list on the Profiles
+page; the right pane shows the detail, and both panes end in a fixed footer under
+a scrolling list. Selecting a profile in the list only selects it — the **Profiles**
+page has a separate **Switch to this profile** button, because switching is
+refused while you have unsaved edits. The **Global** page arrives in the next
+release.
 
 Each profile has two names. The **display name** is what you type and what the
-window title, the switcher and the profile menu show
+window title, the switcher and the profile list show
 (`PingLatencyOverlay - Current Profile: Work VPN`); it is stored in the profile
 file as `profileName` and does not have to be unique. The **id** is the file
 name `profile_<id>.json`, where the id is lowercased and reduced to letters,

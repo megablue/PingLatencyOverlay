@@ -90,8 +90,17 @@ Installer (run from the repository root):
   (`show_status_bar`); it only shows the transient operation message and the
   right-aligned version label, so it takes `&self`.
 - The profile switcher (`show_profile_switcher`) heads the Overlays list pane and
-  anchors the existing profile popup. Rail rows and glyphs are painted with
+  anchors the profile menu. Rail rows and glyphs are painted with
   `ui.painter()`, not buttons, so the label can sit beside the icon.
+- The profile menu is a **switcher only** and ends with **Manage profiles**,
+  which opens the Profiles page. Create, rename, duplicate and delete live on
+  that page (`show_profile_detail`, `show_profile_dialog`), not in the menu.
+- Selecting a row in the Profiles list only sets `selected_profile`; loading is
+  the separate **Switch to this profile** action. Never make a list selection
+  switch profiles, because switching is refused while `dirty`.
+- `profile_overlay_counts` is a cache of overlay counts per profile, filled by
+  `refresh_profiles` because that reads every profile file. Call it on user
+  actions only, never per frame.
 - The root egui viewport starts hidden. Tray **left-click** shows Config; the
   context menu is right-click. Config-window close hides the root viewport; only
   tray Exit closes the app.
