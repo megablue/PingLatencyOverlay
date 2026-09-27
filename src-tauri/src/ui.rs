@@ -703,7 +703,27 @@ impl PingApp {
         self.apply_runtime_config();
     }
 
+    /// Whether either draft has something to write.
+    ///
+    /// The profile draft and the preferences draft are independent, and pages
+    /// stage into one or the other, so the footer's buttons must follow both.
+    fn has_pending_edits(&self) -> bool {
+        pending_edits(self.dirty, self.prefs_dirty)
+    }
+
+    /// Write the active profile, but only when the profile draft has changed.
+    ///
+    /// The guard is not an optimisation. Once the footer was enabled for
+    /// preferences too, an unguarded Save would rewrite the profile file from
+    /// the in-memory draft even when only `globalconfig.json` had changed,
+    /// silently clobbering any edit made to that file from outside the app
+    /// while it was running. `save_prefs` has always had this guard; this is
+    /// where the two writers were asymmetric. Returns true either way so
+    /// `save_edits` still reports "Saved." for a preferences-only save.
     fn persist_current(&mut self) -> bool {
+        if !self.dirty {
+            return true;
+        }
         let mut next = self.config.clone();
         next.normalize();
         // Profiles are the only configuration storage now; the previous
@@ -1988,6 +2008,12 @@ impl PingApp {
     /// are enabled only while there is something to write, which is also how
     /// pending edits stay visible.
     fn show_detail_footer(&mut self, ui: &mut Ui) {
+        // Either draft counts, not just the profile one. The Global page stages
+        // into `prefs_dirty` and never touches `dirty`, so gating on `dirty`
+        // alone left Save and Discard permanently greyed out there, which meant
+        // every Global preference was silently discarded on close. That shipped
+        // for the rail-collapse preference from its first release.
+        let pending = self.has_pending_edits();
         ui.allocate_ui(
             egui::vec2(ui.available_width(), DETAIL_FOOTER_HEIGHT),
             |ui| {
@@ -1995,7 +2021,7 @@ impl PingApp {
                     // Right to left, so Save lands rightmost as the primary
                     // action and Discard sits to its left.
                     let mut save_clicked = false;
-                    ui.add_enabled_ui(self.dirty, |ui| {
+                    ui.add_enabled_ui(pending, |ui| {
                         save_clicked = ui
                             .add_sized(
                                 [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
@@ -2005,7 +2031,7 @@ impl PingApp {
                             .clicked();
                     });
                     let mut discard_clicked = false;
-                    ui.add_enabled_ui(self.dirty, |ui| {
+                    ui.add_enabled_ui(pending, |ui| {
                         discard_clicked = ui
                             .add_sized(
                                 [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
@@ -2141,6 +2167,17 @@ fn config_notice_status(notice: &config::ConfigNotice) -> String {
 /// Pending edits must be resolved before another profile can be loaded.
 fn can_switch_profile(dirty: bool) -> bool {
     !dirty
+}
+
+/// Whether either draft has something to write.
+///
+/// There are two independent drafts: the profile draft (`dirty`) and the
+/// app-wide preferences draft (`prefs_dirty`). A page stages into one of them,
+/// so anything asking "is there anything to save?" has to ask about both. Free
+/// function so a test can drive the rule rather than assert a predicate nothing
+/// acts on, which is how this shipped broken.
+fn pending_edits(dirty: bool, prefs_dirty: bool) -> bool {
+    dirty || prefs_dirty
 }
 
 /// The Config window title, which names the active profile and optionally carries
@@ -3505,8 +3542,8 @@ mod tests {
         app_version, can_switch_profile, config_notice_status, config_notices_status,
         deselect_strip_rect, draw_pane_divider, empty_editor, list_pane_column,
         list_pane_row_height, list_pane_row_width_for, overlay_count_label, overlay_name_width,
-        overlay_row_contents, page_has_detail_footer, page_has_list_pane, profile_name_width,
-        profile_row_contents, profile_row_label, rail_width, row_inner,
+        overlay_row_contents, page_has_detail_footer, page_has_list_pane, pending_edits,
+        profile_name_width, profile_row_contents, profile_row_label, rail_width, row_inner,
         selected_overlay_for_border, sync_profile_cache, toggled_selection, window_title, Frame,
         Page, ProfileSnapshot, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, DETAIL_FOOTER_BUTTON_HEIGHT,
         DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
@@ -3927,6 +3964,31 @@ mod tests {
             list.intersects(detail),
             "an unclaimed list pane at {list:?} was expected to be overrun by the detail pane at {detail:?}"
         );
+    }
+
+    /// Save and Discard follow *either* draft.
+    ///
+    /// The profile draft and the preferences draft are separate flags and pages
+    /// stage into one or the other, so gating the footer on the profile flag
+    /// alone left every Global preference unsaveable. The rail-collapse
+    /// preference has been in that state since it shipped.
+    #[test]
+    fn the_footer_follows_either_draft() {
+        let cases = [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ];
+        for (dirty, prefs_dirty, expected) in cases {
+            assert_eq!(
+                pending_edits(dirty, prefs_dirty),
+                expected,
+                "with the profile draft {dirty} and the preferences draft {prefs_dirty} \
+                 Save and Discard should be {}",
+                if expected { "enabled" } else { "disabled" }
+            );
+        }
     }
 
     /// The list pane's content is one column, centred in its pane.

@@ -193,8 +193,10 @@
   footer because it stages nothing.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
   right aligned with Save as the filled primary action, under a scrolling detail.
-  Both are enabled only while there is something to write, which is also how
-  unsaved edits are signalled. Only a page that stages a draft carries it: the
+  Both are enabled while **either** draft has something to write - the profile
+  or the app-wide preferences - which is also how unsaved edits are signalled. A
+  Save that only has preferences to write leaves the profile file alone. Only a
+  page that stages a draft carries it: the
   Overlays and Global pages do, the Profiles and About pages do not, because
   they act on files immediately or stage nothing at all. On the Profiles page
   the pending-draft hint in the detail names the Overlays page as the place to

@@ -117,6 +117,21 @@ Installer (run from the repository root):
 - Edits are staged per source. Detail-pane edits and Add overlay stage into the
   profile draft; list-pane enable/delete and Pause/Resume apply immediately.
   Delete uses an inline confirmation because native script dialogs are not used.
+- **There are two independent draft flags: `dirty` (the profile) and
+  `prefs_dirty` (app-wide preferences).** Anything asking "is there anything to
+  save?" must ask about both, via `has_pending_edits` / the free `pending_edits`.
+  The footer's buttons were gated on `dirty` alone, so every Global preference
+  was unsaveable for as long as the Global page existed - the rail-collapse
+  preference has been in that state since it shipped. `save_edits` calls
+  `persist_current` then `save_prefs` and reports "Saved." if either returned
+  true, so the save path was always right; only the enablement was wrong.
+- **Both draft writers need the same guard.** `save_prefs` returns early when
+  `!prefs_dirty`; `persist_current` did not, so once the footer was enabled for
+  preferences an unguarded Save rewrote the profile file from the in-memory
+  draft even when only `globalconfig.json` had changed - silently clobbering
+  any edit made to that file from outside the app while it was running. The two
+  writers being asymmetric was what gave the bug away. Both return `true` when
+  there was nothing to write, so a preferences-only save still says "Saved."
 - The Global page stages into `prefs_draft` and writes on Save (`save_prefs`),
   while the rail's collapsed state is applied to the live UI immediately so the
   user sees it change. `save_edits` writes whichever draft is dirty and
@@ -194,16 +209,21 @@ Installer (run from the repository root):
 
 ## egui layout traps
 Every trap below shipped once. Each test named here fails on the old behaviour.
-- **`ui.centered_and_justified(..)` and `ui.with_layout(..)` are ONE-widget
-  builders.** Their doc says so. `show_editor`'s empty state added a label, an
-  `add_space` and a second label, and the child then reported a min rect 22px
-  *taller* than the box it was given, so the parent advanced its cursor by that
-  inflated height and pushed the detail footer 19.5px down into the status bar.
-  The symptom only appeared with nothing selected, because the selected path is
-  a `ScrollArea`, which reports its box exactly. A child that reports more than
-  its box moves **everything** laid out after it. Use one widget — here one
-  label with an embedded newline, via `empty_editor`. Pinned by
-  `the_detail_footer_stays_under_the_detail_pane`.
+- **A child that does not fill its box can report a min rect LARGER than the box
+  it was given**, and the parent advances its cursor by whatever the child
+  reports. `show_editor`'s empty state sat in `ui.centered_and_justified`, whose
+  doc says only one widget may be added, and three small widgets (label,
+  `add_space`, label) made it report 22px taller than its box, pushing the
+  detail footer 19.5px down into the status bar. The symptom only appeared with
+  nothing selected, because the selected path is a `ScrollArea`, which reports
+  its box exactly. A child that reports more than its box moves **everything**
+  laid out after it. Use one widget - here one label with an embedded newline,
+  via `empty_editor`. Pinned by `the_detail_footer_stays_under_the_detail_pane`.
+  Note this is NOT "never put two widgets in a builder":
+  `show_detail_footer` uses `ui.with_layout(..)` with two `add_enabled_ui`
+  children and has rendered correctly through every release. The rule is about
+  the child failing to fill its box, not about child count, and the footer is
+  the standing counter-example.
 - **A mirror test must reproduce the real bounds, width AND height, or its
   numbers are meaningless.** `detail_pane_geometry` stands in for
   `show_detail_pane`, which needs a live `PingApp`. Without wrapping its body in
