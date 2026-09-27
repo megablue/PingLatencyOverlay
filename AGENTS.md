@@ -140,6 +140,16 @@ Installer (run from the repository root):
   comment: `refresh_profiles` claimed for a release that it ran on "entering the
   Profiles page", and that false claim is why the missing call above went
   unnoticed. When a comment names *when* something runs, check the call sites.
+- **Test a trigger by driving it, not by testing its predicate.** Testing
+  `arriving_page_needs_profiles` alone passed while the page never read
+  anything, because the predicate was right and nothing acted on it. The body
+  lives in the free `sync_profile_cache`, which takes the disk read as a
+  parameter, so `arriving_on_the_profiles_page_re_reads_the_counts` can count
+  the reads and assert the counts it published.
+  `coming_back_to_the_profiles_page_reads_again` covers the other half, that
+  `last_page` advances even on the frames that read nothing. A conditional
+  action is exactly where a predicate-only test is worthless: write the action
+  so it can be called without the object that owns it.
 - The window title is `PingLatencyOverlay - Current Profile: <name>`, pushed
   with `ViewportCommand::Title` only when it changes (`sync_window_title`).
 - The root egui viewport starts hidden. Tray **left-click** shows Config; the

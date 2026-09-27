@@ -146,10 +146,11 @@
   its overlay count and an accent dot on the active one, and its footer holds
   **+ New profile**.
 - Overlay counts are read from each profile's file when the Profiles page is
-  arrived at, and again after any action that changes one — creating, renaming,
+  arrived at, and again after any action that changes one - creating, renaming,
   duplicating, deleting or switching a profile. A count that has not been read
   draws no number at all, because "not read yet" is not the same as "no
-  overlays" and a zero would be a confident lie.
+  overlays" and a zero would be a confident lie. A profile whose file cannot be
+  read is counted the same way: no number, never a zero.
 - A profile row in the list **selects** its profile; it never loads it. Loading is
   the separate **Switch to this profile** action in the detail pane, because
   switching is refused while there are unsaved edits and a list selection should

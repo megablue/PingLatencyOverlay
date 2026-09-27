@@ -792,15 +792,9 @@ impl PingApp {
     /// A profile whose file will not parse is left out of the count map rather
     /// than counted as zero, so it draws no number instead of a wrong one.
     fn refresh_profiles(&mut self) {
-        self.profiles = config::list_profiles_detailed();
-        self.profile_overlay_counts = self
-            .profiles
-            .iter()
-            .filter_map(|profile| {
-                let count = config::load_profile(&profile.id).ok()?.overlays.len();
-                Some((profile.id.clone(), count))
-            })
-            .collect();
+        let snapshot = read_profile_snapshot();
+        self.profiles = snapshot.profiles;
+        self.profile_overlay_counts = snapshot.counts;
     }
 
     /// Re-read the profile counts when arriving on the page that shows them.
@@ -810,10 +804,11 @@ impl PingApp {
     /// other page shows nothing that goes stale, and staying put must not
     /// re-read: this runs every pass.
     fn sync_profiles(&mut self) {
-        if arriving_page_needs_profiles(self.last_page, self.page) {
-            self.refresh_profiles();
-        }
-        self.last_page = self.page;
+        let last_page = &mut self.last_page;
+        let page = self.page;
+        let profiles = &mut self.profiles;
+        let counts = &mut self.profile_overlay_counts;
+        sync_profile_cache(last_page, page, profiles, counts, read_profile_snapshot);
     }
 
     /// Make another profile the active one and remember the choice.
@@ -2432,6 +2427,23 @@ fn page_has_detail_footer(page: Page) -> bool {
     }
 }
 
+/// The profile list and the overlay count that goes with it, read together.
+///
+/// They are one read because both come from the same files, and pairing them
+/// here means no caller can refresh one and forget the other.
+struct ProfileSnapshot {
+    profiles: Vec<config::ProfileEntry>,
+    counts: HashMap<String, usize>,
+}
+
+/// Read every profile's name and overlay count from disk.
+fn read_profile_snapshot() -> ProfileSnapshot {
+    ProfileSnapshot {
+        profiles: config::list_profiles_detailed(),
+        counts: config::profile_overlay_counts(),
+    }
+}
+
 /// Whether arriving on `to` has to re-read the profile list.
 ///
 /// Only the Profiles page shows a per-profile overlay count, and that count is a
@@ -2440,6 +2452,33 @@ fn page_has_detail_footer(page: Page) -> bool {
 /// Profiles page stays the current one for as long as the user reads it.
 fn arriving_page_needs_profiles(from: Page, to: Page) -> bool {
     from != to && to == Page::Profiles
+}
+
+/// The body of `sync_profiles`, with the disk read passed in.
+///
+/// The read is a parameter so a test can hand it a counter and prove the read
+/// actually happens on arrival. That is the whole point: the counts shipped a
+/// release reading zero because the page never asked for them, and a test that
+/// only checked the *predicate* above would still have passed with the call to
+/// `read` deleted. Returns whether a read happened.
+fn sync_profile_cache(
+    last_page: &mut Page,
+    page: Page,
+    profiles: &mut Vec<config::ProfileEntry>,
+    counts: &mut HashMap<String, usize>,
+    read: impl FnOnce() -> ProfileSnapshot,
+) -> bool {
+    let arriving = arriving_page_needs_profiles(*last_page, page);
+    // Advanced whether or not a read happened, so leaving the Profiles page and
+    // coming back counts as arriving again.
+    *last_page = page;
+    if !arriving {
+        return false;
+    }
+    let snapshot = read();
+    *profiles = snapshot.profiles;
+    *counts = snapshot.counts;
+    true
 }
 
 /// How the detail pane words an overlay count, or nothing when it is unknown.
@@ -3196,18 +3235,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        arriving_page_needs_profiles, can_switch_profile, config_notice_status,
-        config_notices_status, draw_pane_divider, list_pane_column, list_pane_row_height,
-        list_pane_row_width_for, overlay_count_label, overlay_name_width, overlay_row_contents,
-        page_has_detail_footer, profile_name_width, profile_row_contents, profile_row_label,
-        rail_width, row_inner, selected_overlay_for_border, window_title, Frame, Page,
-        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
-        LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT,
-        PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE,
-        SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        can_switch_profile, config_notice_status, config_notices_status, draw_pane_divider,
+        list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_count_label,
+        overlay_name_width, overlay_row_contents, page_has_detail_footer, profile_name_width,
+        profile_row_contents, profile_row_label, rail_width, row_inner,
+        selected_overlay_for_border, sync_profile_cache, window_title, Frame, Page,
+        ProfileSnapshot, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
+        GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
+        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH,
     };
     use crate::config::{Anchor, ConfigNotice, ProfileEntry};
     use eframe::egui;
+    use std::collections::HashMap;
 
     /// Where a list pane row's contents landed, measured through the real row
     /// functions rather than through arithmetic on the constants.
@@ -3372,8 +3413,12 @@ mod tests {
     /// shipped showing `0` on every row because nothing ever triggered the read:
     /// the cache started empty and only the profile mutations and the switcher
     /// filled it, so arriving from the rail left it empty and a missing count
-    /// was drawn as zero. `from != to` is what keeps the read off the per-frame
-    /// path.
+    /// was drawn as zero.
+    ///
+    /// This drives `sync_profile_cache` itself with a counting reader, not just
+    /// `arriving_page_needs_profiles`. Checking the predicate alone would still
+    /// have passed with the call to `read` deleted, which is exactly the bug: the
+    /// condition was right and nothing acted on it.
     #[test]
     fn arriving_on_the_profiles_page_re_reads_the_counts() {
         for (from, to, expected) in [
@@ -3383,15 +3428,106 @@ mod tests {
             (Page::Profiles, Page::Overlays, false),
             (Page::Overlays, Page::Overlays, false),
         ] {
+            let mut last_page = from;
+            let mut profiles = Vec::new();
+            let mut counts = HashMap::new();
+            let mut reads = 0;
+            let read = || {
+                reads += 1;
+                ProfileSnapshot {
+                    profiles: vec![ProfileEntry {
+                        id: "home".to_string(),
+                        name: "Home".to_string(),
+                    }],
+                    counts: HashMap::from([("home".to_string(), 3)]),
+                }
+            };
+            let refreshed =
+                sync_profile_cache(&mut last_page, to, &mut profiles, &mut counts, read);
+
             assert_eq!(
-                arriving_page_needs_profiles(from, to),
+                refreshed,
                 expected,
                 "going from {} to {} should{} re-read the profile counts",
                 from.label(),
                 to.label(),
                 if expected { "" } else { " not" },
             );
+            assert_eq!(
+                reads,
+                usize::from(expected),
+                "going from {} to {} made {reads} disk reads, expected {}",
+                from.label(),
+                to.label(),
+                usize::from(expected),
+            );
+            assert_eq!(
+                last_page,
+                to,
+                "the page marker did not follow the page after going from {} to {}",
+                from.label(),
+                to.label(),
+            );
+            if expected {
+                assert_eq!(
+                    counts.get("home"),
+                    Some(&3),
+                    "arriving on the Profiles page did not publish the counts it read"
+                );
+                assert_eq!(
+                    profiles.len(),
+                    1,
+                    "arriving on the Profiles page did not publish the profile list it read"
+                );
+            } else {
+                assert!(
+                    counts.is_empty() && profiles.is_empty(),
+                    "staying off the Profiles page filled the cache anyway"
+                );
+            }
         }
+    }
+
+    /// Leaving the Profiles page and coming back is arriving again.
+    ///
+    /// `last_page` has to advance even on the frames that read nothing, or the
+    /// page would only ever be refreshed the first time and the counts would go
+    /// stale for the rest of the session after a create or a delete.
+    #[test]
+    fn coming_back_to_the_profiles_page_reads_again() {
+        let mut last_page = Page::Profiles;
+        let mut profiles = Vec::new();
+        let mut counts = HashMap::new();
+        let snapshot = || ProfileSnapshot {
+            profiles: Vec::new(),
+            counts: HashMap::new(),
+        };
+
+        // Sit on the Profiles page for a few frames, which must not read.
+        for _ in 0..3 {
+            assert!(!sync_profile_cache(
+                &mut last_page,
+                Page::Profiles,
+                &mut profiles,
+                &mut counts,
+                snapshot,
+            ));
+        }
+        // Leave and come back, which must read.
+        assert!(!sync_profile_cache(
+            &mut last_page,
+            Page::Overlays,
+            &mut profiles,
+            &mut counts,
+            snapshot,
+        ));
+        assert!(sync_profile_cache(
+            &mut last_page,
+            Page::Profiles,
+            &mut profiles,
+            &mut counts,
+            snapshot,
+        ));
     }
 
     /// A count that has not been read says nothing, and one that has been read

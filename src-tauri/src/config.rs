@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -598,6 +598,25 @@ impl Store {
             .collect()
     }
 
+    /// Overlay count per profile id, for every profile whose file parses.
+    ///
+    /// A profile whose file cannot be read is left **out of the map** rather than
+    /// counted as zero: "not read yet" and "no overlays" are different facts and
+    /// the UI draws the first as no number at all. A profile that really has no
+    /// overlays is in the map, holding zero.
+    ///
+    /// This costs one file read per profile, so it belongs on a user action or on
+    /// arrival at the page that shows the counts, never in a frame.
+    fn profile_overlay_counts(&self) -> HashMap<String, usize> {
+        self.list_profiles()
+            .into_iter()
+            .filter_map(|id| {
+                let count = self.load_profile(&id).ok()?.overlays.len();
+                Some((id, count))
+            })
+            .collect()
+    }
+
     /// The display name stored in a profile file, if it has a usable one.
     fn read_profile_name(&self, id: &str) -> Option<String> {
         let raw = fs::read_to_string(self.profile_file_path(id)).ok()?;
@@ -1143,6 +1162,15 @@ pub fn list_profiles_detailed() -> Vec<ProfileEntry> {
 /// Read, validate and normalize one profile file.
 pub fn load_profile(name: &str) -> io::Result<Config> {
     store().load_profile(name)
+}
+
+/// Overlay count per profile id, for every profile whose file parses.
+///
+/// Costs one file read per profile, so call it on a user action or on arrival at
+/// the page that shows the counts. A profile that will not parse is left out of
+/// the map rather than counted as zero.
+pub fn profile_overlay_counts() -> HashMap<String, usize> {
+    store().profile_overlay_counts()
 }
 
 /// Write one profile file atomically.
