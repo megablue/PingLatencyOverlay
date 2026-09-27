@@ -35,165 +35,193 @@ Native app (run from `src-tauri/`):
 Installer (run from the repository root):
 - `npm run icons`
 - `npm run bundle` — build the x64 NSIS installer from the existing release exe
-- `.\\scripts\\build-nsis.ps1 -Arch arm64` — build the ARM64 installer after
+- `.\scripts\build-nsis.ps1 -Arch arm64` — build the ARM64 installer after
   building the ARM64 release exe
 
-## Gotchas
-- Windows-only: MSVC toolchain (`x86_64-pc-windows-msvc` or
-  `aarch64-pc-windows-msvc`) + MSVC Build Tools. No WebView2 runtime is needed.
-- ICMP uses the `ping-rs` crate (Win32 `IcmpSendEcho2`) and does not require
-  Administrator. `src/probe.rs` resolves ICMP targets to IPv4; TCP supports
-  hostname resolution through Tokio.
-- Config lives at `~/.config/.PingLatencyOverlay/config.json`. When that file is
-  missing, `config.rs` migrates `~/.PingLatencyOverlay/config.json` and only
-  removes the legacy directory when `config.json` was its sole entry.
+## Workflow
+- **Measure layout, don't deduce it.** Reading the code and checking arithmetic
+  against constants shipped three layout bugs in a row. Lay the real thing out
+  headlessly with `Context::run_ui` and print the rects; the numbers name the
+  bug immediately. Assert both the good and the broken case so each test
+  carries its own failure mode.
+- **Gate on clippy, not just `cargo test`.** `assertions_on_constants` and
+  friends are clippy-only, and `cargo test` compiles and passes with them
+  present. The gate is `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test`, `cargo build --release`.
+- **Commit messages go through a file.** Write the message to a scratch file
+  (this session uses `%LOCALAPPDATA%\Temp\opencode\plo-commit-msg.txt`) and run
+  `git commit -F <path>`; a PowerShell here-string gets its terminator mangled
+  by the shell tool.
+- **Bundle after committing.** The version is `MAJOR.MINOR.<git-commit-count>`,
+  so bundling first yields the previous version.
+- **Do not commit before the user has looked at it.** Hand visual changes over
+  as a build and wait for confirmation.
+
+## Config storage
+- Everything lives in `~/.config/.PingLatencyOverlay/`: `profiles/` holds one
+  `profile_<id>.json` per profile and is the only place overlays are saved;
+  `globalconfig.json` holds app-wide preferences and is created as `{}`. All of
+  this is `Store` in `config.rs`, which takes its root directory so tests can
+  point it at a temp folder.
+- Migration is from `~/.PingLatencyOverlay/`: `config.json` is copied to
+  `profiles/profile_default.json` and deleted only after the copy succeeds, and
+  the legacy directory is removed only when that file was its sole entry.
+- A profile has two names. The **id** is the file name and the only unique part
+  (a lowercase slug, 48 characters at most via `sanitize_profile_name`); the
+  free-form `profileName` inside the file is what the window title, the switcher
+  and the profile list show, and it may repeat. `create_profile`,
+  `rename_profile` and `duplicate_profile` return the `ProfileEntry` that
+  resulted, and collisions are resolved by postfixing the id
+  (`profile_work_2.json`) rather than refusing — `with_postfix` keeps the result
+  inside the cap so `list_profiles` still accepts it.
+- `Store::backfill_profile_names` writes a derived display name into existing
+  files at startup and reports it as a `ConfigNotice`; unreadable files are
+  never rewritten. A test that writes a profile file must include `profileName`
+  or it will pick up a `ProfileNamesBackfilled` notice it did not expect.
+- `globalconfig.json` is the only source for the active profile, as
+  `activeProfile` plus `activeProfileFile`. `Store::load` builds a candidate
+  list from the stored file name, then the stored id, then `default`, and never
+  scans the directory for a substitute; a missing `default` on a first run is
+  the fresh-config case, not a `ProfileFallback`. Both keys are removed for
+  `default`, so a fresh install keeps the file literally `{}`.
+- App-wide preferences live under a single `ui` object (`GlobalPrefs`/`UiPrefs`,
+  every field `#[serde(default)]`). `write_global_prefs` replaces only the `ui`
+  key, so the active-profile pointer and any unknown key survive. Never write
+  that file as a whole object.
 - `horizontalMarginPx` and `verticalMarginPx` are signed screen-axis offsets.
   Edge anchors measure inward from the work-area edge; centered axes measure
   from the center. Legacy `marginPx` is mapped per anchor during normalization.
-- Config lives at `~/.config/.PingLatencyOverlay/`. `profiles/` holds one
-  `profile_<id>.json` per profile and is the only place overlays are saved;
-  `globalconfig.json` holds app-wide preferences and is created as `{}`, with
-  `activeProfile` plus `activeProfileFile` added only once a non-default
-  profile is selected. When that file is missing, `config.rs` migrates
-  `~/.PingLatencyOverlay/config.json`, then moves `config.json` to
-  `profiles/profile_default.json` and deletes it only after the copy succeeds.
-  All of this lives in `Store` in `config.rs`, which takes its root directory so
-  tests can point it at a temp folder.
-- `globalconfig.json` is the only source for the active profile. `Store::load`
-  builds a candidate list from the stored file name, then the stored id, then
-  `default`, and never scans the directory for a substitute. A missing `default`
-  on a first run is the fresh-config case, not a `ProfileFallback`.
-- A profile has two names. The id is the file name and the only unique part; the
-  free-form `profileName` inside the file is what the title bar, sidebar and
-  popup show, and it may repeat. Collisions are resolved by postfixing the id
-  (`profile_work_2.json`) instead of refusing, and `create_profile` /
-  `rename_profile` return the `ProfileEntry` that resulted. `with_postfix`
-  keeps the id inside the sanitizer's length cap so `list_profiles` still
-  accepts it. `Store::backfill_profile_names` writes a derived name into
-  existing files at startup and reports it as a `ConfigNotice`; unreadable
-  files are never rewritten.
-- The window title is `PingLatencyOverlay - Current Profile: <name>`, pushed
-  with `ViewportCommand::Title` only when it changes (`sync_window_title`).
-- Profile switching is refused while `dirty`; **Discard** reloads the active
-  profile from disk. Save/Discard are the only ways to resolve pending edits.
-- The Config window is three panes plus a status bar (`config_ui`): a
-  navigation rail (`show_rail`, `Page`/`PAGES`, `rail_width`), a list pane
-  (`show_list_pane`, which is dropped on the Global page) and a detail pane
-  (`show_detail_pane`). Pane switching is never guarded; only profile switching
-  is.
-- Each pane is a scrolling area above a fixed footer, so a pane's own actions sit
-  next to the content they act on. **Save** and **Discard** are the detail pane's
-  sticky footer (`show_detail_footer`, `DETAIL_FOOTER_HEIGHT`), right aligned
-  under a scrolling detail, not the status bar. Both are enabled only while
-  `dirty`, which is also how unsaved edits are signalled. `page_has_detail_footer`
-  decides which pages carry it: only a page that stages a draft, so Overlays and
-  Global do and Profiles does not.
-- A row that reserves a gutter (the profile rows reserve `PROFILE_ROW_TRAILING`
-  for the count and active dot) must lay it out in a `ui.horizontal` and subtract
-  `ui.spacing().item_spacing.x` in the remaining width. A `Frame` lays its
-  content out top down, so adding the gutter to the same `Ui` drops it onto the
-  next line and leaves an empty column; forgetting the gap overflows the row by
-  the gap width. Both mistakes shipped once. `profile_name_width` and
-  `a_profile_row_fits_its_pane` exist to keep the arithmetic honest.
-- List pane rows are painted, never `egui::Frame::group`, because a group frame
-  draws a 1px border and the rows must match the rail's borderless look.
-  Allocate the row with `allocate_exact_size`, `rect_filled` the background
-  yourself, then `ui.new_child(egui::UiBuilder::new().max_rect(..))` for the
-  contents. Fill only when selected or hovered; an untouched row is transparent.
-- A painted row must be allocated at `list_pane_row_height(contents)`, not at the
-  content height. `egui::Frame` sizes *itself* to its contents plus its margin, a
-  `rect_filled` does not, so a row allocated at the content height gave the child
-  `Ui` less room than it asked for and every button ended up flush against the
-  fill. `a_painted_row_carries_its_margin` pins the rule.
-- Everything in the list pane derives its width from `list_pane_column`, which
-  returns the one width shared by the header, the rows, the scroll area and the
-  footer plus the inset that centres it in the pane. A hardcoded
-  `SIDEBAR_WIDTH - n` there is how the header, the rows and the pane edge ended
-  up three different widths. Both pane boundaries go through `draw_pane_divider`.
-- **`Ui::new_child` is invisible to the layout that created it.** It paints into
-  the rect you give it and reports nothing back, and `allocate_ui` finishes by
-  setting the parent's cursor from the child's `min_rect`
-  (`advance_after_rects` advances from the *widget* rect, not the frame rect). A
-  child that painted itself in a grandchild therefore has an empty `min_rect`,
-  the cursor goes back to the pane's left edge, and the next pane is laid out on
-  top of it. That shipped as a full-on overlap of the detail pane over the list
-  pane. So `config_ui` follows `show_list_pane` with
-  `ui.advance_cursor_after_rect(ui.max_rect())`, and any future pane that draws
-  itself the same way needs the same line.
-  `a_pane_that_draws_itself_keeps_its_place` pins both halves: the panes come out
-  disjoint, and dropping the claim really does overlap them.
-- Judge pane spacing by **content to content** across a boundary, not hairline to
-  nearest content. The rail and the detail pane lay out flush to their pane edges
-  while the list pane's column is inset, so the hairline metric reads 16px on one
-  side and 24px on the other even when the spacing is even at 28px both sides.
-- An inset has to be applied to a widget's **position**, not only subtracted from
-  its width, and a reserve may only be subtracted once. `LIST_PANE_INSET` was
-  taken off the row width while the rows were still allocated flush to the pane's
-  left edge, and `list_pane_row_width_for` passed `allocated - SCROLL_BAR_RESERVE`
-  as the pane width *and* the reserve as the bar width, so all 32px of slack
-  landed on the right: the two pane boundaries read 4px and 40px instead of
-  matching. `the_list_pane_column_is_centred_in_its_pane` pins the even margins.
-- `ui.horizontal(..)` is not vertically transparent. It hard-sizes its child to
-  `ui.spacing().interact_size.y` (18px by default) and allocates that through the
-  parent layout, which centres it, so a taller widget inside it lands low and
-  spills out the bottom. Inside a row of known height use
-  `ui.new_child(egui::UiBuilder::new().max_rect(..))`, which honours the absolute
-  rect. `a_list_pane_row_puts_its_contents_inside_its_own_fill` pins it.
-- App-wide preferences live under a single `ui` object in `globalconfig.json`
-  (`GlobalPrefs`/`UiPrefs` in `config.rs`, every field `#[serde(default)]`).
-  `write_global_prefs` merges: it replaces only the `ui` key, so the active
-  profile pointer and any unknown key survive. Never write that file as a whole
-  object.
-- The Global page stages its edits in `prefs_draft` and writes on Save
-  (`save_prefs`), while the rail's collapsed state is applied to the live UI
-  immediately so the user sees it change; `discard_prefs` puts both the stored
-  value and the rail back. `save_edits` writes whichever of the profile draft
-  and the preferences draft is dirty.
-- A painted glyph whose parts are laid out from a table must be checked for
-  centring and containment. The Global glyph shipped with its row offsets read
-  as loop indices by `enumerate()`, so the tuple halves swapped jobs: it sat
-  low and one knob poked past its track. `GLOBAL_ICON_ROWS` plus
-  `the_global_glyph_is_centred_and_stays_inside_its_box` now pin that.
-- The bottom row of the Config window is the **status bar**
-  (`show_status_bar`); it only shows the transient operation message and the
-  right-aligned version label, so it takes `&self`.
-- The profile switcher (`show_profile_switcher`) heads the Overlays list pane and
-  anchors the profile menu. Rail rows and glyphs are painted with
-  `ui.painter()`, not buttons, so the label can sit beside the icon.
-- The profile menu is a **switcher only** and ends with **Manage profiles**,
-  which opens the Profiles page. Create, rename, duplicate and delete live on
-  that page (`show_profile_detail`, `show_profile_dialog`), not in the menu.
+
+## The Config window
+- Three panes plus a status bar (`config_ui`): a navigation rail (`show_rail`,
+  `Page`/`PAGES`, `rail_width`), a list pane (`show_list_pane`, dropped on the
+  Global page) and a detail pane (`show_detail_pane`). Pane switching is never
+  guarded; only profile switching is.
+- Each pane is a scrolling area above a fixed footer. **Save** and **Discard**
+  are the detail pane's sticky footer (`show_detail_footer`,
+  `DETAIL_FOOTER_HEIGHT`), right aligned, enabled only while `dirty`, which is
+  also how unsaved edits are signalled. `page_has_detail_footer` decides which
+  pages carry it: only a page that stages a draft, so Overlays and Global do and
+  Profiles does not.
+- The status bar (`show_status_bar`) shows only the transient operation message
+  and the right-aligned version, so it takes `&self`.
+- Edits are staged per source. Detail-pane edits and Add overlay stage into the
+  profile draft; list-pane enable/delete and Pause/Resume apply immediately.
+  Delete uses an inline confirmation because native script dialogs are not used.
+- The Global page stages into `prefs_draft` and writes on Save (`save_prefs`),
+  while the rail's collapsed state is applied to the live UI immediately so the
+  user sees it change. `save_edits` writes whichever draft is dirty and
+  `discard_edits` reloads both.
+- Profile switching is refused while `dirty`. **Discard** reloads the active
+  profile from disk, and Save/Discard are the only ways to resolve pending
+  edits.
+- The profile switcher (`show_profile_switcher`) heads the Overlays list pane
+  and anchors the profile menu. The menu is a **switcher only** and ends with
+  **Manage profiles**, which opens the Profiles page; create, rename, duplicate
+  and delete live there (`show_profile_detail`, `show_profile_dialog`).
 - Selecting a row in the Profiles list only sets `selected_profile`; loading is
   the separate **Switch to this profile** action. Never make a list selection
   switch profiles, because switching is refused while `dirty`.
 - `profile_overlay_counts` is a cache of overlay counts per profile, filled by
   `refresh_profiles` because that reads every profile file. Call it on user
   actions only, never per frame.
+- The window title is `PingLatencyOverlay - Current Profile: <name>`, pushed
+  with `ViewportCommand::Title` only when it changes (`sync_window_title`).
 - The root egui viewport starts hidden. Tray **left-click** shows Config; the
-  context menu is right-click. Config-window close hides the root viewport; only
-  tray Exit closes the app.
+  context menu is right-click. Config-window close hides the root viewport;
+  only tray Exit closes the app.
+- Rail rows, glyphs and the switcher are painted with `ui.painter()`, not
+  buttons, so a label can sit beside an icon. A painted glyph whose parts come
+  from a table needs a centring-and-containment check: the Global glyph shipped
+  with its row offsets read as loop indices by `enumerate()`, so the tuple
+  halves swapped jobs and a knob poked past its track. `GLOBAL_ICON_ROWS` plus
+  `the_global_glyph_is_centred_and_stays_inside_its_box` pin it.
+
+## egui layout traps
+Every trap below shipped once. Each test named here fails on the old behaviour.
+- **Rows are painted, never `egui::Frame::group`,** because a group frame draws
+  a 1px border and the rows must match the rail's borderless look. Allocate the
+  row with `allocate_exact_size`, `rect_filled` the background yourself, then
+  `ui.new_child(egui::UiBuilder::new().max_rect(..))` for the contents. Fill
+  only when selected or hovered; an untouched row is transparent.
+- **Allocate a painted row at `list_pane_row_height(contents)`,** never at the
+  content height. `egui::Frame` sizes *itself* to its contents plus its margin
+  and a `rect_filled` does not, so the child `Ui` was handed less room than it
+  asked for and every button ended up flush against the fill.
+  `a_painted_row_carries_its_margin` pins it.
+- **`ui.horizontal(..)` is not vertically transparent.** It hard-sizes its
+  child to `ui.spacing().interact_size.y` (18px by default) and allocates that
+  through the parent layout, which centres it, so a taller widget inside it
+  lands low and spills out the bottom. Inside a row of known height use a
+  positioned child (`ui.new_child(..)`), which honours the absolute rect.
+  `a_list_pane_row_puts_its_contents_inside_its_own_fill` pins it.
+- **Both halves of a row come from one rect.** `row_inner(row)` gives the
+  contents area and `right_anchored(inner, width)` places every right-hand
+  control, so the name on the left and the buttons on the right cannot disagree
+  about where the row ends. A row that reserves a gutter must lay it out
+  horizontally and subtract `ui.spacing().item_spacing.x`; a `Frame` lays its
+  content out top down, so adding the gutter to the same `Ui` drops it onto the
+  next line and leaves an empty column.
+  `a_profile_row_fits_its_pane` and `an_overlay_row_fits_its_pane` keep that
+  arithmetic honest.
+- **Everything in the list pane derives its width from `list_pane_column`,**
+  which returns the one width shared by the header, the rows, the scroll area
+  and the footer, plus the inset that centres it in the pane. An inset has to
+  move a widget's **position**, not only come off its width, and a reserve may
+  only be subtracted once — `list_pane_row_width_for` once did both, so all
+  32px of slack landed on the right and the two boundaries read 4px and 40px.
+  `the_list_pane_column_is_centred_in_its_pane` pins it.
+- **`Ui::new_child` is invisible to the layout that created it.** It paints into
+  the rect you give it and reports nothing back, and `allocate_ui` finishes by
+  setting the parent's cursor from the child's `min_rect`
+  (`advance_after_rects` advances from the *widget* rect, not the frame rect).
+  A child that painted itself in a grandchild therefore has an empty `min_rect`,
+  the cursor goes back to the pane's left edge, and the next pane is laid out on
+  top of it. So `config_ui` follows `show_list_pane` with
+  `ui.advance_cursor_after_rect(ui.max_rect())`, and any future pane that draws
+  itself that way needs the same line.
+  `a_pane_that_draws_itself_keeps_its_place` pins it.
+- **Judge pane spacing by content to content** across a boundary, not hairline
+  to nearest content. The rail and the detail pane sit flush to their pane edges
+  while the list pane's column is inset, so the hairline metric reads 16px on
+  one side and 24px on the other even when the spacing is even at 28px both
+  sides.
+- **The window has to fit.**
+  `the_window_fits_the_rail_the_list_and_the_detail_pane` and
+  `the_detail_pane_keeps_its_scrolling_area_above_the_footer` hold the
+  minimum sizes honest.
+
+## Overlay rendering
 - Overlays are not egui child viewports. Each is a native `WS_EX_LAYERED` popup
   rendered with `UpdateLayeredWindow`, so it has true per-pixel alpha, no DWM
   frame, no taskbar button, no focus, and mouse passthrough.
-- Do not replace `UpdateLayeredWindow` with egui/GPU child viewports. The old
-  multi-viewport renderer was the source of the white-background and excessive
-  memory problems.
-- `render.rs` writes premultiplied RGBA; `overlay.rs` swaps R/B to premultiplied
-  BGRA before copying it into a 32-bit DIB. `bgOpacity=0` leaves the alpha byte
-  at zero; positive values are composited by Windows.
-- Graph orientation rotates the whole graph **anticlockwise** (90 means time runs
-  bottom-to-top); values above `maxYMs` clamp to the top. Timeout samples draw a
-  full-height timeout-colored line and break the latency line. See `docs/SPEC.md`.
+- `render.rs` writes premultiplied RGBA; `overlay.rs` swaps R/B to
+  premultiplied BGRA before copying it into a 32-bit DIB. `bgOpacity=0` leaves
+  the alpha byte at zero; positive values are composited by Windows.
+- Graph orientation rotates the whole graph **anticlockwise** (90 means time
+  runs bottom-to-top); values above `maxYMs` clamp to the top. Timeout samples
+  draw a full-height timeout-colored line and break the latency line. See
+  `docs/SPEC.md`.
+- The graph uses actual physical window dimensions. Do not assume
+  `windowSeconds * scale` is the drawable size under Windows DPI/text scaling.
+- Sample buffers are bounded and overlay HWNDs are reused by stable ID. Do not
+  allocate one renderer or surface per overlay.
 - `ProbeManager::apply_config` must not restart all tasks for a style-only Save.
   Existing tasks read shared settings each tick; only deleted/disabled overlays
   are stopped. This keeps Save from pausing the graph.
-- Sample buffers are bounded and overlay HWNDs are reused by stable ID. Do not
-  allocate one renderer or surface per overlay.
-- The graph uses actual physical window dimensions. Do not assume
-  `windowSeconds * scale` is the drawable size under Windows DPI/text scaling.
-- Right-panel edits and Add overlay are staged until Save. Sidebar enable/delete
-  and Pause/Resume apply immediately. Delete uses an inline confirmation
-  because native script dialogs are not used.
+
+## Hard rules
+- Windows-only: MSVC toolchain (`x86_64-pc-windows-msvc` or
+  `aarch64-pc-windows-msvc`) + MSVC Build Tools. No WebView2 runtime is needed.
+- ICMP uses the `ping-rs` crate (Win32 `IcmpSendEcho2`) and does not require
+  Administrator. `src/probe.rs` resolves ICMP targets to IPv4; TCP supports
+  hostname resolution through Tokio.
+- Do not replace `UpdateLayeredWindow` with egui/GPU child viewports. The old
+  multi-viewport renderer was the source of the white-background and excessive
+  memory problems.
 - `src-tauri/Cargo.toml` uses eframe with the `glow` renderer for the one config
-  window and `tiny-skia` only for software overlay pixels. Do not add WebView2 or
-  Tauri back into the native branch.
+  window and `tiny-skia` only for software overlay pixels. Do not add WebView2
+  or Tauri back into the native branch.
+- The README is for users. Implementation detail belongs in `docs/SPEC.md` for
+  behavior and here for working knowledge, and the user must be consulted before
+  technical detail is added to the README.
