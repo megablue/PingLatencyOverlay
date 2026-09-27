@@ -465,7 +465,11 @@ impl PingApp {
         let prefs = loaded.prefs;
         let rail_collapsed = prefs.ui.rail_collapsed;
         let profiles = loaded.profiles;
-        let selected_id = config.overlays.first().map(|overlay| overlay.id.clone());
+        // Nothing is selected on the Overlays page until the user picks an
+        // overlay. Selecting the first one automatically meant a border was
+        // animating the moment the window opened, which read as the app doing
+        // something nobody asked for. The selection is view-only: staged edits
+        // live in `config.overlays`, so emptying pane 3 cannot lose any.
         let show_config = std::env::args_os().any(|arg| arg == "--show-config");
 
         // The runtime is kept alive for the lifetime of the one egui window.
@@ -502,7 +506,7 @@ impl PingApp {
             profile_menu_open: false,
             profile_dialog: None,
             profile_name_focus: false,
-            selected_id,
+            selected_id: None,
             prefs_draft: prefs.clone(),
             prefs,
             prefs_dirty: false,
@@ -623,8 +627,11 @@ impl PingApp {
     }
 
     fn sync_overlays(&mut self) {
-        let selected_id =
-            selected_overlay_for_border(self.config_visible, self.selected_id.as_deref());
+        let selected_id = selected_overlay_for_border(
+            self.config_visible,
+            self.page,
+            self.selected_id.as_deref(),
+        );
         self.overlays.apply(
             &self.config,
             self.probes.samples(),
@@ -1057,11 +1064,30 @@ impl PingApp {
                             } else if clicks.dismiss_confirm {
                                 self.confirm_delete = None;
                             } else if clicks.name {
-                                self.selected_id = Some(id.clone());
+                                self.selected_id =
+                                    toggled_selection(self.selected_id.as_deref(), id.as_str());
                             } else if clicks.remove {
                                 self.confirm_delete = Some(id.clone());
                             } else if clicks.toggle {
                                 self.toggle_overlay(&id);
+                            }
+                        }
+
+                        // Clicking the blank space under the last row clears the
+                        // selection too. `ui.interact` registers a hit target
+                        // without laying out a widget, so the strip cannot change
+                        // the scroll area's content height and summon a scrollbar
+                        // that the list was too short to deserve.
+                        if let Some(strip) =
+                            deselect_strip_rect(ui.max_rect(), ui.cursor().min.y, row_width)
+                        {
+                            let response = ui.interact(
+                                strip,
+                                ui.id().with("deselect_strip"),
+                                egui::Sense::click(),
+                            );
+                            if response.clicked() {
+                                self.selected_id = None;
                             }
                         }
                     });
@@ -1772,9 +1798,14 @@ impl PingApp {
     }
 
     fn show_editor(&mut self, ui: &mut Ui) {
+        // This is the pane's default state, not a dead end: nothing is selected
+        // until the user picks an overlay, and picking an already-selected row
+        // (or the blank space under the list) comes back here.
         let Some(selected_id) = self.selected_id.clone() else {
             ui.centered_and_justified(|ui| {
-                ui.label("Select an overlay, or add a new one.");
+                ui.label(RichText::new("No overlay selected.").color(UI_TEXT_SECONDARY));
+                ui.add_space(4.0);
+                ui.label(RichText::new("Pick one from the list on the left.").small());
             });
             return;
         };
@@ -1784,11 +1815,10 @@ impl PingApp {
             .iter()
             .position(|overlay| overlay.id == selected_id)
         else {
-            self.selected_id = self
-                .config
-                .overlays
-                .first()
-                .map(|overlay| overlay.id.clone());
+            // The selected overlay is gone, so there is nothing to show. Fall
+            // back to the empty state rather than silently focusing a different
+            // overlay, which would start a border nobody asked for.
+            self.selected_id = None;
             return;
         };
 
@@ -2547,12 +2577,70 @@ fn profile_name_field(
     (submit, cancel)
 }
 
-fn selected_overlay_for_border(config_visible: bool, selected_id: Option<&str>) -> Option<&str> {
-    if config_visible {
+/// The overlay whose border is previewed for the current selection, if any.
+///
+/// Three things have to line up, and the page was the one that was missing: the
+/// Config window has to be open, the Overlays page has to be the one on screen,
+/// and an overlay has to be selected. Leaving the Overlays page used to leave
+/// the last overlay's border animating, because this only asked whether the
+/// window was visible.
+///
+/// Unlike the profile-count trigger in `sync_profile_cache`, a table over this
+/// function is the whole mechanism rather than a predicate standing in for one:
+/// `sync_overlays` calls it every frame and hands the answer straight to
+/// `overlays.apply`, so nothing has to act on the result for the test to mean
+/// anything.
+fn selected_overlay_for_border(
+    config_visible: bool,
+    page: Page,
+    selected_id: Option<&str>,
+) -> Option<&str> {
+    if config_visible && page == Page::Overlays {
         selected_id
     } else {
         None
     }
+}
+
+/// The selection after the user clicks the row named `clicked`.
+///
+/// Clicking the row that is already selected clears the selection, which is the
+/// only way to stop the border preview and empty pane 3. This is a free function
+/// rather than an `if` in the row loop so a test can drive it: a predicate-only
+/// test would pass with the action deleted, which is exactly how the profile
+/// counts shipped reading zero.
+fn toggled_selection(current: Option<&str>, clicked: &str) -> Option<String> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked.to_string())
+    }
+}
+
+/// The blank strip under the last row that clears the selection when clicked.
+///
+/// The rect is only ever a *hit target*: it is registered with `ui.interact`,
+/// which draws no widget and so adds nothing to the scroll area's content
+/// height. Allocating the leftover as a real widget instead would push the
+/// content past the viewport and conjure a scrollbar the moment the list exactly
+/// fitted, which is the sort of thing that only shows up once the list is the
+/// wrong length.
+///
+/// Returns `None` when the rows already fill the viewport, so a list long enough
+/// to scroll simply has no strip and the row toggle carries on alone.
+fn deselect_strip_rect(
+    viewport: egui::Rect,
+    rows_bottom: f32,
+    row_width: f32,
+) -> Option<egui::Rect> {
+    if rows_bottom >= viewport.bottom() {
+        return None;
+    }
+    let strip = egui::Rect::from_min_max(
+        egui::pos2(viewport.left(), rows_bottom),
+        egui::pos2(viewport.left() + row_width, viewport.bottom()),
+    );
+    Some(strip.intersect(viewport))
 }
 
 impl App for PingApp {
@@ -3235,12 +3323,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, draw_pane_divider,
-        list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_count_label,
-        overlay_name_width, overlay_row_contents, page_has_detail_footer, profile_name_width,
-        profile_row_contents, profile_row_label, rail_width, row_inner,
-        selected_overlay_for_border, sync_profile_cache, window_title, Frame, Page,
-        ProfileSnapshot, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
+        can_switch_profile, config_notice_status, config_notices_status, deselect_strip_rect,
+        draw_pane_divider, list_pane_column, list_pane_row_height, list_pane_row_width_for,
+        overlay_count_label, overlay_name_width, overlay_row_contents, page_has_detail_footer,
+        profile_name_width, profile_row_contents, profile_row_label, rail_width, row_inner,
+        selected_overlay_for_border, sync_profile_cache, toggled_selection, window_title, Frame,
+        Page, ProfileSnapshot, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
         GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
         PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
         SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
@@ -3810,11 +3898,146 @@ mod tests {
         assert!(rail_width(true) < rail_width(false));
     }
 
+    /// The strip's two runtime facts, measured through a real scroll area rather
+    /// than assumed: the inner `Ui`'s `max_rect` is the viewport, so the strip can
+    /// be sized from it, and `ui.interact` leaves the cursor where it found it, so
+    /// the strip cannot grow the content. The second is the one that matters —
+    /// had the strip been a real widget, a list that exactly filled the viewport
+    /// would have pushed the content one widget past it and conjured a scrollbar.
     #[test]
-    fn hidden_config_does_not_keep_overlay_selected_for_border() {
-        let selected = Some("overlay");
-        assert_eq!(selected_overlay_for_border(false, selected), None);
-        assert_eq!(selected_overlay_for_border(true, selected), Some("overlay"));
+    fn the_deselect_strip_does_not_disturb_the_scroll_content() {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut measured = (egui::Rect::ZERO, 0.0, 0.0);
+        let mut output = ctx.run_ui(input, |ui| {
+            let column =
+                egui::Rect::from_min_max(egui::pos2(188.0, 12.0), egui::pos2(434.0, 212.0));
+            let row_width = column.width();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for _ in 0..2 {
+                        ui.allocate_exact_size(
+                            egui::vec2(row_width, list_pane_row_height(OVERLAY_ROW_HEIGHT)),
+                            egui::Sense::click(),
+                        );
+                    }
+                    let viewport = ui.max_rect();
+                    let rows_bottom = ui.cursor().min.y;
+                    let strip = deselect_strip_rect(viewport, rows_bottom, row_width)
+                        .expect("two rows leave room in a 200px viewport");
+                    let cursor_before = ui.cursor().min.y;
+                    let response =
+                        ui.interact(strip, ui.id().with("deselect_strip"), egui::Sense::click());
+                    measured = (viewport, cursor_before, response.rect.height());
+                    assert_eq!(
+                        ui.cursor().min.y,
+                        cursor_before,
+                        "registering the deselect strip moved the scroll content"
+                    );
+                });
+        });
+        output.textures_delta.clear();
+        let (viewport, rows_bottom, strip_height) = measured;
+        assert!(
+            viewport.height() > rows_bottom,
+            "the fixture is wrong: the rows filled the {viewport:?} viewport"
+        );
+        assert!(
+            (strip_height - (viewport.bottom() - rows_bottom)).abs() < f32::EPSILON,
+            "the strip was {strip_height}px tall but the leftover space is {}px",
+            viewport.bottom() - rows_bottom
+        );
+    }
+
+    /// The border preview needs the window open, the Overlays page showing and
+    /// something selected. The page went missing for a release, so all three are
+    /// pinned here rather than only the window.
+    #[test]
+    fn the_border_preview_only_runs_on_the_overlays_page() {
+        let cases = [
+            (false, Page::Overlays, Some("overlay"), None),
+            (false, Page::Profiles, Some("overlay"), None),
+            (true, Page::Overlays, Some("overlay"), Some("overlay")),
+            (true, Page::Profiles, Some("overlay"), None),
+            (true, Page::Global, Some("overlay"), None),
+            (true, Page::Overlays, None, None),
+            (true, Page::Profiles, None, None),
+            (true, Page::Global, None, None),
+        ];
+        for (visible, page, selected, expected) in cases {
+            assert_eq!(
+                selected_overlay_for_border(visible, page, selected),
+                expected,
+                "with the window {} on {} and {:?} selected the border preview should be {:?}",
+                if visible { "open" } else { "closed" },
+                page.label(),
+                selected,
+                expected
+            );
+        }
+    }
+
+    /// Clicking the selected row clears the selection, which is the only way to
+    /// stop the border and empty pane 3.
+    #[test]
+    fn clicking_the_selected_row_clears_it() {
+        assert_eq!(toggled_selection(None, "a"), Some("a".to_string()));
+        assert_eq!(toggled_selection(Some("a"), "a"), None);
+        assert_eq!(toggled_selection(Some("b"), "a"), Some("a".to_string()));
+        assert_eq!(toggled_selection(Some("a"), "b"), Some("b".to_string()));
+    }
+
+    /// The deselect strip is a hit target over the leftover viewport height. It
+    /// must never reach below the pane, never appear when the rows already fill
+    /// the viewport, and never be wider than the rows it sits under.
+    #[test]
+    fn the_deselect_strip_fills_only_the_space_the_rows_leave() {
+        let viewport = egui::Rect::from_min_max(egui::pos2(188.0, 12.0), egui::pos2(434.0, 212.0));
+        let row_width = 246.0;
+
+        let strip = deselect_strip_rect(viewport, 100.0, row_width).expect("room to spare");
+        assert_eq!(
+            strip.top(),
+            100.0,
+            "the strip must start under the last row"
+        );
+        assert_eq!(
+            strip.bottom(),
+            viewport.bottom(),
+            "the strip must reach the bottom"
+        );
+        assert_eq!(strip.left(), viewport.left());
+        assert_eq!(
+            strip.width(),
+            row_width,
+            "the strip must match the rows' width"
+        );
+        assert!(
+            viewport.contains_rect(strip),
+            "the strip {strip:?} escaped the list pane {viewport:?}"
+        );
+
+        // The rows exactly filling the viewport leaves no strip, so a list that
+        // fits cannot acquire a scrollbar it did not deserve.
+        assert!(
+            deselect_strip_rect(viewport, viewport.bottom(), row_width).is_none(),
+            "a full list must have no deselect strip"
+        );
+        assert!(
+            deselect_strip_rect(viewport, viewport.bottom() + 40.0, row_width).is_none(),
+            "a scrolling list must have no deselect strip"
+        );
+        assert!(
+            deselect_strip_rect(viewport, 0.0, row_width).is_some(),
+            "an empty list leaves the whole viewport as a strip"
+        );
     }
 
     #[test]

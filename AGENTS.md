@@ -122,6 +122,27 @@ Installer (run from the repository root):
 - Selecting a row in the Profiles list only sets `selected_profile`; loading is
   the separate **Switch to this profile** action. Never make a list selection
   switch profiles, because switching is refused while `dirty`.
+- `selected_id` (the overlay in pane 3) starts as `None` and is **view-only**:
+  staged edits live in `self.config.overlays`, never in the selection, so it can
+  be cleared freely. Do not re-add a startup auto-selection — it meant a border
+  was animating as soon as the window opened. Two things set it:
+  `toggled_selection` for a row click, which clears when the clicked row is
+  already the selected one, and the blank-area hit target. `delete_overlay` and
+  `switch_profile` still focus an overlay, because those are deliberate actions
+  on a specific row or profile rather than a startup default.
+- `selected_overlay_for_border` encodes **three** conditions, not one: the
+  window is open, the Overlays page is showing, and something is selected. The
+  page condition went missing for a release, leaving the last overlay's border
+  animating on the Profiles and Global pages. It is also the documented
+  exception to "test a trigger by driving it" below: here the predicate *is* the
+  mechanism, because `sync_overlays` calls it every frame and hands the result
+  straight to `overlays.apply`, so a table over the function is the whole test.
+- The deselect strip must be registered with `ui.interact`, never laid out with
+  `allocate_exact_size`. `interact` calls `create_widget` and touches no cursor,
+  so the hit target adds nothing to the scroll area's content; a real widget of
+  the leftover height pushed the content 725px past the viewport in
+  `the_deselect_strip_does_not_disturb_the_scroll_content`, which would have
+  conjured a scrollbar on any list that exactly fitted.
 - `profile_overlay_counts` is a cache of overlay counts per profile, filled by
   `refresh_profiles` because that reads every profile file. It has exactly two
   kinds of trigger, and **both must exist**: the profile mutations

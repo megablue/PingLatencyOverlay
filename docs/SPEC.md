@@ -45,9 +45,10 @@
   - The startup border effect defaults to RGB Loop when unspecified. RGB Noise
     assigns a new pseudorandom RGB color to every border pixel as it animates.
     The effect runs for 5 seconds by default, then fades for 1 second by default.
-    Selecting an overlay tab always activates the RGB loop; losing selection or
-    closing the Config window starts the fade and eventually disables the
-    border.
+    Selecting an overlay in the list activates the RGB loop; losing the
+    selection, leaving the Overlays page, or closing the Config window starts
+    the fade and eventually disables the border. A border therefore animates
+    only while you are actually looking at that overlay's settings.
   - Border animation uses a dedicated 60 FPS redraw path and a 3 px inline
     border, independent of the graph Smooth Rendering setting.
 - Y axis:
@@ -145,6 +146,16 @@
   **Add overlay** and **Pause all**. The Profiles page lists every profile with
   its overlay count and an accent dot on the active one, and its footer holds
   **+ New profile**.
+- The Overlays page opens with **nothing selected**, so pane 3 shows a short
+  "No overlay selected" message and no border is animating until you choose an
+  overlay. Two things clear the selection again: clicking the row you already
+  have selected, and clicking the blank space in the list pane below the last
+  row. The blank space is a hit target only, so a list short enough to fit never
+  grows a scrollbar; a list long enough to scroll simply has no blank space and
+  the row click carries on alone.
+- Selection is a view concern only. Unsaved edits are held per overlay, so
+  clearing the selection never discards anything, and **Save** and **Discard**
+  keep their state.
 - Overlay counts are read from each profile's file when the Profiles page is
   arrived at, and again after any action that changes one - creating, renaming,
   duplicating, deleting or switching a profile. A count that has not been read
