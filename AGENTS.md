@@ -95,6 +95,16 @@ Installer (run from the repository root):
   next line and leaves an empty column; forgetting the gap overflows the row by
   the gap width. Both mistakes shipped once. `profile_name_width` and
   `a_profile_row_fits_its_pane` exist to keep the arithmetic honest.
+- List pane rows are painted, never `egui::Frame::group`, because a group frame
+  draws a 1px border and the rows must match the rail's borderless look.
+  Allocate the row with `allocate_exact_size`, `rect_filled` the background
+  yourself, then `ui.new_child(egui::UiBuilder::new().max_rect(..))` for the
+  contents. Fill only when selected or hovered; an untouched row is transparent.
+- Everything in the list pane derives its width from `list_pane_row_width_for`:
+  the header, the rows, the scroll area and the footer. A hardcoded
+  `SIDEBAR_WIDTH - n` there is how the header, the rows and the pane edge ended
+  up three different widths. Both pane boundaries go through `draw_pane_divider`,
+  so the two sides of the list pane cannot drift apart.
 - App-wide preferences live under a single `ui` object in `globalconfig.json`
   (`GlobalPrefs`/`UiPrefs` in `config.rs`, every field `#[serde(default)]`).
   `write_global_prefs` merges: it replaces only the `ui` key, so the active

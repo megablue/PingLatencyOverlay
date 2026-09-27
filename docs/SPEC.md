@@ -180,6 +180,17 @@
 - A profile row reserves a gutter for its overlay count and active dot, so a long
   display name truncates rather than running underneath them. The name, the gap
   between widgets and the gutter all come out of the row's width.
+- Rows in the list pane carry no border of their own. Like the rail's rows they
+  are painted: the selected row gets the selection fill, a hovered row a
+  muted fill, and an untouched row nothing at all. The rail is the reference,
+  so a selection looks the same wherever it appears.
+- The list pane's header, its rows and its footer are all one width, inset from
+  the pane's edges, with the scroll bar's width reserved whether or not one is
+  showing. Nothing in the pane can therefore be wider or narrower than its
+  neighbour, and the rows do not shift sideways when a list outgrows the pane.
+- The two pane boundaries are drawn the same way: a hairline centred in the gap
+  between the panes, then the gap itself. The list pane is spaced identically on
+  the rail side and the detail side.
 - Switching pages is always allowed, because the Overlays draft stays in memory.
   Switching *profile* is refused while there are unsaved edits.
 - The window is 860x660, resizable between 720x480 and 1400x8192, which keeps

@@ -67,6 +67,10 @@ own: it uses the full width for app-wide preferences, currently the rail's
 collapsed state plus the paths of the config folder, the profiles folder and
 `globalconfig.json`.
 
+Rows are drawn in the rail's style throughout: no border of their own, filled
+only when selected or hovered, all one width with the header above them and the
+footer below, and the two sides of the middle pane spaced identically.
+
 Each profile has two names. The **display name** is what you type and what the
 window title, the switcher and the profile list show
 (`PingLatencyOverlay - Current Profile: Work VPN`); it is stored in the profile
