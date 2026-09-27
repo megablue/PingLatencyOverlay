@@ -185,6 +185,23 @@ Installer (run from the repository root):
 
 ## egui layout traps
 Every trap below shipped once. Each test named here fails on the old behaviour.
+- **`ui.centered_and_justified(..)` and `ui.with_layout(..)` are ONE-widget
+  builders.** Their doc says so. `show_editor`'s empty state added a label, an
+  `add_space` and a second label, and the child then reported a min rect 22px
+  *taller* than the box it was given, so the parent advanced its cursor by that
+  inflated height and pushed the detail footer 19.5px down into the status bar.
+  The symptom only appeared with nothing selected, because the selected path is
+  a `ScrollArea`, which reports its box exactly. A child that reports more than
+  its box moves **everything** laid out after it. Use one widget — here one
+  label with an embedded newline, via `empty_editor`. Pinned by
+  `the_detail_footer_stays_under_the_detail_pane`.
+- **A mirror test must reproduce the real bounds, width AND height, or its
+  numbers are meaningless.** `detail_pane_geometry` stands in for
+  `show_detail_pane`, which needs a live `PingApp`. Run in the full-height root
+  `Ui` it gave the footer all the leftover *window* height and parked it 17.5px
+  low, and before the width was bounded too its right edge sat at the window's
+  edge instead of the pane's. A mirror that does not reproduce the bounds blames
+  the code for things the code is not doing.
 - **Rows are painted, never `egui::Frame::group`,** because a group frame draws
   a 1px border and the rows must match the rail's borderless look. Allocate the
   row with `allocate_exact_size`, `rect_filled` the background yourself, then

@@ -1802,11 +1802,7 @@ impl PingApp {
         // until the user picks an overlay, and picking an already-selected row
         // (or the blank space under the list) comes back here.
         let Some(selected_id) = self.selected_id.clone() else {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("No overlay selected.").color(UI_TEXT_SECONDARY));
-                ui.add_space(4.0);
-                ui.label(RichText::new("Pick one from the list on the left.").small());
-            });
+            empty_editor(ui);
             return;
         };
         let Some(index) = self
@@ -2455,6 +2451,24 @@ fn page_has_detail_footer(page: Page) -> bool {
         Page::Overlays | Page::Global => true,
         Page::Profiles => false,
     }
+}
+
+/// The text shown in the detail pane when no overlay is selected.
+///
+/// One string, not two labels: `centered_and_justified` is a one-widget builder,
+/// and a child that reports a min rect larger than the box it was given drags
+/// everything laid out after it. Three widgets here once pushed the detail
+/// footer 19.5px down into the status bar. The second line rides along inside
+/// this one string, so the child reports exactly its box.
+fn empty_editor_message(_style: &egui::Style) -> &'static str {
+    "No overlay selected.\nPick one from the list on the left."
+}
+
+/// The detail pane's empty state: one label, centred.
+fn empty_editor(ui: &mut Ui) {
+    ui.centered_and_justified(|ui| {
+        ui.label(RichText::new(empty_editor_message(ui.style())).color(UI_TEXT_SECONDARY));
+    });
 }
 
 /// The profile list and the overlay count that goes with it, read together.
@@ -3324,15 +3338,16 @@ pub fn run() {
 mod tests {
     use super::{
         can_switch_profile, config_notice_status, config_notices_status, deselect_strip_rect,
-        draw_pane_divider, list_pane_column, list_pane_row_height, list_pane_row_width_for,
-        overlay_count_label, overlay_name_width, overlay_row_contents, page_has_detail_footer,
-        profile_name_width, profile_row_contents, profile_row_label, rail_width, row_inner,
-        selected_overlay_for_border, sync_profile_cache, toggled_selection, window_title, Frame,
-        Page, ProfileSnapshot, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
-        GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
-        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
-        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
-        WINDOW_MIN_WIDTH,
+        draw_pane_divider, empty_editor, list_pane_column, list_pane_row_height,
+        list_pane_row_width_for, overlay_count_label, overlay_name_width, overlay_row_contents,
+        page_has_detail_footer, profile_name_width, profile_row_contents, profile_row_label,
+        rail_width, row_inner, selected_overlay_for_border, sync_profile_cache, toggled_selection,
+        window_title, Frame, Page, ProfileSnapshot, DETAIL_FOOTER_BUTTON_HEIGHT,
+        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
+        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES,
+        PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
+        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
+        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use crate::config::{Anchor, ConfigNotice, ProfileEntry};
     use eframe::egui;
@@ -3640,6 +3655,117 @@ mod tests {
     /// same `rail_width`, the same `SIDEBAR_WIDTH`, the same frame margin and the
     /// same `list_pane_column`, and its list pane draws itself as a positioned
     /// child exactly as the real pages do.
+    /// The detail pane's content rect, footer rect and footer band, measured.
+    ///
+    /// A mirror of `show_detail_pane`, not a call: that is a method on `PingApp`,
+    /// and standing one up needs a creation context, live probes and a tray.
+    ///
+    /// The mirror has to reproduce the real pane's bounds, width AND height, and
+    /// getting that wrong produced three false results in a row: run in the
+    /// full-height root `Ui`, `with_layout(right_to_left(Center))` gave the
+    /// footer button all the leftover *window* height and parked it 17.5px low,
+    /// and before the width was bounded too its right edge sat at the window's
+    /// edge instead of the pane's. Wrapping the body in a positioned child at the
+    /// pane's rect is what makes the numbers mean anything.
+    fn detail_pane_geometry(
+        window: (f32, f32),
+        selected: bool,
+    ) -> (egui::Rect, egui::Rect, egui::Rect) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(window.0, window.1),
+            )),
+            ..Default::default()
+        };
+        let pane_left = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH + PANE_GAP + PANE_MARGIN;
+        let pane = egui::Rect::from_min_max(
+            egui::pos2(pane_left, PANE_MARGIN),
+            egui::pos2(window.0 - PANE_MARGIN, window.1),
+        );
+        let content_height = (pane.height() - DETAIL_FOOTER_HEIGHT).max(120.0);
+        let content_rect =
+            egui::Rect::from_min_size(pane.min, egui::vec2(pane.width(), content_height));
+        let band = egui::Rect::from_min_max(
+            egui::pos2(pane.min.x, content_rect.bottom() + 4.0),
+            pane.max,
+        );
+        let mut measured = (egui::Rect::ZERO, egui::Rect::ZERO);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(input, |ui| {
+            let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(pane));
+            pane_ui.vertical(|ui| {
+                ui.set_height(pane.height());
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+                if selected {
+                    let inner_width = child.available_width();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(&mut child, |ui| {
+                            ui.allocate_exact_size(
+                                egui::vec2(inner_width, 200.0),
+                                egui::Sense::hover(),
+                            );
+                        });
+                } else {
+                    empty_editor(&mut child);
+                }
+                measured.0 = child.min_rect();
+                ui.advance_cursor_after_rect(content_rect);
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    measured.1 = ui
+                        .add_sized(
+                            [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
+                            egui::Button::new("Save"),
+                        )
+                        .rect;
+                });
+            });
+        });
+        // `FullOutput` owns a `TexturesDelta` whose `Drop` panics if the deltas
+        // were never applied, and there is no headless pass to apply them in.
+        output.textures_delta.clear();
+        (measured.0, measured.1, band)
+    }
+
+    /// The detail footer belongs directly under the detail pane, and it must
+    /// still be there when there is nothing to show above it.
+    ///
+    /// The footer used to be pushed 19.5px down into the status bar, and only in
+    /// the nothing-selected state, because the empty state was three widgets in a
+    /// one-widget builder and reported a min rect 22px taller than its box. A
+    /// scrolling list reports its box exactly, which is why selecting an overlay
+    /// made the symptom vanish and hide it for a release.
+    ///
+    /// The footer is centred in its band, so the tolerance is deliberately loose:
+    /// egui rounds the centred region to whole pixels and adds half the item
+    /// spacing, so the exact figure is 741.5 rather than 740. Re-deriving that
+    /// arithmetic here is the same mistake that produced the bug, and the bug was
+    /// 19.5px, so 2px is an order of magnitude tighter than what must be caught.
+    /// What actually pins it is the band, which cannot move at all if the content
+    /// child stops over-reporting.
+    #[test]
+    fn the_detail_footer_stays_under_the_detail_pane() {
+        for (what, selected) in [("nothing selected", false), ("overlay selected", true)] {
+            let (content, footer, band) = detail_pane_geometry((1000.0, 800.0), selected);
+            assert!(
+                band.contains_rect(footer),
+                "with {what} the footer {footer:?} escaped its band {band:?}"
+            );
+            let centred = band.top() + (band.height() - footer.height()) / 2.0;
+            assert!(
+                (footer.top() - centred).abs() <= 2.0,
+                "with {what} the footer sat at {footer:?} but the band {band:?} centres it at {centred}"
+            );
+            assert_eq!(
+                band.top(),
+                content.bottom() + 4.0,
+                "with {what} the content reported {content:?}, which moved the band"
+            );
+        }
+    }
+
     fn pane_rects(claim_pane_width: bool) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
