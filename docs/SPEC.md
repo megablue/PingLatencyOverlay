@@ -192,13 +192,21 @@
   are painted: the selected row gets the selection fill, a hovered row a
   muted fill, and an untouched row nothing at all. The rail is the reference,
   so a selection looks the same wherever it appears.
-- The list pane's header, its rows and its footer are all one width, inset from
-  the pane's edges, with the scroll bar's width reserved whether or not one is
-  showing. Nothing in the pane can therefore be wider or narrower than its
-  neighbour, and the rows do not shift sideways when a list outgrows the pane.
+- The list pane's header, its rows and its footer are all one width, and that
+  width is one column centred in the pane, so both of the pane's boundaries get
+  the same margin. The scroll bar's width is reserved whether or not one is
+  showing, which is the slack the centring divides. Nothing in the pane can
+  therefore be wider or narrower than its neighbour, and the rows do not shift
+  sideways when a list outgrows the pane.
 - The two pane boundaries are drawn the same way: a hairline centred in the gap
   between the panes, then the gap itself. The list pane is spaced identically on
-  the rail side and the detail side.
+  the rail side and the detail side, measured from the rail's rows to the column
+  and from the column to the detail pane's content. (Hairline to nearest content
+  is the wrong measure and reads unevenly, because the rail and the detail pane
+  sit flush to their pane edges while the column is inset.)
+- Each pane claims the width `config_ui` allocated for it. A pane that draws
+  itself as a positioned child is invisible to the layout that allocated it, so
+  without that claim the next pane is laid out on top of it.
 - Switching pages is always allowed, because the Overlays draft stays in memory.
   Switching *profile* is refused while there are unsaved edits.
 - The window is 860x660, resizable between 720x480 and 1400x8192, which keeps

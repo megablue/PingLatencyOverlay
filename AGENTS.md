@@ -105,11 +105,40 @@ Installer (run from the repository root):
   `rect_filled` does not, so a row allocated at the content height gave the child
   `Ui` less room than it asked for and every button ended up flush against the
   fill. `a_painted_row_carries_its_margin` pins the rule.
-- Everything in the list pane derives its width from `list_pane_row_width_for`:
-  the header, the rows, the scroll area and the footer. A hardcoded
+- Everything in the list pane derives its width from `list_pane_column`, which
+  returns the one width shared by the header, the rows, the scroll area and the
+  footer plus the inset that centres it in the pane. A hardcoded
   `SIDEBAR_WIDTH - n` there is how the header, the rows and the pane edge ended
-  up three different widths. Both pane boundaries go through `draw_pane_divider`,
-  so the two sides of the list pane cannot drift apart.
+  up three different widths. Both pane boundaries go through `draw_pane_divider`.
+- **`Ui::new_child` is invisible to the layout that created it.** It paints into
+  the rect you give it and reports nothing back, and `allocate_ui` finishes by
+  setting the parent's cursor from the child's `min_rect`
+  (`advance_after_rects` advances from the *widget* rect, not the frame rect). A
+  child that painted itself in a grandchild therefore has an empty `min_rect`,
+  the cursor goes back to the pane's left edge, and the next pane is laid out on
+  top of it. That shipped as a full-on overlap of the detail pane over the list
+  pane. So `config_ui` follows `show_list_pane` with
+  `ui.advance_cursor_after_rect(ui.max_rect())`, and any future pane that draws
+  itself the same way needs the same line.
+  `a_pane_that_draws_itself_keeps_its_place` pins both halves: the panes come out
+  disjoint, and dropping the claim really does overlap them.
+- Judge pane spacing by **content to content** across a boundary, not hairline to
+  nearest content. The rail and the detail pane lay out flush to their pane edges
+  while the list pane's column is inset, so the hairline metric reads 16px on one
+  side and 24px on the other even when the spacing is even at 28px both sides.
+- An inset has to be applied to a widget's **position**, not only subtracted from
+  its width, and a reserve may only be subtracted once. `LIST_PANE_INSET` was
+  taken off the row width while the rows were still allocated flush to the pane's
+  left edge, and `list_pane_row_width_for` passed `allocated - SCROLL_BAR_RESERVE`
+  as the pane width *and* the reserve as the bar width, so all 32px of slack
+  landed on the right: the two pane boundaries read 4px and 40px instead of
+  matching. `the_list_pane_column_is_centred_in_its_pane` pins the even margins.
+- `ui.horizontal(..)` is not vertically transparent. It hard-sizes its child to
+  `ui.spacing().interact_size.y` (18px by default) and allocates that through the
+  parent layout, which centres it, so a taller widget inside it lands low and
+  spills out the bottom. Inside a row of known height use
+  `ui.new_child(egui::UiBuilder::new().max_rect(..))`, which honours the absolute
+  rect. `a_list_pane_row_puts_its_contents_inside_its_own_fill` pins it.
 - App-wide preferences live under a single `ui` object in `globalconfig.json`
   (`GlobalPrefs`/`UiPrefs` in `config.rs`, every field `#[serde(default)]`).
   `write_global_prefs` merges: it replaces only the `ui` key, so the active

@@ -52,21 +52,25 @@ const PROFILE_ROW_DOT_WIDTH: f32 = 12.0;
 /// Gap between a profile row's overlay count and its dot.
 const PROFILE_ROW_COUNT_GAP: f32 = 6.0;
 /// Inner margin of a row in the list pane, which also comes out of its width.
+/// Margin between a list pane row's fill and its contents, on every side.
+///
+/// Every list pane row uses this one margin, and its contents are laid out in
+/// `row_inner(row)`, so a row cannot be painted at one size and filled at
+/// another.
 const ROW_MARGIN: f32 = 4.0;
-/// An overlay row's frame inner margin.
-const OVERLAY_ROW_MARGIN: f32 = ROW_MARGIN;
 /// Height of the area an overlay row's contents sit in.
 const OVERLAY_ROW_HEIGHT: f32 = 28.0;
 /// Width of an overlay row's delete and pause buttons.
 const OVERLAY_ROW_ACTION_WIDTH: f32 = 28.0;
-/// Width of the delete confirmation's OK and Cancel buttons together.
-const OVERLAY_ROW_CONFIRM_WIDTH: f32 = 64.0;
+/// Height of an overlay row's delete confirmation buttons.
+const OVERLAY_CONFIRM_HEIGHT: f32 = 26.0;
+/// Width of the delete confirmation's OK and Cancel buttons.
+const OVERLAY_CONFIRM_OK_WIDTH: f32 = 36.0;
+const OVERLAY_CONFIRM_CANCEL_WIDTH: f32 = 28.0;
 /// Padding inside the profile switcher, around its name and its arrow.
 const SWITCHER_TEXT_LEFT_PAD: f32 = 10.0;
 const SWITCHER_ARROW_PAD: f32 = 12.0;
 const SWITCHER_TEXT_RIGHT_PAD: f32 = 28.0;
-/// A profile row's frame inner margin, which also comes out of its width.
-const PROFILE_ROW_MARGIN: f32 = ROW_MARGIN;
 /// Padding at each side of the list pane's content, so its rows do not touch
 /// the pane edges.
 const LIST_PANE_INSET: f32 = 8.0;
@@ -956,15 +960,18 @@ impl PingApp {
     /// the page's own actions.
     fn show_overlays_page(&mut self, ui: &mut Ui, height: f32) {
         let list_height = (height - SIDEBAR_HEADER_HEIGHT - SIDEBAR_FOOTER_HEIGHT).max(100.0);
-        let allocated = ui.available_width();
-        let row_width = list_pane_row_width_for(allocated);
+        let column = list_pane_column(ui.available_width());
+        let row_width = column.width;
 
+        // The whole page is laid out in one centred column, so the switcher, the
+        // rows and the footer cannot end up three different widths.
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(column.rect(ui, height)));
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-            ui.allocate_ui(egui::vec2(allocated, SIDEBAR_HEADER_HEIGHT), |ui| {
+            ui.allocate_ui(egui::vec2(row_width, SIDEBAR_HEADER_HEIGHT), |ui| {
                 self.show_profile_switcher(ui, row_width);
             });
             ui.add_space(4.0);
-            ui.allocate_ui(egui::vec2(allocated, list_height), |ui| {
+            ui.allocate_ui(egui::vec2(column.scroll_width(), list_height), |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1014,122 +1021,27 @@ impl PingApp {
                                     background,
                                 );
                             }
-                            let mut ui = ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(
-                                        row_rect.shrink2(egui::Vec2::splat(OVERLAY_ROW_MARGIN)),
-                                    )
-                                    .layout(Layout::left_to_right(Align::Center)),
+                            let row = overlay_row_contents(
+                                ui,
+                                row_rect,
+                                &name,
+                                indicator,
+                                enabled,
+                                active,
+                                self.confirm_delete.as_deref() == Some(id.as_str()),
                             );
-                            if self.confirm_delete.as_deref() == Some(id.as_str()) {
-                                ui.horizontal(|ui| {
-                                    let label_response = ui.label(
-                                        RichText::new(format!("Delete \"{name}\"?"))
-                                            .color(UI_DANGER),
-                                    );
-                                    let inner_width = row_width - OVERLAY_ROW_MARGIN * 2.0;
-                                    let controls_width = OVERLAY_ROW_CONFIRM_WIDTH;
-                                    let gaps = ui.spacing().item_spacing.x * 3.0;
-                                    let remaining_width = (inner_width
-                                        - label_response.rect.width()
-                                        - controls_width
-                                        - gaps)
-                                        .max(0.0);
-                                    let cancel_area = ui.allocate_response(
-                                        egui::vec2(remaining_width, 26.0),
-                                        egui::Sense::click(),
-                                    );
-                                    let ok_response = ui.add_sized(
-                                        [36.0, 26.0],
-                                        egui::Button::new(RichText::new("OK").color(UI_TEXT))
-                                            .fill(UI_DANGER_STRONG),
-                                    );
-                                    let cancel_response =
-                                        ui.add_sized([28.0, 26.0], egui::Button::new("X"));
-                                    if ok_response.clicked() {
-                                        self.confirm_delete = None;
-                                        self.delete_overlay(&id);
-                                    } else if label_response.clicked()
-                                        || cancel_area.clicked()
-                                        || cancel_response.clicked()
-                                    {
-                                        self.confirm_delete = None;
-                                    }
-                                });
-                            } else {
-                                ui.horizontal(|ui| {
-                                    let (tab_rect, mut tab_response) = ui.allocate_exact_size(
-                                        egui::vec2(
-                                            overlay_name_width(
-                                                row_width,
-                                                ui.spacing().item_spacing.x,
-                                            ),
-                                            OVERLAY_ROW_HEIGHT,
-                                        ),
-                                        egui::Sense::click(),
-                                    );
-                                    let indicator_size = 22.0;
-                                    let indicator_rect = egui::Rect::from_min_size(
-                                        tab_rect.left_top(),
-                                        egui::vec2(indicator_size, tab_rect.height()),
-                                    );
-                                    // Reuse the existing blue palette: muted
-                                    // default, bright active selection.
-                                    let indicator_color =
-                                        if active { UI_ACCENT } else { UI_ACCENT_STRONG };
-                                    draw_position_indicator(
-                                        ui.painter(),
-                                        indicator_rect,
-                                        indicator,
-                                        indicator_color,
-                                    );
-                                    let text_rect = egui::Rect::from_min_max(
-                                        egui::pos2(indicator_rect.right() + 6.0, tab_rect.top()),
-                                        tab_rect.right_bottom(),
-                                    );
-                                    let font_id = egui::TextStyle::Button.resolve(ui.style());
-                                    let mut tab_text = egui::text::LayoutJob::default();
-                                    tab_text.wrap.max_width = text_rect.width();
-                                    tab_text.wrap.max_rows = 1;
-                                    tab_text.wrap.break_anywhere = true;
-                                    tab_text.append(
-                                        &name,
-                                        0.0,
-                                        egui::TextFormat::simple(font_id, UI_TEXT),
-                                    );
-                                    let galley = ui.painter().layout_job(tab_text);
-                                    let text_offset = (text_rect.height() - galley.size().y) / 2.0;
-                                    ui.painter().galley(
-                                        text_rect.left_top() + egui::vec2(0.0, text_offset),
-                                        galley,
-                                        UI_TEXT,
-                                    );
-                                    if tab_response.hovered() {
-                                        tab_response =
-                                            tab_response.on_hover_text(position_name(indicator));
-                                    }
-                                    if tab_response.clicked() {
-                                        self.selected_id = Some(id.clone());
-                                    }
-                                    if ui
-                                        .add_sized(
-                                            [OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_HEIGHT],
-                                            egui::Button::new(RichText::new("X").color(UI_DANGER)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.confirm_delete = Some(id.clone());
-                                    }
-                                    if ui
-                                        .add_sized(
-                                            [OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_HEIGHT],
-                                            egui::Button::new(if enabled { "||" } else { ">" }),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.toggle_overlay(&id);
-                                    }
-                                });
+                            let clicks = row.clicks;
+                            if clicks.confirm_remove {
+                                self.confirm_delete = None;
+                                self.delete_overlay(&id);
+                            } else if clicks.dismiss_confirm {
+                                self.confirm_delete = None;
+                            } else if clicks.name {
+                                self.selected_id = Some(id.clone());
+                            } else if clicks.remove {
+                                self.confirm_delete = Some(id.clone());
+                            } else if clicks.toggle {
+                                self.toggle_overlay(&id);
                             }
                         }
                     });
@@ -1165,16 +1077,19 @@ impl PingApp {
     /// and a two-pane list should not have that side effect.
     fn show_profiles_page(&mut self, ui: &mut Ui, height: f32) {
         let list_height = (height - SIDEBAR_FOOTER_HEIGHT).max(100.0);
-        let allocated = ui.available_width();
-        let row_width = list_pane_row_width_for(allocated);
+        let column = list_pane_column(ui.available_width());
+        let row_width = column.width;
         let active = self.active_profile.clone();
         let selected = self.selected_profile.clone();
         let profiles = self.profiles.clone();
         let counts = self.profile_overlay_counts.clone();
         let dirty = self.dirty;
 
+        // The same centred column the Overlays page uses, so the two pages' rows
+        // and footers line up with each other as well as with their own pane.
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(column.rect(ui, height)));
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-            ui.allocate_ui(egui::vec2(allocated, list_height), |ui| {
+            ui.allocate_ui(egui::vec2(column.scroll_width(), list_height), |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1220,87 +1135,10 @@ impl PingApp {
                                     background,
                                 );
                             }
-                            let mut ui = ui.new_child(
-                                egui::UiBuilder::new()
-                                    .max_rect(
-                                        row_rect.shrink2(egui::Vec2::splat(PROFILE_ROW_MARGIN)),
-                                    )
-                                    .layout(Layout::left_to_right(Align::Center)),
-                            );
-                            {
-                                ui.horizontal(|ui| {
-                                    // The count and the dot live in a gutter at
-                                    // the right, so a long name truncates instead
-                                    // of running underneath them.
-                                    let name_width =
-                                        profile_name_width(row_width, ui.spacing().item_spacing.x);
-                                    // The name is painted, not a button, so the
-                                    // row has no outline of its own. The row
-                                    // background is the hover cue instead.
-                                    let color = if is_active {
-                                        UI_ACCENT
-                                    } else if dirty {
-                                        UI_TEXT_SECONDARY
-                                    } else {
-                                        UI_TEXT
-                                    };
-                                    let (name_rect, response) = ui.allocate_exact_size(
-                                        egui::vec2(name_width, PROFILE_ROW_HEIGHT),
-                                        egui::Sense::click(),
-                                    );
-                                    let font_id = egui::TextStyle::Button.resolve(ui.style());
-                                    let mut name_text = egui::text::LayoutJob::default();
-                                    name_text.wrap.max_width = name_width;
-                                    name_text.wrap.max_rows = 1;
-                                    name_text.wrap.break_anywhere = true;
-                                    name_text.append(
-                                        &label,
-                                        0.0,
-                                        egui::TextFormat::simple(font_id, color),
-                                    );
-                                    let galley = ui.painter().layout_job(name_text);
-                                    let text_offset = (name_rect.height() - galley.size().y) / 2.0;
-                                    ui.painter().galley(
-                                        name_rect.left_top() + egui::vec2(0.0, text_offset),
-                                        galley,
-                                        color,
-                                    );
-                                    if response.clicked() {
-                                        self.selected_profile = Some(id.clone());
-                                    }
-                                    response.on_hover_text(config::profile_file_name(&id));
-                                    let trailing = ui.allocate_response(
-                                        egui::vec2(PROFILE_ROW_TRAILING, PROFILE_ROW_HEIGHT),
-                                        egui::Sense::hover(),
-                                    );
-                                    let painter = ui.painter();
-                                    // The gutter is two columns: the count,
-                                    // right aligned against a fixed slot for the
-                                    // active dot. That way the numbers line up
-                                    // down the list and the dot never nudges them.
-                                    let dot_slot = egui::Rect::from_min_max(
-                                        egui::pos2(
-                                            trailing.rect.right() - PROFILE_ROW_DOT_WIDTH,
-                                            trailing.rect.top(),
-                                        ),
-                                        trailing.rect.right_bottom(),
-                                    );
-                                    painter.text(
-                                        egui::pos2(
-                                            dot_slot.left() - PROFILE_ROW_COUNT_GAP,
-                                            trailing.rect.center().y,
-                                        ),
-                                        egui::Align2::RIGHT_CENTER,
-                                        count.to_string(),
-                                        egui::TextStyle::Small.resolve(ui.style()),
-                                        UI_TEXT_SECONDARY,
-                                    );
-                                    if is_active {
-                                        // A dot, because the accent name alone is
-                                        // a weak cue in a long list.
-                                        draw_active_dot(painter, dot_slot, UI_ACCENT);
-                                    }
-                                });
+                            let row =
+                                profile_row_contents(ui, row_rect, &label, count, is_active, dirty);
+                            if row.clicked {
+                                self.selected_profile = Some(id.clone());
                             }
                         }
                     });
@@ -2062,6 +1900,14 @@ impl PingApp {
                     if self.page != Page::Global {
                         ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
                             self.show_list_pane(ui, content_height);
+                            // A list pane page draws itself as a positioned
+                            // child, and a positioned child registers nothing
+                            // with the layout that allocated it: `advance_after_rects`
+                            // sets the cursor from the pane's own `min_rect`, which
+                            // is empty. So the pane claims its width here. Without
+                            // it the next divider and the detail pane are laid out
+                            // from the list pane's left edge, on top of it.
+                            ui.advance_cursor_after_rect(ui.max_rect());
                         });
                         draw_pane_divider(ui);
                     }
@@ -2196,10 +2042,53 @@ fn list_pane_row_width(pane_width: f32, bar_width: f32) -> f32 {
 
 /// The list pane's rows, given the width it was allocated.
 ///
-/// The scroll area is `SCROLL_BAR_RESERVE` wider than the rows so the bar has a
-/// home of its own and never covers a row.
+/// `LIST_PANE_INSET` comes off each side and the scroll bar's home comes off the
+/// right, so the row is narrower than its pane on both sides. `list_pane_column`
+/// is what puts it back on the left.
 fn list_pane_row_width_for(allocated: f32) -> f32 {
-    list_pane_row_width(allocated - SCROLL_BAR_RESERVE, SCROLL_BAR_RESERVE)
+    list_pane_row_width(allocated, SCROLL_BAR_RESERVE)
+}
+
+/// Where the list pane's content sits inside the pane it was allocated.
+///
+/// One column, centred, so both of the pane's boundaries get the same margin.
+/// The rows used to be allocated flush against the pane's left edge while
+/// `LIST_PANE_INSET` was only ever subtracted from their width, so the entire
+/// shortfall landed on the right: the left boundary read 4px and the right one
+/// 40px, which is what made the panes look unevenly spaced.
+struct ListPaneColumn {
+    /// Distance from the pane's left edge to the column's left edge.
+    inset: f32,
+    /// The width shared by the switcher, the rows and the footer.
+    width: f32,
+}
+
+impl ListPaneColumn {
+    /// The width of the scrolling area that holds the rows.
+    ///
+    /// One `SCROLL_BAR_RESERVE` wider than the column, so the bar has a home of
+    /// its own and never covers a row or shifts one sideways when the list
+    /// outgrows the pane. It is the only thing in the pane allowed past the
+    /// column's right edge, and it has nothing painted in it but the bar.
+    fn scroll_width(&self) -> f32 {
+        self.width + SCROLL_BAR_RESERVE
+    }
+
+    /// The column's rect, `height` tall, starting at the pane's top left.
+    fn rect(&self, pane: &Ui, height: f32) -> egui::Rect {
+        egui::Rect::from_min_size(
+            pane.min_rect().left_top() + egui::vec2(self.inset, 0.0),
+            egui::vec2(self.width, height),
+        )
+    }
+}
+
+fn list_pane_column(allocated: f32) -> ListPaneColumn {
+    let width = list_pane_row_width_for(allocated);
+    ListPaneColumn {
+        inset: ((allocated - width) / 2.0).max(0.0),
+        width,
+    }
 }
 
 /// The hairline and the gap that separate two panes.
@@ -2216,14 +2105,295 @@ fn draw_pane_divider(ui: &mut Ui) {
     ui.add_space(PANE_GAP);
 }
 
-/// The name area of an overlay row: the row minus its two action buttons and
-/// the two gaps between the three of them.
-fn overlay_name_width(row_width: f32, gap: f32) -> f32 {
-    (row_width - OVERLAY_ROW_MARGIN * 2.0 - OVERLAY_ROW_ACTION_WIDTH * 2.0 - gap * 2.0).max(60.0)
+/// The area a list pane row's contents live in: the row's painted fill minus the
+/// same margin on every side.
+///
+/// Both halves of a row are measured from this one rect, so the name on the left
+/// and the controls on the right cannot disagree about where the row ends.
+fn row_inner(row: egui::Rect) -> egui::Rect {
+    row.shrink2(egui::Vec2::splat(ROW_MARGIN))
 }
 
-fn profile_name_width(row_width: f32, gap: f32) -> f32 {
-    (row_width - PROFILE_ROW_MARGIN * 2.0 - PROFILE_ROW_TRAILING - gap).max(80.0)
+/// Which part of an overlay row the user clicked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OverlayRowClicks {
+    name: bool,
+    remove: bool,
+    toggle: bool,
+    confirm_remove: bool,
+    dismiss_confirm: bool,
+}
+
+/// What one overlay row laid out, and which part was clicked.
+///
+/// The rects are reported so a test can measure where the row really put things.
+/// `name` starts at the row's left edge and `controls` ends at its right edge;
+/// both live inside `row_inner(row)`. Only the clicks are read at runtime.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+struct OverlayRow {
+    clicks: OverlayRowClicks,
+    name: egui::Rect,
+    controls: egui::Rect,
+}
+
+/// Lay out one overlay row's contents inside an already painted `row`.
+///
+/// The name takes whatever the row's left edge and its controls leave over, and
+/// the controls are pinned to its right edge, so neither side can push the other
+/// out of the fill. This lives in one function so the geometry can be measured in
+/// a test: a row's contents shipped outside its fill twice, once because the row
+/// was allocated too short and once because a nested `ui.horizontal` shifted
+/// everything down by half a button.
+fn overlay_row_contents(
+    ui: &mut Ui,
+    row: egui::Rect,
+    name: &str,
+    anchor: Anchor,
+    enabled: bool,
+    active: bool,
+    confirming: bool,
+) -> OverlayRow {
+    let inner = row_inner(row);
+    let gap = ui.spacing().item_spacing.x;
+    let mut clicks = OverlayRowClicks::default();
+    let mut ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    if confirming {
+        let label = ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER));
+        // The pair is pinned to the row's right edge and the filler between the
+        // question and the pair takes whatever is left, so neither can overflow.
+        let controls = right_anchored(inner, confirm_controls_width(gap));
+        let filler = (controls.left() - label.rect.right() - gap).max(0.0);
+        let filler_response = ui.allocate_response(
+            egui::vec2(filler, OVERLAY_CONFIRM_HEIGHT),
+            egui::Sense::click(),
+        );
+        let mut buttons = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(controls)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        clicks.confirm_remove = buttons
+            .add_sized(
+                [OVERLAY_CONFIRM_OK_WIDTH, OVERLAY_CONFIRM_HEIGHT],
+                egui::Button::new(RichText::new("OK").color(UI_TEXT)).fill(UI_DANGER_STRONG),
+            )
+            .clicked();
+        clicks.dismiss_confirm = label.clicked()
+            || filler_response.clicked()
+            || buttons
+                .add_sized(
+                    [OVERLAY_CONFIRM_CANCEL_WIDTH, OVERLAY_CONFIRM_HEIGHT],
+                    egui::Button::new("X"),
+                )
+                .clicked();
+        return OverlayRow {
+            clicks,
+            name: label.rect,
+            controls,
+        };
+    }
+
+    let (tab_rect, mut tab_response) = ui.allocate_exact_size(
+        egui::vec2(overlay_name_width(inner.width(), gap), OVERLAY_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let indicator_size = 22.0;
+    let indicator_rect = egui::Rect::from_min_size(
+        tab_rect.left_top(),
+        egui::vec2(indicator_size, tab_rect.height()),
+    );
+    // Reuse the existing blue palette: muted default, bright active selection.
+    let indicator_color = if active { UI_ACCENT } else { UI_ACCENT_STRONG };
+    draw_position_indicator(ui.painter(), indicator_rect, anchor, indicator_color);
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(indicator_rect.right() + 6.0, tab_rect.top()),
+        tab_rect.right_bottom(),
+    );
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let mut tab_text = egui::text::LayoutJob::default();
+    tab_text.wrap.max_width = text_rect.width();
+    tab_text.wrap.max_rows = 1;
+    tab_text.wrap.break_anywhere = true;
+    tab_text.append(name, 0.0, egui::TextFormat::simple(font_id, UI_TEXT));
+    let galley = ui.painter().layout_job(tab_text);
+    let text_offset = (text_rect.height() - galley.size().y) / 2.0;
+    ui.painter().galley(
+        text_rect.left_top() + egui::vec2(0.0, text_offset),
+        galley,
+        UI_TEXT,
+    );
+    if tab_response.hovered() {
+        tab_response = tab_response.on_hover_text(position_name(anchor));
+    }
+    clicks.name = tab_response.clicked();
+
+    let controls = right_anchored(inner, overlay_controls_width(gap));
+    let mut actions = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(controls)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    clicks.remove = actions
+        .add_sized(
+            [OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_HEIGHT],
+            egui::Button::new(RichText::new("X").color(UI_DANGER)),
+        )
+        .clicked();
+    clicks.toggle = actions
+        .add_sized(
+            [OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_HEIGHT],
+            egui::Button::new(if enabled { "||" } else { ">" }),
+        )
+        .clicked();
+    OverlayRow {
+        clicks,
+        name: tab_rect,
+        controls,
+    }
+}
+
+/// The right-hand area of an overlay row: the two action buttons and the gap
+/// between them, anchored to the row's right edge.
+fn overlay_controls_width(gap: f32) -> f32 {
+    OVERLAY_ROW_ACTION_WIDTH * 2.0 + gap
+}
+
+/// The name area of an overlay row: the row's contents minus its action buttons
+/// and the two gaps between the three of them.
+fn overlay_name_width(inner_width: f32, gap: f32) -> f32 {
+    (inner_width - overlay_controls_width(gap) - gap).max(60.0)
+}
+
+fn profile_name_width(inner_width: f32, gap: f32) -> f32 {
+    (inner_width - PROFILE_ROW_TRAILING - gap).max(80.0)
+}
+
+/// What one profile row laid out, and whether the user clicked it.
+///
+/// Clicking only selects the profile; loading it is a separate action in the
+/// detail pane. The rects are reported so a test can measure the row; only
+/// `clicked` is read at runtime.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+struct ProfileRow {
+    clicked: bool,
+    name: egui::Rect,
+    /// The count and active dot, pinned to the row's right edge.
+    gutter: egui::Rect,
+}
+
+/// Lay out one profile row's contents inside an already painted `row`.
+///
+/// The name takes whatever the row's left edge and the gutter leave over, and the
+/// gutter is pinned to the row's right edge, so a long name truncates instead of
+/// running underneath the count and the dot, and neither can escape the fill.
+fn profile_row_contents(
+    ui: &mut Ui,
+    row: egui::Rect,
+    label: &str,
+    count: usize,
+    is_active: bool,
+    dirty: bool,
+) -> ProfileRow {
+    let inner = row_inner(row);
+    let gap = ui.spacing().item_spacing.x;
+    let name_width = profile_name_width(inner.width(), gap);
+    let mut ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    // The name is painted, not a button, so the row has no outline of its own.
+    // The row background is the hover cue instead.
+    let color = if is_active {
+        UI_ACCENT
+    } else if dirty {
+        UI_TEXT_SECONDARY
+    } else {
+        UI_TEXT
+    };
+    let (name_rect, response) = ui.allocate_exact_size(
+        egui::vec2(name_width, PROFILE_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let mut name_text = egui::text::LayoutJob::default();
+    name_text.wrap.max_width = name_width;
+    name_text.wrap.max_rows = 1;
+    name_text.wrap.break_anywhere = true;
+    name_text.append(label, 0.0, egui::TextFormat::simple(font_id, color));
+    let galley = ui.painter().layout_job(name_text);
+    let text_offset = (name_rect.height() - galley.size().y) / 2.0;
+    ui.painter().galley(
+        name_rect.left_top() + egui::vec2(0.0, text_offset),
+        galley,
+        color,
+    );
+    let clicked = response.clicked();
+
+    let trailing = ui
+        .new_child(
+            egui::UiBuilder::new()
+                .max_rect(right_anchored(inner, PROFILE_ROW_TRAILING))
+                .layout(Layout::left_to_right(Align::Center)),
+        )
+        .allocate_response(
+            egui::vec2(PROFILE_ROW_TRAILING, PROFILE_ROW_HEIGHT),
+            egui::Sense::hover(),
+        );
+    let painter = ui.painter();
+    // The gutter is two columns: the count, right aligned against a fixed slot
+    // for the active dot. That way the numbers line up down the list and the dot
+    // never nudges them.
+    let dot_slot = egui::Rect::from_min_max(
+        egui::pos2(
+            trailing.rect.right() - PROFILE_ROW_DOT_WIDTH,
+            trailing.rect.top(),
+        ),
+        trailing.rect.right_bottom(),
+    );
+    painter.text(
+        egui::pos2(
+            dot_slot.left() - PROFILE_ROW_COUNT_GAP,
+            trailing.rect.center().y,
+        ),
+        egui::Align2::RIGHT_CENTER,
+        count.to_string(),
+        egui::TextStyle::Small.resolve(ui.style()),
+        UI_TEXT_SECONDARY,
+    );
+    if is_active {
+        // A dot, because the accent name alone is a weak cue in a long list.
+        draw_active_dot(painter, dot_slot, UI_ACCENT);
+    }
+    ProfileRow {
+        clicked,
+        name: name_rect,
+        gutter: trailing.rect,
+    }
+}
+
+/// A strip of `width` at the right-hand end of a row's contents.
+///
+/// Every right-hand control in the list pane is placed with this instead of
+/// being left to accumulate out of the layout cursor, so a row's controls cannot
+/// drift past the painted fill however the left-hand side is sized.
+fn right_anchored(inner: egui::Rect, width: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(inner.right() - width, inner.top()),
+        egui::pos2(inner.right(), inner.bottom()),
+    )
+}
+
+/// The width of an overlay row's delete confirmation: its two buttons and the gap
+/// between them, pinned to the row's right edge.
+fn confirm_controls_width(gap: f32) -> f32 {
+    OVERLAY_CONFIRM_OK_WIDTH + OVERLAY_CONFIRM_CANCEL_WIDTH + gap
 }
 
 /// Whether a page's detail pane ends in the sticky Save/Discard footer.
@@ -2979,15 +3149,121 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, list_pane_row_height,
-        list_pane_row_width_for, overlay_name_width, page_has_detail_footer, profile_name_width,
-        profile_row_label, rail_width, selected_overlay_for_border, window_title, Page,
-        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
-        LIST_PANE_INSET, OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_MARGIN, PAGES, PANE_GAP,
-        PANE_MARGIN, PROFILE_ROW_MARGIN, PROFILE_ROW_TRAILING, RAIL_WIDTH, SCROLL_BAR_RESERVE,
-        SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        can_switch_profile, config_notice_status, config_notices_status, draw_pane_divider,
+        list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_name_width,
+        overlay_row_contents, page_has_detail_footer, profile_name_width, profile_row_contents,
+        profile_row_label, rail_width, row_inner, selected_overlay_for_border, window_title, Frame,
+        Page, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
+        GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
+        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH,
     };
-    use crate::config::{ConfigNotice, ProfileEntry};
+    use crate::config::{Anchor, ConfigNotice, ProfileEntry};
+    use eframe::egui;
+
+    /// Where a list pane row's contents landed, measured through the real row
+    /// functions rather than through arithmetic on the constants.
+    ///
+    /// A row's contents shipped outside its painted fill twice: once because the
+    /// row was allocated shorter than its contents needed, and once because a
+    /// nested `ui.horizontal` shifted everything down by half a row. Both were
+    /// invisible to the constant arithmetic and obvious here, so the geometry is
+    /// now measured instead of derived.
+    fn assert_row_contents_stay_inside_the_row(
+        row: egui::Rect,
+        name: egui::Rect,
+        controls: egui::Rect,
+        what: &str,
+    ) {
+        let inner = row_inner(row);
+        let tolerance = 0.01;
+        for (label, rect) in [("name", name), ("controls", controls)] {
+            assert!(
+                rect.left() >= inner.left() - tolerance
+                    && rect.right() <= inner.right() + tolerance
+                    && rect.top() >= inner.top() - tolerance
+                    && rect.bottom() <= inner.bottom() + tolerance,
+                "the {what} row's {label} at {rect:?} escapes its contents {inner:?} \
+                 (row {row:?}, margin {ROW_MARGIN}px)"
+            );
+        }
+        assert!(
+            (controls.right() - inner.right()).abs() <= tolerance,
+            "the {what} row's controls end at {} but its contents end at {}",
+            controls.right(),
+            inner.right()
+        );
+        assert!(
+            (name.left() - inner.left()).abs() <= tolerance,
+            "the {what} row's name starts at {} but its contents start at {}",
+            name.left(),
+            inner.left()
+        );
+    }
+
+    #[test]
+    fn a_list_pane_row_puts_its_contents_inside_its_own_fill() {
+        let row_width = list_pane_row_width_for(SIDEBAR_WIDTH);
+        let ctx = egui::Context::default();
+        let mut measured: Vec<(egui::Rect, egui::Rect, egui::Rect)> = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // Two of each, so the columns are checked to line up down a list and
+            // not merely to fit inside a single row.
+            for _ in 0..2 {
+                let (row, _) = ui.allocate_exact_size(
+                    egui::vec2(row_width, list_pane_row_height(OVERLAY_ROW_HEIGHT)),
+                    egui::Sense::click(),
+                );
+                let laid_out =
+                    overlay_row_contents(ui, row, "Cloudflare", Anchor::TopLeft, true, true, false);
+                measured.push((row, laid_out.name, laid_out.controls));
+            }
+            for _ in 0..2 {
+                let (row, _) = ui.allocate_exact_size(
+                    egui::vec2(row_width, list_pane_row_height(PROFILE_ROW_HEIGHT)),
+                    egui::Sense::click(),
+                );
+                let laid_out = profile_row_contents(ui, row, "Gaming", 4, true, false);
+                measured.push((row, laid_out.name, laid_out.gutter));
+            }
+        });
+        // egui hands back the font atlas deltas it built, and a dropped delta is a
+        // panic, so they are cleared instead.
+        output.textures_delta.clear();
+
+        let overlay_rows = &measured[..2];
+        for (row, name, controls) in overlay_rows {
+            assert_row_contents_stay_inside_the_row(*row, *name, *controls, "overlay");
+        }
+        for (row, name, gutter) in &measured[2..] {
+            assert_row_contents_stay_inside_the_row(*row, *name, *gutter, "profile");
+        }
+        for pair in [overlay_rows, &measured[2..]] {
+            assert_eq!(
+                pair[0].2.left(),
+                pair[1].2.left(),
+                "two rows' right-hand controls are not in the same column"
+            );
+        }
+
+        // The delete confirmation replaces the row's contents, so its buttons get
+        // the same treatment.
+        let ctx = egui::Context::default();
+        let mut confirm = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let (row, _) = ui.allocate_exact_size(
+                egui::vec2(row_width, list_pane_row_height(OVERLAY_ROW_HEIGHT)),
+                egui::Sense::click(),
+            );
+            let laid_out =
+                overlay_row_contents(ui, row, "Cloudflare", Anchor::TopLeft, true, false, true);
+            confirm = Some((row, laid_out.name, laid_out.controls));
+        });
+        output.textures_delta.clear();
+        let (row, name, controls) = confirm.expect("the row was laid out");
+        assert_row_contents_stay_inside_the_row(row, name, controls, "delete confirmation");
+    }
 
     /// The rail is the leftmost pane, so the window has to be wide enough for the
     /// rail, the list pane and a usable detail pane at the same time.
@@ -3042,35 +3318,184 @@ mod tests {
         );
     }
 
-    /// The name, the two `item_spacing` gaps and the two action buttons all come
-    /// out of an overlay row's width, so forgetting one of them overflows the
-    /// row. This is the same class of bug as the profile row above.
+    /// The three pane rects `config_ui` lays out, mirroring its pane sequence.
+    ///
+    /// This is a mirror and not a call: `config_ui` is a method on `PingApp`, and
+    /// standing one up needs a creation context, live probes and a tray, which is
+    /// not worth it for a layout test. It uses the same `draw_pane_divider`, the
+    /// same `rail_width`, the same `SIDEBAR_WIDTH`, the same frame margin and the
+    /// same `list_pane_column`, and its list pane draws itself as a positioned
+    /// child exactly as the real pages do.
+    fn pane_rects(claim_pane_width: bool) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut panes = (
+            egui::Rect::ZERO,
+            egui::Rect::ZERO,
+            egui::Rect::ZERO,
+            egui::Rect::ZERO,
+        );
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(input, |ui| {
+            let height = 600.0;
+            Frame::central_panel(ui.style())
+                .fill(UI_BACKGROUND)
+                .inner_margin(egui::Margin {
+                    left: PANE_MARGIN as i8,
+                    right: PANE_MARGIN as i8,
+                    top: PANE_MARGIN as i8,
+                    bottom: 0,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.set_height(height);
+                        ui.allocate_ui(egui::vec2(rail_width(false), height), |ui| {
+                            panes.0 = ui.max_rect();
+                            ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), RAIL_ROW_HEIGHT),
+                                egui::Sense::hover(),
+                            );
+                        });
+                        draw_pane_divider(ui);
+                        ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, height), |ui| {
+                            panes.1 = ui.max_rect();
+                            let column = list_pane_column(ui.available_width());
+                            panes.2 = column.rect(ui, height);
+                            let mut page = ui.new_child(egui::UiBuilder::new().max_rect(panes.2));
+                            page.allocate_exact_size(
+                                egui::vec2(column.width, list_pane_row_height(OVERLAY_ROW_HEIGHT)),
+                                egui::Sense::hover(),
+                            );
+                            if claim_pane_width {
+                                ui.advance_cursor_after_rect(ui.max_rect());
+                            }
+                        });
+                        draw_pane_divider(ui);
+                        ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+                            panes.3 = ui.max_rect();
+                            ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), height),
+                                egui::Sense::hover(),
+                            );
+                        });
+                    });
+                });
+        });
+        // `FullOutput` owns a `TexturesDelta` whose `Drop` panics if the deltas
+        // were never applied, and there is no headless pass to apply them in.
+        output.textures_delta.clear();
+        panes
+    }
+
+    /// A pane that draws itself as a positioned child must have the pane claim its
+    /// own width, because `Ui::new_child` reports nothing to the layout that
+    /// allocated it.
+    ///
+    /// This shipped as a full-on overlap of the detail pane on top of the list
+    /// pane. `allocate_ui` advances the cursor, then `scope_dyn` sets it again
+    /// from the child's `min_rect`, which a page that painted itself in a
+    /// grandchild never grows, so the cursor went back to the pane's left edge.
+    /// Both halves are pinned here: the panes must come out disjoint, and
+    /// dropping the claim has to actually break them, or the test proves nothing.
+    #[test]
+    fn a_pane_that_draws_itself_keeps_its_place() {
+        let (rail, list, column, detail) = pane_rects(true);
+        assert!(
+            rail.right() <= list.left(),
+            "the rail at {rail:?} and the list pane at {list:?} overlap"
+        );
+        assert!(
+            list.right() <= detail.left(),
+            "the list pane at {list:?} and the detail pane at {detail:?} overlap"
+        );
+
+        // The spacing that has to look even is content to content across each
+        // boundary, which is the rail's rows to the column and the column to the
+        // detail pane's content. Measuring hairline to nearest content instead
+        // reads uneven (16px on one side, 24px on the other) purely because the
+        // rail and the detail pane lay out flush to their pane edges while the
+        // column is inset, so that metric is the wrong one to design against.
+        let left = column.left() - rail.right();
+        let right = detail.left() - column.right();
+        assert!(
+            (left - right).abs() < f32::EPSILON,
+            "the list pane is spaced {left}px from the rail and {right}px from the detail pane"
+        );
+
+        let (_, list, _, detail) = pane_rects(false);
+        assert!(
+            list.intersects(detail),
+            "an unclaimed list pane at {list:?} was expected to be overrun by the detail pane at {detail:?}"
+        );
+    }
+
+    /// The list pane's content is one column, centred in its pane.
+    ///
+    /// The rows used to be allocated flush against the pane's left edge while
+    /// `LIST_PANE_INSET` was only ever subtracted from their width, so the whole
+    /// of the slack landed on the right: the left boundary read 4px and the
+    /// right one 40px, which is what made the three panes look unevenly spaced.
+    #[test]
+    fn the_list_pane_column_is_centred_in_its_pane() {
+        for allocated in [SIDEBAR_WIDTH, 200.0, 140.0] {
+            let column = list_pane_column(allocated);
+            let left = column.inset;
+            let right = allocated - column.inset - column.width;
+            assert!(
+                (left - right).abs() < f32::EPSILON,
+                "a {allocated}px pane left {left}px beside its column and {right}px on the other side"
+            );
+            assert!(
+                column.inset >= 0.0,
+                "a {allocated}px pane put its column {left}px outside itself"
+            );
+            assert!(
+                column.inset + column.scroll_width() <= allocated,
+                "the {}px scroll area in a {allocated}px pane runs {}px past the pane's edge",
+                column.scroll_width(),
+                column.inset + column.scroll_width() - allocated
+            );
+        }
+    }
+
+    /// The name, the `item_spacing` gap and the two action buttons all come out
+    /// of an overlay row's contents, and the controls are pinned to the right
+    /// edge, so the two sides have to add up to the row's contents exactly.
     #[test]
     fn an_overlay_row_fits_its_pane() {
         let row_width = list_pane_row_width_for(SIDEBAR_WIDTH);
+        let inner_width = row_width - ROW_MARGIN * 2.0;
         let gap = 8.0;
-        let used = overlay_name_width(row_width, gap)
-            + gap * 2.0
-            + OVERLAY_ROW_ACTION_WIDTH * 2.0
-            + OVERLAY_ROW_MARGIN * 2.0;
+        let used = overlay_name_width(inner_width, gap) + gap + super::overlay_controls_width(gap);
         assert!(
-            used <= row_width,
+            used <= inner_width,
+            "an overlay row needs {used}px of contents but the pane offers {inner_width}px"
+        );
+        assert!(
+            used + ROW_MARGIN * 2.0 <= row_width,
             "an overlay row needs {used}px but the pane offers {row_width}px"
         );
     }
 
-    /// The name, the `item_spacing` gap and the count/dot gutter all come out
-    /// of a profile row's width, so forgetting one of them overflows the row.
+    /// The name, the `item_spacing` gap and the count/dot gutter all come out of
+    /// a profile row's contents, so forgetting one of them overflows the row.
     #[test]
     fn a_profile_row_fits_its_pane() {
         let row_width = list_pane_row_width_for(SIDEBAR_WIDTH);
+        let inner_width = row_width - ROW_MARGIN * 2.0;
         let gap = 8.0;
-        let used = profile_name_width(row_width, gap)
-            + gap
-            + PROFILE_ROW_TRAILING
-            + PROFILE_ROW_MARGIN * 2.0;
+        let used = profile_name_width(inner_width, gap) + gap + PROFILE_ROW_TRAILING;
         assert!(
-            used <= row_width,
+            used <= inner_width,
+            "a profile row needs {used}px of contents but the pane offers {inner_width}px"
+        );
+        assert!(
+            used + ROW_MARGIN * 2.0 <= row_width,
             "a profile row needs {used}px but the pane offers {row_width}px"
         );
     }

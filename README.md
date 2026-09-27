@@ -69,9 +69,10 @@ collapsed state plus the paths of the config folder, the profiles folder and
 
 Rows are drawn in the rail's style throughout: no border of their own, filled
 only when selected or hovered, inset inside their fill, all one width with the
-header above them and the footer below, and the two sides of the middle pane
-spaced identically. The profile switcher at the top of the middle pane keeps the
-colours it had when it was an ordinary button, minus the outline.
+header above them and the footer below, and that width is one column centred in
+the middle pane, so its two sides are spaced identically. The profile switcher at
+the top of the middle pane keeps the colours it had when it was an ordinary
+button, minus the outline.
 
 Each profile has two names. The **display name** is what you type and what the
 window title, the switcher and the profile list show
