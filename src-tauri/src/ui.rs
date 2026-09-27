@@ -44,8 +44,13 @@ const GLOBAL_ICON_TRACK_HALF: f32 = 0.35;
 /// Radius of a Global glyph knob, as a fraction of the unit.
 const GLOBAL_ICON_KNOB_RADIUS: f32 = 0.1;
 /// Space kept free at the right of a profile row for its overlay count and the
-/// active dot, so a long name truncates instead of running under them.
+/// active dot, so a long name truncates instead of running under them. The
+/// gutter is two columns: the count, right aligned, and the dot's slot.
 const PROFILE_ROW_TRAILING: f32 = 52.0;
+/// Width of the active profile's dot at the right of a profile row.
+const PROFILE_ROW_DOT_WIDTH: f32 = 12.0;
+/// Gap between a profile row's overlay count and its dot.
+const PROFILE_ROW_COUNT_GAP: f32 = 6.0;
 /// Inner margin of a row in the list pane, which also comes out of its width.
 const ROW_MARGIN: f32 = 4.0;
 /// An overlay row's frame inner margin.
@@ -992,7 +997,7 @@ impl PingApp {
                             // Painted like a rail row: no border, and a fill only
                             // when the row is selected or hovered.
                             let (row_rect, row_response) = ui.allocate_exact_size(
-                                egui::vec2(row_width, OVERLAY_ROW_HEIGHT),
+                                egui::vec2(row_width, list_pane_row_height(OVERLAY_ROW_HEIGHT)),
                                 egui::Sense::click(),
                             );
                             let background = if active {
@@ -1198,7 +1203,7 @@ impl PingApp {
                             // Painted like a rail row: no border, and a fill only
                             // when the row is selected or hovered.
                             let (row_rect, row_response) = ui.allocate_exact_size(
-                                egui::vec2(row_width, PROFILE_ROW_HEIGHT),
+                                egui::vec2(row_width, list_pane_row_height(PROFILE_ROW_HEIGHT)),
                                 egui::Sense::click(),
                             );
                             let background = if is_selected {
@@ -1269,10 +1274,23 @@ impl PingApp {
                                         egui::Sense::hover(),
                                     );
                                     let painter = ui.painter();
+                                    // The gutter is two columns: the count,
+                                    // right aligned against a fixed slot for the
+                                    // active dot. That way the numbers line up
+                                    // down the list and the dot never nudges them.
+                                    let dot_slot = egui::Rect::from_min_max(
+                                        egui::pos2(
+                                            trailing.rect.right() - PROFILE_ROW_DOT_WIDTH,
+                                            trailing.rect.top(),
+                                        ),
+                                        trailing.rect.right_bottom(),
+                                    );
                                     painter.text(
-                                        trailing.rect.left_top()
-                                            + egui::vec2(4.0, trailing.rect.height() / 2.0),
-                                        egui::Align2::LEFT_CENTER,
+                                        egui::pos2(
+                                            dot_slot.left() - PROFILE_ROW_COUNT_GAP,
+                                            trailing.rect.center().y,
+                                        ),
+                                        egui::Align2::RIGHT_CENTER,
                                         count.to_string(),
                                         egui::TextStyle::Small.resolve(ui.style()),
                                         UI_TEXT_SECONDARY,
@@ -1280,7 +1298,7 @@ impl PingApp {
                                     if is_active {
                                         // A dot, because the accent name alone is
                                         // a weak cue in a long list.
-                                        draw_active_dot(painter, trailing.rect, UI_ACCENT);
+                                        draw_active_dot(painter, dot_slot, UI_ACCENT);
                                     }
                                 });
                             }
@@ -1453,33 +1471,27 @@ impl PingApp {
     /// from a button in the footer.
     ///
     /// Painted rather than a `Button`, so the header carries no outline of its
-    /// own and matches the rows below it. Hovering and the open state are the
-    /// only fills, which is the same rule the rail rows use.
+    /// own and matches the rows below it. The fills are the ones the themed
+    /// `Button` used, so it still looks like the control it replaced: the rest
+    /// fill, the hover fill, and the selection while the menu is open.
     fn show_profile_switcher(&mut self, ui: &mut Ui, width: f32) {
         let name = self.active_profile_name();
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::click());
         let background = if self.profile_menu_open {
-            Some(UI_SELECTION)
+            UI_SELECTION
         } else if response.hovered() {
-            Some(UI_SURFACE_ALT)
+            UI_SURFACE_HOVER
         } else {
-            None
+            UI_SURFACE_ALT
         };
-        if let Some(background) = background {
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::same(4), background);
-        }
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), background);
         let arrow = egui::Rect::from_min_max(
             egui::pos2(rect.right() - SWITCHER_TEXT_RIGHT_PAD, rect.top()),
             egui::pos2(rect.right() - SWITCHER_ARROW_PAD, rect.bottom()),
         );
         let text_width = arrow.left() - rect.left() - SWITCHER_TEXT_LEFT_PAD;
-        let color = if self.profile_menu_open {
-            UI_TEXT
-        } else {
-            UI_TEXT_SECONDARY
-        };
         let mut text = egui::text::LayoutJob::default();
         text.wrap.max_width = text_width.max(40.0);
         text.wrap.max_rows = 1;
@@ -1487,16 +1499,16 @@ impl PingApp {
         text.append(
             &name,
             0.0,
-            egui::TextFormat::simple(egui::TextStyle::Button.resolve(ui.style()), color),
+            egui::TextFormat::simple(egui::TextStyle::Button.resolve(ui.style()), UI_TEXT),
         );
         let galley = ui.painter().layout_job(text);
         let text_offset = (rect.height() - galley.size().y) / 2.0;
         ui.painter().galley(
             rect.left_top() + egui::vec2(SWITCHER_TEXT_LEFT_PAD, text_offset),
             galley,
-            color,
+            UI_TEXT,
         );
-        draw_dropdown_arrow(ui.painter(), arrow, color);
+        draw_dropdown_arrow(ui.painter(), arrow, UI_TEXT_SECONDARY);
         let response = response.on_hover_text(config::profile_file_name(&self.active_profile));
         if response.clicked() {
             self.profile_menu_open = !self.profile_menu_open;
@@ -1559,7 +1571,7 @@ impl PingApp {
                     // The other pages have no Save button, so the rail is what
                     // says a draft is waiting on the Overlays page.
                     if !active {
-                        draw_active_dot(ui.painter(), rect, UI_ACCENT);
+                        draw_active_dot(ui.painter(), row_corner_dot_slot(rect), UI_ACCENT);
                     }
                     hint.push_str(" — unsaved changes");
                 }
@@ -2168,6 +2180,16 @@ fn profile_row_label(profile: &config::ProfileEntry, profiles: &[config::Profile
 /// Every one of them goes through here, so they line up with each other and
 /// with the pane edges. The scroll bar's width is always reserved, otherwise
 /// the rows would jump sideways the moment a list outgrew the pane.
+/// The height of a painted list pane row.
+///
+/// A painted rect does not size itself to its contents the way an
+/// `egui::Frame` does, so the margin has to come out of the row's own height.
+/// Without this the child widgets fill the row edge to edge and the buttons
+/// touch the fill.
+fn list_pane_row_height(content_height: f32) -> f32 {
+    content_height + ROW_MARGIN * 2.0
+}
+
 fn list_pane_row_width(pane_width: f32, bar_width: f32) -> f32 {
     (pane_width - LIST_PANE_INSET * 2.0 - bar_width).max(120.0)
 }
@@ -2216,11 +2238,23 @@ fn page_has_detail_footer(page: Page) -> bool {
     }
 }
 
-/// A filled dot in the top right of a row, marking the active profile.
+/// A filled dot centred in the rect it is given, marking the active profile.
+///
+/// The rect decides where the dot lands, so a caller that wants it in a corner
+/// passes a small rect in that corner. Centring it is what keeps it on the same
+/// line as the text beside it.
 fn draw_active_dot(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let radius = 3.5;
-    let center = egui::pos2(rect.right() - radius - 6.0, rect.top() + radius + 6.0);
-    painter.circle_filled(center, radius, color);
+    painter.circle_filled(rect.center(), radius, color);
+}
+
+/// A small rect in the top right corner of `row`, where the rail's unsaved
+/// changes dot goes. Keeping it here means [`draw_active_dot`] can centre.
+fn row_corner_dot_slot(row: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(row.right() - 9.5, row.top() + 9.5),
+        egui::vec2(PROFILE_ROW_DOT_WIDTH, PROFILE_ROW_DOT_WIDTH),
+    )
 }
 
 /// A single-line profile name editor with a submit and a cancel button.
@@ -2945,13 +2979,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, list_pane_row_width_for,
-        overlay_name_width, page_has_detail_footer, profile_name_width, profile_row_label,
-        rail_width, selected_overlay_for_border, window_title, Page, DETAIL_FOOTER_HEIGHT,
-        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
-        OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_MARGIN, PAGES, PANE_GAP, PANE_MARGIN,
-        PROFILE_ROW_MARGIN, PROFILE_ROW_TRAILING, RAIL_WIDTH, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
-        STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        can_switch_profile, config_notice_status, config_notices_status, list_pane_row_height,
+        list_pane_row_width_for, overlay_name_width, page_has_detail_footer, profile_name_width,
+        profile_row_label, rail_width, selected_overlay_for_border, window_title, Page,
+        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
+        LIST_PANE_INSET, OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_MARGIN, PAGES, PANE_GAP,
+        PANE_MARGIN, PROFILE_ROW_MARGIN, PROFILE_ROW_TRAILING, RAIL_WIDTH, SCROLL_BAR_RESERVE,
+        SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use crate::config::{ConfigNotice, ProfileEntry};
 
@@ -2978,6 +3012,20 @@ mod tests {
         assert!(
             scrolling >= 200.0,
             "detail pane would scroll in only {scrolling}px at the minimum window size"
+        );
+    }
+
+    /// A painted row is taller than its contents by the margin on each side.
+    ///
+    /// This is not a restatement of the constants: a painted rect does not size
+    /// itself the way an `egui::Frame` does, so leaving the margin out made
+    /// every row's buttons sit flush against the fill.
+    #[test]
+    fn a_painted_row_carries_its_margin() {
+        let row = list_pane_row_height(40.0);
+        assert!(
+            (row - 48.0).abs() < f32::EPSILON,
+            "a row around 40px of content came out {row}px tall"
         );
     }
 

@@ -177,9 +177,17 @@
   left and the version on the right.
 - Both panes are a scrolling area above a fixed footer, so a pane's own actions
   sit next to the content they act on instead of a pane away in the status bar.
-- A profile row reserves a gutter for its overlay count and active dot, so a long
-  display name truncates rather than running underneath them. The name, the gap
-  between widgets and the gutter all come out of the row's width.
+- A row in the list pane is its contents plus the same margin on every side, so
+  the controls inside it never sit flush against the fill. A profile row reserves
+  a gutter for its overlay count and active dot, so a long display name
+  truncates rather than running underneath them. The gutter is two columns: the
+  count, right aligned, and the active profile's dot in a fixed slot after it, so
+  the numbers line up down the list and the dot never moves them. The name, the
+  gap between widgets and the gutter all come out of the row's width.
+- The profile switcher at the head of the list pane carries the same fills the
+  control it replaced had: a resting fill, a hover fill, and the selection while
+  its menu is open, with the profile name in the normal text colour. It has no
+  outline of its own, like the rows.
 - Rows in the list pane carry no border of their own. Like the rail's rows they
   are painted: the selected row gets the selection fill, a hovered row a
   muted fill, and an untouched row nothing at all. The rail is the reference,

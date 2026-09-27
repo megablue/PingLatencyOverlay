@@ -100,6 +100,11 @@ Installer (run from the repository root):
   Allocate the row with `allocate_exact_size`, `rect_filled` the background
   yourself, then `ui.new_child(egui::UiBuilder::new().max_rect(..))` for the
   contents. Fill only when selected or hovered; an untouched row is transparent.
+- A painted row must be allocated at `list_pane_row_height(contents)`, not at the
+  content height. `egui::Frame` sizes *itself* to its contents plus its margin, a
+  `rect_filled` does not, so a row allocated at the content height gave the child
+  `Ui` less room than it asked for and every button ended up flush against the
+  fill. `a_painted_row_carries_its_margin` pins the rule.
 - Everything in the list pane derives its width from `list_pane_row_width_for`:
   the header, the rows, the scroll area and the footer. A hardcoded
   `SIDEBAR_WIDTH - n` there is how the header, the rows and the pane edge ended
