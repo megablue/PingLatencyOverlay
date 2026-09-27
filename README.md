@@ -1,37 +1,117 @@
 # PingLatencyOverlay
 
-A lightweight Windows tray application that turns ICMP and TCP latency measurements into always-on-top, transparent graphs. Overlays are frameless and click-through, run locally without telemetry, and can be placed on any monitor with configurable timing, scale, orientation, colors, and startup effects.
+Live network latency as a small graph that sits on top of your screen. Always
+visible, click-through, and out of the way.
 
-## Installer
+<!-- Add a screenshot here: the Config window. -->
+<!-- Add a screenshot here: an overlay above a game or a video call. -->
 
-Build the release executable first, then from the repository root:
+## Why you might want it
 
-```powershell
-npm run bundle
-```
+- **Always-on-top graphs** that never steal your clicks. The overlay is
+  click-through, so you can keep playing or working underneath it.
+- **Genuinely transparent.** Set the background to fully invisible and you are
+  left with just the line, or a soft tinted panel if you prefer.
+- **Ping or TCP.** Measure ICMP latency, or the time it takes to complete a TCP
+  handshake with a host and port — useful when ICMP is filtered or lying.
+- **Any monitor, any corner.** Pick the spot with a small on-screen position
+  picker, then nudge it with independent horizontal and vertical margins.
+- **Tuned to your taste.** Line color, timeout color, background color and
+  opacity, graph size, how much history to show, and which latency counts as the
+  top of the graph.
+- **Start-up flourish if you want it.** Fade the line in, or run a border effect
+  when an overlay comes up.
+- **No telemetry, no account, no cloud.** Everything stays on your machine.
+- **No Administrator rights.** It runs as you do.
 
-This uses NSIS and creates:
+## Install
 
-```text
-src-tauri/target/release/bundle/nsis/PingLatencyOverlay_<version>_x64-setup.exe
-```
+Grab the installer for your machine from the
+[Releases page](https://github.com/megablue/PingLatencyOverlay/releases) — pick
+**x64** for most PCs, **ARM64** for Windows on Arm. One installer, nothing else
+to install.
 
-The build version is derived from the current Git commit count in the form
-`MAJOR.MINOR.<commit-count>` and is shown in the Config window. If Git metadata
-is unavailable, the package version from `src-tauri/Cargo.toml` is used.
+The app starts in the system tray, so it will not get in your way while you set
+it up.
 
-For ARM64, install the MSVC ARM64 build tools and Rust target, build with
-`cargo build --release --target aarch64-pc-windows-msvc`, then run:
+## Getting started
 
-```powershell
-.\scripts\build-nsis.ps1 -Arch arm64
-```
+1. **Open the Config window.** Left-click the tray icon to open it. Right-click
+   for a menu with **Pause** / **Resume**, **Config** and **Exit**.
+2. **Add an overlay.** Press **Add overlay** in the list pane. Give it a name you
+   will recognise later.
+3. **Choose a protocol and a target.**
+   - *ICMP* — enter a hostname or IP address. This is the same measurement
+     `ping` makes, and it does not need Administrator.
+   - *TCP* — enter a hostname or IP **and a port**. This measures the time to
+     complete a connection handshake, which is a better signal than ICMP on
+     networks that deprioritise or block it.
+4. **Set the timeout.** Anything slower than this is drawn in the timeout color
+   rather than as a latency value, so a stalled probe looks different from a
+   slow one.
+5. **Press Save.** Your overlay appears on screen within a second.
 
-A separate installer is required for each architecture.
+Everything is sampled once a second.
 
-## Configuration
+### The settings that matter
 
-Settings are stored in profiles:
+| Setting | What it does |
+| --- | --- |
+| **Name** | Shown in the list. Purely for your benefit. |
+| **Protocol** | ICMP (ping) or TCP (connect). |
+| **Target host / IP** | Hostname or address to probe. |
+| **Port (TCP only)** | Port to connect to. |
+| **Timeout (ms)** | Above this, the sample is drawn as a timeout instead of a latency. |
+| **Sampling (sec)** | How much history the graph holds. |
+| **X axis scale** | How many seconds each pixel of width covers. Lower means finer detail over a shorter span. |
+| **Y axis height** | Height of the overlay in pixels. |
+| **Latency Ceiling** | The latency that reaches the top of the graph. Values above it clamp. |
+| **Orientation** | Rotates the graph anticlockwise, so 90° makes time run bottom-to-top. |
+| **Mirrored** | Flips the graph. |
+| **Smooth rendering** | Interpolates between samples instead of stepping. |
+| **Smooth FPS** | How often the smoothed graph redraws. |
+| **Line color** | The latency trace. |
+| **Timeout color** | The trace for samples that timed out. |
+| **Background color** / **Background opacity** | The panel behind the graph. Fully transparent gives you a bare line on a bare screen. |
+| **Position** | A small picker showing the screen. Click where you want the overlay. See below. |
+| **Horizontal / Vertical margin (px)** | Nudges the overlay away from its anchor. |
+| **Enabled** | Turns probing on or off for this overlay without deleting it. |
+
+There are also start-up options — **Cosmetic Startup Prefill**, its animation
+length, and a **Startup border effect** with its own timing — if you want the
+overlay to announce itself when it appears.
+
+## Positioning an overlay
+
+The **Position** control shows a small map of the screen. Click the spot you
+want, and the overlay anchors to whichever of the nine positions is nearest, so
+it sits against that edge of the work area and stays clear of the taskbar.
+
+`Horizontal margin` and `Vertical margin` then nudge it away from that anchor.
+Both start at `0`. On an edge anchor, positive values move *inward* and negative
+values move *outward*; on a centred axis, positive moves right or down. Negative
+values can push an overlay off the work area entirely, which is sometimes what
+you want for a second monitor.
+
+## Profiles
+
+A profile is a complete, named set of overlays. Use them to keep separate setups
+for separate situations — home and work, or a game versus a video call — and
+switch between them without rebuilding anything each time.
+
+- **Switch** from the menu at the top of the list pane, or from the **Profiles**
+  page.
+- **Create, rename, duplicate and delete** on the **Profiles** page.
+- **Display names do not have to be unique.** Two profiles can both be called
+  *Work*; they simply get separate files behind the scenes.
+- The profile you were last using is remembered and reloaded at the next launch.
+- You cannot switch profiles while you have unsaved edits. Press **Save** or
+  **Discard** first — the app will tell you when it is blocking you.
+
+**Save** and **Discard** live in a fixed bar under the right-hand pane, so they
+sit next to the settings they write.
+
+## Where your settings live
 
 ```text
 %USERPROFILE%\.config\.PingLatencyOverlay\
@@ -41,106 +121,50 @@ Settings are stored in profiles:
     └── profile_work.json
 ```
 
-Each profile holds one complete set of overlays. The switcher at the top of the
-list pane opens the profile menu, which switches between them and links to the
-Profiles page, where profiles are created, renamed, duplicated and deleted.
-**Save** and **Discard** sit in a sticky footer under the right-hand pane, so
-they sit right next to the settings they write, and **Save** writes to the
-profile that is currently active. The footer belongs to the pages that stage a
-draft, so the Profiles page has none: it acts on profile files immediately, and
-while you have unsaved overlay edits it says so and dots the Overlays row in the
-rail. The active profile is remembered in
-`globalconfig.json` as `activeProfile` together with the file name in
-`activeProfileFile`. Those two keys are the only record of the active profile:
-the app loads that file on startup, and if it has been deleted or renamed away it
-falls back to the `default` profile instead of picking another one on its own.
+Plain JSON, one file per profile. If you are upgrading from a version that used a
+single `config.json`, it is migrated for you on first launch.
 
-The window itself is three panes and a status bar. The leftmost **rail** switches
-between the **Overlays**, **Profiles** and **Global** pages and collapses to
-icons only; the middle pane lists what the current page is about, headed by the
-profile switcher on the Overlays page and by the profile list on the Profiles
-page; the right pane shows the detail, and a pane's own actions sit in a fixed
-footer under its scrolling list. Selecting a profile in the list only selects it — the **Profiles**
-page has a separate **Switch to this profile** button, because switching is
-refused while you have unsaved edits. The **Global** page has no list of its
-own: it uses the full width for app-wide preferences, currently the rail's
-collapsed state plus the paths of the config folder, the profiles folder and
-`globalconfig.json`.
+## For contributors
 
-Rows are drawn in the rail's style throughout: no border of their own, filled
-only when selected or hovered, inset inside their fill, all one width with the
-header above them and the footer below, and that width is one column centred in
-the middle pane, so its two sides are spaced identically. The profile switcher at
-the top of the middle pane keeps the colours it had when it was an ordinary
-button, minus the outline.
+<details>
+<summary>Building and running from source</summary>
 
-Each profile has two names. The **display name** is what you type and what the
-window title, the switcher and the profile list show
-(`PingLatencyOverlay - Current Profile: Work VPN`); it is stored in the profile
-file as `profileName` and does not have to be unique. The **id** is the file
-name `profile_<id>.json`, where the id is lowercased and reduced to letters,
-digits, `-` and `_`. Because only the id has to be unique, creating or renaming
-a profile never overwrites another one: a taken id gets a postfix, so two
-profiles named *Work VPN* live in `profile_work.json` and
-`profile_work_2.json`. Profiles saved before names existed are given one
-derived from their id on the next launch.
-
-**Save** and **Discard** are the two ways to resolve pending edits: Save writes
-them to the active profile, and Discard reloads it from disk. Switching to
-another profile is refused until one of them is used.
-
-An existing `%USERPROFILE%\.config\.PingLatencyOverlay\config.json` is
-validated and moved to `profiles\profile_default.json` on the first launch, and
-is only deleted once the profile copy is in place. A file that cannot be read
-is kept where it is and the reason is shown in the status bar. When `config.json`
-is missing, a legacy `%USERPROFILE%\.PingLatencyOverlay\config.json` is
-migrated first; that legacy directory is removed only when `config.json` was its
-only entry, so any other user files are preserved.
-
-## Positioning
-
-Each overlay uses a work-area anchor with independent signed screen-axis
-offsets. `Horizontal margin` and `Vertical margin` default to `0` pixels.
-On centered anchors, positive values move right/down and negative values move
-left/up. On edge-facing anchors, positive values move inward from the work-area
-edge and negative values move outward. For example, `CenterLeft` with
-`horizontal = 0` and `vertical = 0` sits at the left edge and vertically
-centered. Negative values may move an overlay outside the work area.
-
-Margins refer to screen axes, even when the graph orientation is rotated.
-Existing configurations using the old `marginPx` value are migrated relative
-to each overlay's current anchor.
-
-## Build and run
-
-From `src-tauri/`:
+Requires the MSVC toolchain and Build Tools. From `src-tauri/`:
 
 ```powershell
-cargo run
-cargo build --release
+cargo run                  # development build
+cargo run -- --show-config # ...and open the Config window immediately
+cargo build --release      # optimised standalone executable
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The release executable is written to:
+The executable is written to `src-tauri\target\release\ping-latency-overlay.exe`.
 
-```text
-src-tauri/target/release/ping-latency-overlay.exe
+To build an installer, commit first — the version number comes from the Git
+commit count — then from the repository root:
+
+```powershell
+npm run icons
+npm run bundle
 ```
 
-The app starts in tray mode. Left-click the tray icon to open Config; right-click
-for Start/Pause, Config, and Exit. For development, `cargo run -- --show-config`
-opens Config immediately.
+ARM64 needs the ARM64 build tools and Rust target:
 
-The config editor is the only egui window. Overlays are independent native
-Win32 layered windows, so their alpha is composited by Windows rather than by a
-second GPU renderer. This keeps transparent/partial backgrounds reliable and
-avoids allocating a renderer for every overlay.
+```powershell
+cargo build --release --target aarch64-pc-windows-msvc
+.\scripts\build-nsis.ps1 -Arch arm64
+```
+
+Further detail lives in [`AGENTS.md`](AGENTS.md) for contributors and
+[`docs/SPEC.md`](docs/SPEC.md) for the full behaviour specification.
+
+</details>
 
 ## License
 
-PingLatencyOverlay is free software released under the GNU General Public License,
-version 3 only (`GPL-3.0-only`). Copyright (C) 2026 megablue.
+PingLatencyOverlay is free software released under the GNU General Public
+License, version 3 only (`GPL-3.0-only`). Copyright (C) 2026 megablue.
 
 The complete license text is available in [`LICENSE`](LICENSE). Source code for
 released versions is available from the corresponding GitHub release/tag.

@@ -216,3 +216,7 @@
 - Target architectures: x64 and ARM64.
 - Installer: native NSIS (`-setup.exe`), one per architecture.
 - The application is a standalone Rust executable and does not require WebView2.
+- The build version is `MAJOR.MINOR.<git-commit-count>`, taken from Git at
+  packaging time, and is the version shown in the Config window. If Git metadata
+  is unavailable, the version in `src-tauri/Cargo.toml` is used. Run the packaging
+  step *after* committing, or the installer reports the previous commit's count.
