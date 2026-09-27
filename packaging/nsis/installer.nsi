@@ -47,14 +47,24 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 !define MUI_ICON "${APP_ICON}"
 !define MUI_UNICON "${APP_ICON}"
 !define MUI_ABORTWARNING
-!define MUI_COMPONENTS_PAGE
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION LaunchApplication
 !define MUI_FINISHPAGE_RUN_TEXT "Launch PingLatencyOverlay"
 
+; MUI2 has exactly two checkboxes on the finish page and no way to add a
+; third, so the "show readme" slot is reused as the desktop shortcut option.
+; MUI_FINISHPAGE_SHOWREADME_FUNCTION makes it call our function instead of
+; opening a file, and MUI_FINISHPAGE_SHOWREADME_TEXT replaces the "Show README"
+; caption. The name is misleading, hence this note. Do not try to reach the
+; finish page with MUI_PAGE_CUSTOMFUNCTION_SHOW instead: that define is not
+; page-scoped and Pages.nsh undefines it after the first page that uses it, so
+; it would fire on the welcome page and never reach here.
+!define MUI_FINISHPAGE_SHOWREADME
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "Create a desktop shortcut"
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION CreateDesktopShortcut
+
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
-!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -82,10 +92,6 @@ Section "Install"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
 SectionEnd
 
-Section "Desktop shortcut" SEC_DESKTOP_SHORTCUT
-  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay.exe"
-SectionEnd
-
 Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\ping-latency-overlay.exe"
@@ -98,4 +104,20 @@ SectionEnd
 
 Function LaunchApplication
   Exec '"$INSTDIR\ping-latency-overlay.exe"'
+FunctionEnd
+
+; Called by MUI from the finish page when the shortcut checkbox is ticked.
+Function CreateDesktopShortcut
+  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay.exe"
+FunctionEnd
+
+; A silent install never shows the finish page, so the checkbox is never read
+; and the function above never runs. Create the shortcut anyway, matching the
+; box being ticked by default. .onInstSuccess fires once the sections are done,
+; which is before the finish page, so the ${Silent} guard keeps this out of the
+; way of a GUI install where the user still has the checkbox to answer.
+Function .onInstSuccess
+  ${If} ${Silent}
+    Call CreateDesktopShortcut
+  ${EndIf}
 FunctionEnd

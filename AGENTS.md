@@ -324,6 +324,23 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
 - `src-tauri/Cargo.toml` uses eframe with the `glow` renderer for the one config
   window and `tiny-skia` only for software overlay pixels. Do not add WebView2
   or Tauri back into the native branch.
+- The installer is hand-written NSIS (`packaging/nsis/installer.nsi`, driven by
+  `scripts/build-nsis.ps1`). MUI2 gives the finish page exactly **two** checkbox
+  slots, and there is no way to add a third. `MUI_FINISHPAGE_SHOWREADME` is
+  reusable as a generic second one: set `MUI_FINISHPAGE_SHOWREADME_TEXT` and
+  `MUI_FINISHPAGE_SHOWREADME_FUNCTION`, and MUI calls the function instead of
+  `ExecShell open`ing a file. That is how the desktop shortcut is offered, and
+  the name is misleading, so the script says so at the definition.
+- Two NSIS traps, both of which cost time here. `MUI_PAGE_CUSTOMFUNCTION_PRE`,
+  `_SHOW` and `_LEAVE` are **not page-scoped**: `Pages.nsh` `!undef`s them after
+  the first page that reaches the insertion point, so they fire on the welcome
+  page and can never reach the finish page. And NSIS has no `.onInstDone` — the
+  callback is `.onInstSuccess`. A misspelled callback still compiles, but NSIS
+  emits `warning 6010: ... not referenced - zeroing code out` and **deletes the
+  body**, so the silent-install path quietly did nothing while the build looked
+  green. Treat warning 6010 as a hard failure when packaging. Relatedly,
+  `${Silent}` is a LogicLib *condition*, so it is `${If} ${Silent}`, never
+  `${If} ${Silent} == 1`.
 - The README is for users. Implementation detail belongs in `docs/SPEC.md` for
   behavior and here for working knowledge, and the user must be consulted before
   technical detail is added to the README.

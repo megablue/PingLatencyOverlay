@@ -248,7 +248,15 @@
 ## Packaging
 - Target architectures: x64 and ARM64.
 - Installer: native NSIS (`-setup.exe`), one per architecture.
+- The installer runs four pages: welcome, destination folder, install, and
+  finish. There is no components page.
+- The finish page carries two ticked checkboxes: **Launch PingLatencyOverlay**
+  and **Create a desktop shortcut**. A silent install (`/S`) never shows the
+  finish page, so it creates the desktop shortcut to match the default.
 - The application is a standalone Rust executable and does not require WebView2.
+- The GPLv3 text ships as `LICENSE` in the install directory beside the
+  executable. It is installed unconditionally, not as an option, and the
+  uninstaller removes it.
 - The build version is `MAJOR.MINOR.<git-commit-count>`, taken from Git at
   packaging time, and is the version shown in the Config window. If Git metadata
   is unavailable, the version in `src-tauri/Cargo.toml` is used. Run the packaging
