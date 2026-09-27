@@ -53,18 +53,16 @@ const GLOBAL_ICON_KNOB_RADIUS: f32 = 0.1;
 const ABOUT_ICON_ROWS: [(f32, f32); 2] = [(-0.2, 0.0), (0.16, 0.16)];
 /// Radius of the About glyph's dot, as a fraction of the unit.
 const ABOUT_ICON_DOT_RADIUS: f32 = 0.12;
-/// The About page's repository, shown as a read-only row.
+/// The About page's repository. This is the one line that opens anything: it is
+/// the only link, and clicking it hands the address to Windows.
 const ABOUT_REPOSITORY: &str = "https://github.com/megablue/PingLatencyOverlay";
-/// The author's own page, linked from the About page.
-const ABOUT_AUTHOR_URL: &str = "https://github.com/megablue";
-/// Where the About page's licence name links to. The licence itself is not
-/// bundled with the app, so the link goes to the canonical text online.
-const ABOUT_LICENCE_URL: &str = "https://www.gnu.org/licenses/gpl-3.0.html";
+/// Edge length of the app icon shown above the About page's text.
+const ABOUT_LOGO_SIZE: f32 = 128.0;
 /// Space above the About page's centred column, so it does not sit hard against
 /// the top of the pane.
 const ABOUT_TOP_GAP: f32 = 12.0;
-/// Extra air before the About page's link block, which reads as a group
-/// separate from the name, the tagline and the version above it.
+/// Extra air before a new group of lines, so the name, tagline and version read
+/// as one block and the link and copyright read as another.
 const ABOUT_GROUP_GAP: f32 = 10.0;
 
 /// The app version as the About page shows it, in the `v0.1.x` form.
@@ -102,53 +100,53 @@ struct AboutLine {
     text: String,
     size: f32,
     kind: AboutKind,
+    /// Whether this line starts a new group and so takes the larger gap above
+    /// it. Carried per line rather than decided by index, so inserting or
+    /// removing a line cannot quietly move the wrong break.
+    group_start: bool,
 }
 
 /// The text of every line on the About page, in order.
 ///
 /// The page used to be a labelled table with accent section headers, which read
-/// as settings rather than as an About box. It is one centred column now, and
-/// the facts are unchanged: what this is, which version, where the source is,
-/// who wrote it, under what licence. The copyright carries no year on purpose,
-/// so nothing here can go stale between releases.
+/// as settings rather than as an About box. It is one centred column now. The
+/// facts are the ones the page has always carried: what this is, which version,
+/// where the source is, who wrote it, under what licence. The copyright carries
+/// no year on purpose, so nothing here can go stale between releases.
+///
+/// Only the repository is clickable. The licence is named in words and not
+/// linked, because the text is not bundled with the app and a link to someone
+/// else's copy of it invites the reader to trust that copy.
 fn about_page_lines() -> Vec<AboutLine> {
     let body = ui_text_size();
+    let line = |text: &str, size: f32, kind: AboutKind, group_start: bool| AboutLine {
+        text: text.to_string(),
+        size,
+        kind,
+        group_start,
+    };
     vec![
-        AboutLine {
-            text: "PingLatencyOverlay".to_string(),
-            size: body + 12.0,
-            kind: AboutKind::Text,
-        },
-        AboutLine {
-            text: "A small overlay that shows live network latency.".to_string(),
-            size: body,
-            kind: AboutKind::Text,
-        },
-        AboutLine {
-            text: app_version(),
-            size: body + 4.0,
-            kind: AboutKind::Text,
-        },
-        AboutLine {
-            text: "github.com/megablue/PingLatencyOverlay".to_string(),
-            size: body,
-            kind: AboutKind::Link(ABOUT_REPOSITORY),
-        },
-        AboutLine {
-            text: "github.com/megablue".to_string(),
-            size: body,
-            kind: AboutKind::Link(ABOUT_AUTHOR_URL),
-        },
-        AboutLine {
-            text: "Copyright \u{a9} Evert Chin".to_string(),
-            size: body,
-            kind: AboutKind::Text,
-        },
-        AboutLine {
-            text: "GPL-3.0-only".to_string(),
-            size: body,
-            kind: AboutKind::Link(ABOUT_LICENCE_URL),
-        },
+        line("PingLatencyOverlay", body + 12.0, AboutKind::Text, false),
+        line(
+            "A small overlay that shows live network latency.",
+            body,
+            AboutKind::Text,
+            false,
+        ),
+        line(&app_version(), body + 4.0, AboutKind::Text, false),
+        line(
+            "Github: github.com/megablue/PingLatencyOverlay",
+            body,
+            AboutKind::Link(ABOUT_REPOSITORY),
+            true,
+        ),
+        line("Copyright \u{a9} Evert Chin", body, AboutKind::Text, true),
+        line(
+            "LICENSE: GNU General Public License v3.0",
+            body,
+            AboutKind::Text,
+            false,
+        ),
     ]
 }
 
@@ -166,13 +164,23 @@ fn about_page_lines() -> Vec<AboutLine> {
 /// For `Layout::top_down` the main axis is vertical, so `Align::Center` is the
 /// cross axis and centres each line horizontally, which is what a centred
 /// column needs.
-fn about_page_column(ui: &mut Ui) {
+fn about_page_column(ui: &mut Ui, logo: &egui::TextureHandle) {
     ui.add_space(ABOUT_TOP_GAP);
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        {
+            // `fit_to_exact_size` is what scales a texture down; without it the
+            // image is drawn at its own 256px, which is larger than this pane
+            // has to give.
+            ui.add(
+                egui::Image::new(logo)
+                    .fit_to_exact_size(egui::vec2(ABOUT_LOGO_SIZE, ABOUT_LOGO_SIZE)),
+            );
+            ui.add_space(ABOUT_GROUP_GAP);
+        }
         for (index, line) in about_page_lines().iter().enumerate() {
-            if index == 3 {
-                // A little more air before the links than between the rest, so
-                // the block reads as name, what it is, version, then contact.
+            if line.group_start {
+                // More air between groups than between lines within one, so the
+                // name, tagline and version read as a block of their own.
                 ui.add_space(ABOUT_GROUP_GAP);
             } else if index > 0 {
                 ui.add_space(2.0);
@@ -188,6 +196,9 @@ fn about_page_column(ui: &mut Ui) {
                     ui.label(RichText::new(&line.text).font(font).color(colour));
                 }
                 AboutKind::Link(url) => {
+                    // A `Hyperlink` only emits `OutputCommand::OpenUrl`, and
+                    // eframe's native runner ignores it, so the click is
+                    // handled by `open_requested_urls` at the end of the frame.
                     ui.add(egui::Hyperlink::from_label_and_url(
                         RichText::new(&line.text).font(font),
                         url,
@@ -197,6 +208,73 @@ fn about_page_column(ui: &mut Ui) {
         }
     });
 }
+/// The address an egui output command wants opened, if it wants one opened.
+///
+/// `egui::Hyperlink` does not open anything itself. On a click it emits
+/// `OutputCommand::OpenUrl` and leaves it to the host, and eframe only honours
+/// that command in its **web** runner: `src/native/*.rs` in eframe 0.36.2
+/// contains no `OutputCommand` handling at all, so on a native glow window the
+/// command is dropped and a link is inert. That is why the app drains the
+/// command itself.
+///
+/// Pure, so a test can hold the mapping without opening a browser.
+fn requested_url(command: &egui::OutputCommand) -> Option<&str> {
+    match command {
+        egui::OutputCommand::OpenUrl(open) => Some(open.url.as_str()),
+        _ => None,
+    }
+}
+
+/// Hands a URL to Windows, which routes it to whatever the user has set as
+/// their default handler for `https`.
+///
+/// `ShellExecuteW` is that API. Returns `false` only when the call reports
+/// failure, in which case the caller says so in the status bar: a link that
+/// silently does nothing is exactly the bug this replaced.
+fn open_url_in_browser(url: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // `ShellExecuteW` takes LPCWSTR, so the URL needs a NUL-terminated UTF-16
+    // buffer, not a Rust `&str`.
+    let wide: Vec<u16> = std::ffi::OsStr::new(url)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: `wide` is NUL-terminated and outlives the call, and every pointer
+    // argument is either null or a valid pointer into it. The window handle is
+    // null because there is no parent window to associate the launched process
+    // with, which is the documented way to hand a document to the shell.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW returns a value greater than 32 on success; anything at or
+    // below that is one of the documented error codes. `HINSTANCE` is a pointer
+    // in windows-sys, so it is compared as an integer.
+    result as isize > 32
+}
+
+/// Decodes the bundled app icon into a texture for the About page.
+///
+/// Reuses `tray::app_icon`, which already decodes `icons/icon.png` for the
+/// tray and the window, so there is one copy of the artwork in the build and
+/// one place that reads it. `IconData` is already raw RGBA in row order, which
+/// is exactly what `ColorImage::from_rgba_unmultiplied` wants.
+fn about_logo_texture(ctx: &Context) -> egui::TextureHandle {
+    let icon = tray::app_icon();
+    let size = [icon.width as usize, icon.height as usize];
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, &icon.rgba);
+    ctx.load_texture("about_logo", image, egui::TextureOptions::LINEAR)
+}
+
 /// Space kept free at the right of a profile row for its overlay count and the
 /// active dot, so a long name truncates instead of running under them. The
 /// gutter is two columns: the count, right aligned, and the dot's slot.
@@ -604,6 +682,8 @@ pub struct PingApp {
     position_picker: PositionPicker,
     _runtime: Option<tokio::runtime::Runtime>,
     shutdown_state: ShutdownState,
+    /// The app icon, decoded once and shown above the About page's text.
+    about_logo: egui::TextureHandle,
 }
 
 impl PingApp {
@@ -677,6 +757,7 @@ impl PingApp {
             position_picker,
             _runtime: Some(runtime),
             shutdown_state: ShutdownState::Running,
+            about_logo: about_logo_texture(&cc.egui_ctx),
         };
         app.sync_window_title(&cc.egui_ctx);
         cc.egui_ctx.request_repaint();
@@ -1774,8 +1855,37 @@ impl PingApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                about_page_column(ui);
+                about_page_column(ui, &self.about_logo);
             });
+    }
+
+    /// Opens any URL the frame's widgets asked for.
+    ///
+    /// Drained at the END of the UI pass, not in `logic`, because the command is
+    /// produced while the About page is being drawn; `logic` runs before the
+    /// panes are laid out, so draining there would open the link a frame late.
+    fn open_requested_urls(&mut self, ctx: &Context) {
+        let mut requested: Vec<String> = Vec::new();
+        ctx.output_mut(|output| {
+            output.commands.retain(|command| {
+                if let Some(url) = requested_url(command) {
+                    requested.push(url.to_string());
+                    false
+                } else {
+                    true
+                }
+            });
+        });
+        for url in requested {
+            // Reported either way, so a click is never silently ignored. A
+            // successful launch leaves the URL in the status bar too, which is
+            // the only confirmation a user gets that the click was read at all.
+            self.status = if open_url_in_browser(&url) {
+                format!("Opened {url}.")
+            } else {
+                format!("Could not open {url}.")
+            };
+        }
     }
 
     /// Profile switcher menu shown under the pane 2 header.
@@ -2180,6 +2290,9 @@ impl PingApp {
                     });
                 });
                 self.show_status_bar(ui);
+                // Last, so a click on the About page's link is read in the same
+                // frame that drew it.
+                self.open_requested_urls(ui.ctx());
             });
         });
     }
@@ -3631,14 +3744,14 @@ mod tests {
         list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_count_label,
         overlay_name_width, overlay_row_contents, page_has_detail_footer, page_has_list_pane,
         pending_edits, profile_name_width, profile_row_contents, profile_row_label, rail_width,
-        row_inner, selected_overlay_for_border, sync_profile_cache, toggled_selection,
-        ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot, ABOUT_AUTHOR_URL,
-        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_LICENCE_URL, ABOUT_REPOSITORY,
-        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
-        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
-        OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
-        RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
-        STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        requested_url, row_inner, selected_overlay_for_border, sync_profile_cache,
+        toggled_selection, ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot,
+        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
+        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
+        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES,
+        PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
+        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
+        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use crate::config::{Anchor, ConfigNotice, ProfileEntry};
     use eframe::egui;
@@ -4099,14 +4212,15 @@ mod tests {
         }
     }
 
-    /// Every clickable About line opens a real web address.
+    /// The repository is the only thing on the About page that opens anything.
     ///
     /// The display text drops the `https://` prefix, so a typo in a URL would
     /// not be visible on the page at all; only the click would fail, and then in
     /// the user's browser rather than in this app. Checking the constants here
-    /// catches that, and also catches a line quietly losing its link.
+    /// catches that. The licence is named in words and deliberately not linked,
+    /// so this also fails if a line quietly becomes or stops being clickable.
     #[test]
-    fn about_page_links_open_a_web_address() {
+    fn only_the_repository_is_a_link() {
         let lines = about_page_lines();
         let linked: Vec<&str> = lines
             .iter()
@@ -4117,7 +4231,7 @@ mod tests {
             .collect();
         assert_eq!(
             linked,
-            vec![ABOUT_REPOSITORY, ABOUT_AUTHOR_URL, ABOUT_LICENCE_URL],
+            vec![ABOUT_REPOSITORY],
             "the About page's links changed, so check the text says what each one opens"
         );
         for url in linked {
@@ -4126,6 +4240,41 @@ mod tests {
                 "{url} is shown on the About page and would not open"
             );
         }
+    }
+
+    /// A click on a link reaches the opener.
+    ///
+    /// `requested_url` is the whole reason the About page's link works. egui
+    /// emits `OutputCommand::OpenUrl` and expects the host to act on it, and
+    /// eframe's **native** runner has no `OutputCommand` handling at all — only
+    /// its web runner does — so without this mapping the link is inert. That
+    /// shipped once: the page claimed its links opened a browser, and they did
+    /// nothing at all.
+    #[test]
+    fn a_link_click_becomes_a_url_to_open() {
+        let open = egui::OpenUrl::same_tab(ABOUT_REPOSITORY);
+        assert_eq!(
+            requested_url(&egui::OutputCommand::OpenUrl(open)),
+            Some(ABOUT_REPOSITORY),
+            "a clicked link must reach the opener as a URL"
+        );
+        // The other command egui can emit is a clipboard copy, and it must be
+        // left in place: draining the list must not swallow the app's other
+        // output. `OutputCommand` has exactly three variants, so covering
+        // `CopyText` and `CopyImage` covers everything that is not a URL.
+        assert_eq!(
+            requested_url(&egui::OutputCommand::CopyText("copied".to_string())),
+            None,
+            "a command that is not about a URL must be left in place"
+        );
+        assert_eq!(
+            requested_url(&egui::OutputCommand::CopyImage(egui::ColorImage::new(
+                [1, 1],
+                vec![egui::Color32::TRANSPARENT],
+            ))),
+            None,
+            "a command that is not about a URL must be left in place"
+        );
     }
 
     /// The list pane's content is one column, centred in its pane.

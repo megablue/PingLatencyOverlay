@@ -218,6 +218,20 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   correct, so the counter-example is right here in the file. Used by
   `about_page_column`. For `Layout::top_down` the main axis is vertical, so
   `Align::Center` is the cross axis and centres each line horizontally.
+- **eframe's NATIVE runner ignores `egui::OutputCommand::OpenUrl`,** so a
+  `Hyperlink` on a native window is inert. egui emits the command and leaves it
+  to the host; only eframe's *web* runner acts on it — in eframe 0.36.2
+  `src/native/*.rs` contains no `OutputCommand` handling at all. The About
+  page's link shipped a release claiming it opened a browser while doing
+  nothing, because that half of the chain was verified and the half that
+  actually runs was not. So `open_requested_urls` drains the command at the END
+  of the UI pass with `Context::output_mut` (not in `logic`, which runs before
+  the panes are drawn and would open the link a frame late) and
+  `open_url_in_browser` calls `ShellExecuteW` itself, reporting either outcome
+  in the status bar so a click is never silently ignored. `requested_url` is
+  the pure mapping `a_link_click_becomes_a_url_to_open` holds. **A link that
+  reads as obviously working is not evidence that it works** — check the host
+  the app actually runs on, all the way down.
 - **A child that does not fill its box can report a min rect LARGER than the box
   it was given**, and the parent advances its cursor by whatever the child
   reports. `show_editor`'s empty state sat in `ui.centered_and_justified`, whose

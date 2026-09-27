@@ -27,6 +27,15 @@ log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tiny-skia = "0.11.4"
+# `ShellExecuteW` is how Windows hands a URL to the user's browser. eframe's
+# NATIVE runner ignores `egui::OutputCommand::OpenUrl` (only its web runner
+# acts on it), so the app has to open the URL itself. Pinned to a version
+# already in the lock file so no second copy of the crate is compiled.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

@@ -188,12 +188,15 @@
   (`PingLatencyOverlay - Current Profile: Home (v0.1.68)`). Like the rail
   checkbox it previews immediately and is written only on Save. The About page
   has no list either, so its detail pane spans the same full width, and is
-  read-only and centred: one column of lines, the app name large, the tagline
-  under it, the version, then the repository and author links, the copyright
+  read-only and centred: the app icon, then one column of lines — the app name
+  large, the tagline under it, the version, then the repository, the copyright
   and the licence. Nothing on it can be edited, and it carries no Save/Discard
   footer because it stages nothing. No line on it is smaller than the rest of
-  the window's body text, and the repository, author and licence lines open in
-  the default browser, with the full address in the hover tooltip.
+  the window's body text. The repository line is the only clickable one: it
+  hands its address to Windows, which routes it to the user's default handler
+  for `https`, and the full address is in the hover tooltip. The copyright
+  carries no year, so it cannot go stale between releases. The licence is named
+  in words and not linked, because the licence text is not bundled with the app.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
   right aligned with Save as the filled primary action, under a scrolling detail.
   Both are enabled while **either** draft has something to write - the profile
