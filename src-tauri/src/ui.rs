@@ -415,10 +415,16 @@ fn rail_width(collapsed: bool) -> f32 {
 
 pub struct PingApp {
     page: Page,
+    /// The page shown on the previous pass, so a change can be noticed.
+    last_page: Page,
     rail_collapsed: bool,
     config: Config,
     active_profile: String,
     profiles: Vec<config::ProfileEntry>,
+    /// Overlay count per profile id, read from each profile file.
+    ///
+    /// A miss is not the same as zero and must never be drawn as one, so this
+    /// starts empty and is filled by `sync_profiles` on arrival.
     profile_overlay_counts: HashMap<String, usize>,
     selected_profile: Option<String>,
     last_title: String,
@@ -481,6 +487,9 @@ impl PingApp {
         // is sent as soon as the app state exists.
         let mut app = Self {
             page: Page::Overlays,
+            // Matching the initial page, so the first pass is not read as an
+            // arrival and the startup is not spent reading every profile file.
+            last_page: Page::Overlays,
             rail_collapsed,
             config,
             // Cloned before the id is moved into `active_profile`, so the
@@ -774,21 +783,37 @@ impl PingApp {
     /// Re-read the profile list, and with it the overlay count every profile
     /// row shows.
     ///
-    /// The counts need one file read per profile, so this only runs on a user
-    /// action: opening the switcher, entering the Profiles page or changing a
-    /// profile. Never per frame.
+    /// The counts cost one file read per profile, so this only runs on a user
+    /// action. Arriving on the Profiles page goes through `sync_profiles`;
+    /// everything else that can change a count — creating, renaming,
+    /// duplicating, deleting and switching a profile, and opening the switcher —
+    /// calls this directly. Never per frame.
+    ///
+    /// A profile whose file will not parse is left out of the count map rather
+    /// than counted as zero, so it draws no number instead of a wrong one.
     fn refresh_profiles(&mut self) {
         self.profiles = config::list_profiles_detailed();
         self.profile_overlay_counts = self
             .profiles
             .iter()
-            .map(|profile| {
-                let count = config::load_profile(&profile.id)
-                    .map(|config| config.overlays.len())
-                    .unwrap_or_default();
-                (profile.id.clone(), count)
+            .filter_map(|profile| {
+                let count = config::load_profile(&profile.id).ok()?.overlays.len();
+                Some((profile.id.clone(), count))
             })
             .collect();
+    }
+
+    /// Re-read the profile counts when arriving on the page that shows them.
+    ///
+    /// The Profiles page is the only place a per-profile count appears, and the
+    /// count is a cache, so arriving there is what makes the cache true. Every
+    /// other page shows nothing that goes stale, and staying put must not
+    /// re-read: this runs every pass.
+    fn sync_profiles(&mut self) {
+        if arriving_page_needs_profiles(self.last_page, self.page) {
+            self.refresh_profiles();
+        }
+        self.last_page = self.page;
     }
 
     /// Make another profile the active one and remember the choice.
@@ -1099,11 +1124,11 @@ impl PingApp {
                                     .color(UI_TEXT_SECONDARY),
                             );
                         }
-                        let rows: Vec<(String, String, bool, bool, usize)> = profiles
+                        let rows: Vec<(String, String, bool, bool, Option<usize>)> = profiles
                             .iter()
                             .map(|profile| {
                                 let is_active = profile.id == active;
-                                let count = counts.get(&profile.id).copied().unwrap_or(0);
+                                let count = counts.get(&profile.id).copied();
                                 (
                                     profile.id.clone(),
                                     profile_row_label(profile, &profiles),
@@ -1182,11 +1207,7 @@ impl PingApp {
                 name: id.clone(),
             });
         let is_active = entry.id == self.active_profile;
-        let count = self
-            .profile_overlay_counts
-            .get(&entry.id)
-            .copied()
-            .unwrap_or(0);
+        let count = self.profile_overlay_counts.get(&entry.id).copied();
         let only_profile = self.profiles.len() <= 1;
         let dirty = self.dirty;
         let mut action: Option<ProfileAction> = None;
@@ -1211,14 +1232,12 @@ impl PingApp {
                         .small()
                         .color(UI_TEXT_SECONDARY),
                 );
-                ui.label(
-                    RichText::new(format!(
-                        "{count} overlay{}",
-                        if count == 1 { "" } else { "s" }
-                    ))
-                    .small()
-                    .color(UI_TEXT_SECONDARY),
-                );
+                // Nothing is said when the count is unknown, rather than a zero
+                // that would be a confident lie.
+                let count_label = overlay_count_label(count);
+                if !count_label.is_empty() {
+                    ui.label(RichText::new(count_label).small().color(UI_TEXT_SECONDARY));
+                }
                 ui.add_space(8.0);
 
                 if is_active {
@@ -2292,11 +2311,12 @@ struct ProfileRow {
 /// The name takes whatever the row's left edge and the gutter leave over, and the
 /// gutter is pinned to the row's right edge, so a long name truncates instead of
 /// running underneath the count and the dot, and neither can escape the fill.
+/// `count` is `None` until the profile file has been read, and draws nothing then.
 fn profile_row_contents(
     ui: &mut Ui,
     row: egui::Rect,
     label: &str,
-    count: usize,
+    count: Option<usize>,
     is_active: bool,
     dirty: bool,
 ) -> ProfileRow {
@@ -2357,16 +2377,20 @@ fn profile_row_contents(
         ),
         trailing.rect.right_bottom(),
     );
-    painter.text(
-        egui::pos2(
-            dot_slot.left() - PROFILE_ROW_COUNT_GAP,
-            trailing.rect.center().y,
-        ),
-        egui::Align2::RIGHT_CENTER,
-        count.to_string(),
-        egui::TextStyle::Small.resolve(ui.style()),
-        UI_TEXT_SECONDARY,
-    );
+    // No count means it has not been read, which is not the same as none, so
+    // nothing is drawn rather than a zero that would be a confident lie.
+    if let Some(count) = count {
+        painter.text(
+            egui::pos2(
+                dot_slot.left() - PROFILE_ROW_COUNT_GAP,
+                trailing.rect.center().y,
+            ),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            egui::TextStyle::Small.resolve(ui.style()),
+            UI_TEXT_SECONDARY,
+        );
+    }
     if is_active {
         // A dot, because the accent name alone is a weak cue in a long list.
         draw_active_dot(painter, dot_slot, UI_ACCENT);
@@ -2405,6 +2429,28 @@ fn page_has_detail_footer(page: Page) -> bool {
     match page {
         Page::Overlays | Page::Global => true,
         Page::Profiles => false,
+    }
+}
+
+/// Whether arriving on `to` has to re-read the profile list.
+///
+/// Only the Profiles page shows a per-profile overlay count, and that count is a
+/// cache, so arriving there is what makes the cache true. `from != to` is the
+/// part that keeps this off the per-frame path: it runs every pass, and the
+/// Profiles page stays the current one for as long as the user reads it.
+fn arriving_page_needs_profiles(from: Page, to: Page) -> bool {
+    from != to && to == Page::Profiles
+}
+
+/// How the detail pane words an overlay count, or nothing when it is unknown.
+///
+/// A count that has not been read is not the same as a profile with no overlays,
+/// so it says nothing instead of saying zero.
+fn overlay_count_label(count: Option<usize>) -> String {
+    match count {
+        Some(1) => "1 overlay".to_string(),
+        Some(count) => format!("{count} overlays"),
+        None => String::new(),
     }
 }
 
@@ -2487,6 +2533,7 @@ impl App for PingApp {
         }
 
         self.sync_overlays();
+        self.sync_profiles();
         self.sync_window_title(ctx);
         ctx.request_repaint_after(self.repaint_interval());
     }
@@ -3149,15 +3196,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, draw_pane_divider,
-        list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_name_width,
-        overlay_row_contents, page_has_detail_footer, profile_name_width, profile_row_contents,
-        profile_row_label, rail_width, row_inner, selected_overlay_for_border, window_title, Frame,
-        Page, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS,
-        GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
-        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
-        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
-        WINDOW_MIN_WIDTH,
+        arriving_page_needs_profiles, can_switch_profile, config_notice_status,
+        config_notices_status, draw_pane_divider, list_pane_column, list_pane_row_height,
+        list_pane_row_width_for, overlay_count_label, overlay_name_width, overlay_row_contents,
+        page_has_detail_footer, profile_name_width, profile_row_contents, profile_row_label,
+        rail_width, row_inner, selected_overlay_for_border, window_title, Frame, Page,
+        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
+        LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT,
+        PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE,
+        SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use crate::config::{Anchor, ConfigNotice, ProfileEntry};
     use eframe::egui;
@@ -3224,7 +3271,7 @@ mod tests {
                     egui::vec2(row_width, list_pane_row_height(PROFILE_ROW_HEIGHT)),
                     egui::Sense::click(),
                 );
-                let laid_out = profile_row_contents(ui, row, "Gaming", 4, true, false);
+                let laid_out = profile_row_contents(ui, row, "Gaming", Some(4), true, false);
                 measured.push((row, laid_out.name, laid_out.gutter));
             }
         });
@@ -3316,6 +3363,49 @@ mod tests {
             used <= SIDEBAR_WIDTH,
             "a list pane row needs {used}px but the pane offers {SIDEBAR_WIDTH}px"
         );
+    }
+
+    /// Arriving on the Profiles page is what makes the overlay-count cache true.
+    ///
+    /// The counts are read one file per profile, so they cannot be read per
+    /// frame, and the Profiles page is the only place one is shown. The page
+    /// shipped showing `0` on every row because nothing ever triggered the read:
+    /// the cache started empty and only the profile mutations and the switcher
+    /// filled it, so arriving from the rail left it empty and a missing count
+    /// was drawn as zero. `from != to` is what keeps the read off the per-frame
+    /// path.
+    #[test]
+    fn arriving_on_the_profiles_page_re_reads_the_counts() {
+        for (from, to, expected) in [
+            (Page::Overlays, Page::Profiles, true),
+            (Page::Global, Page::Profiles, true),
+            (Page::Profiles, Page::Profiles, false),
+            (Page::Profiles, Page::Overlays, false),
+            (Page::Overlays, Page::Overlays, false),
+        ] {
+            assert_eq!(
+                arriving_page_needs_profiles(from, to),
+                expected,
+                "going from {} to {} should{} re-read the profile counts",
+                from.label(),
+                to.label(),
+                if expected { "" } else { " not" },
+            );
+        }
+    }
+
+    /// A count that has not been read says nothing, and one that has been read
+    /// as zero says zero.
+    ///
+    /// Those are different facts. The bug this came from rendered the first as
+    /// the second, which is why every profile read `0 overlays` and the real
+    /// counts only appeared once the switcher had been opened by hand.
+    #[test]
+    fn an_unknown_overlay_count_says_nothing() {
+        assert_eq!(overlay_count_label(None), "");
+        assert_eq!(overlay_count_label(Some(0)), "0 overlays");
+        assert_eq!(overlay_count_label(Some(1)), "1 overlay");
+        assert_eq!(overlay_count_label(Some(7)), "7 overlays");
     }
 
     /// The three pane rects `config_ui` lays out, mirroring its pane sequence.

@@ -123,8 +123,23 @@ Installer (run from the repository root):
   the separate **Switch to this profile** action. Never make a list selection
   switch profiles, because switching is refused while `dirty`.
 - `profile_overlay_counts` is a cache of overlay counts per profile, filled by
-  `refresh_profiles` because that reads every profile file. Call it on user
-  actions only, never per frame.
+  `refresh_profiles` because that reads every profile file. It has exactly two
+  kinds of trigger, and **both must exist**: the profile mutations
+  (`create_profile`, `rename_profile`, `duplicate_profile`, `delete_profile`,
+  `switch_profile`) and the switcher popup call it directly, and *arriving* on
+  the Profiles page calls it through `sync_profiles`, which watches
+  `last_page` from `logic()`. It shipped showing `0` on every row for a release
+  because the cache started empty and only the mutations filled it, so arriving
+  from the rail found it empty. A cache whose trigger is missing fails as a
+  confident wrong number, not as an obvious gap, so **a count that is absent
+  from the map must draw nothing** (`Option<usize>` all the way to
+  `profile_row_contents` and `overlay_count_label`) — never `unwrap_or(0)`, and
+  `refresh_profiles` filters unparseable profiles out rather than counting them
+  as zero.
+- A doc comment that describes a trigger the code does not have is worse than no
+  comment: `refresh_profiles` claimed for a release that it ran on "entering the
+  Profiles page", and that false claim is why the missing call above went
+  unnoticed. When a comment names *when* something runs, check the call sites.
 - The window title is `PingLatencyOverlay - Current Profile: <name>`, pushed
   with `ViewportCommand::Title` only when it changes (`sync_window_title`).
 - The root egui viewport starts hidden. Tray **left-click** shows Config; the
