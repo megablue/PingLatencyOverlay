@@ -43,6 +43,26 @@ const GLOBAL_ICON_ROWS: [(f32, f32); 3] = [(-0.28, 0.55), (0.0, -0.55), (0.28, 0
 const GLOBAL_ICON_TRACK_HALF: f32 = 0.35;
 /// Radius of a Global glyph knob, as a fraction of the unit.
 const GLOBAL_ICON_KNOB_RADIUS: f32 = 0.1;
+/// The About rail glyph: `(vertical offset, half width)`, both as a fraction of
+/// the glyph's unit.
+///
+/// A lower case `i` reads better than a piece of text at 20px, so it is drawn as
+/// a dot over a stem. The offsets sum to zero and the widest part plus the stem
+/// radius stays inside half a unit, which is the same pair of invariants the
+/// Global glyph is held to.
+const ABOUT_ICON_ROWS: [(f32, f32); 2] = [(-0.2, 0.0), (0.16, 0.16)];
+/// Radius of the About glyph's dot, as a fraction of the unit.
+const ABOUT_ICON_DOT_RADIUS: f32 = 0.12;
+/// The About page's repository, shown as a read-only row.
+const ABOUT_REPOSITORY: &str = "https://github.com/megablue/PingLatencyOverlay";
+
+/// The app version as the About page shows it, in the `v0.1.x` form.
+///
+/// One place formats it, so the page and the optional window title cannot
+/// disagree about what the app is called.
+fn app_version() -> String {
+    format!("v{}", env!("APP_BUILD_VERSION"))
+}
 /// Space kept free at the right of a profile row for its overlay count and the
 /// active dot, so a long name truncates instead of running under them. The
 /// gutter is two columns: the count, right aligned, and the dot's slot.
@@ -390,6 +410,7 @@ enum Page {
     Overlays,
     Profiles,
     Global,
+    About,
 }
 
 impl Page {
@@ -398,11 +419,12 @@ impl Page {
             Page::Overlays => "Overlays",
             Page::Profiles => "Profiles",
             Page::Global => "Global",
+            Page::About => "About",
         }
     }
 }
 
-const PAGES: [Page; 3] = [Page::Overlays, Page::Profiles, Page::Global];
+const PAGES: [Page; 4] = [Page::Overlays, Page::Profiles, Page::Global, Page::About];
 
 /// Width of the navigation rail, labelled or icon only.
 fn rail_width(collapsed: bool) -> f32 {
@@ -528,8 +550,17 @@ impl PingApp {
     }
 
     /// The window title, which names the profile that is currently loaded.
+    ///
+    /// Reads the **live** `prefs`, not `prefs_draft`, so ticking the checkbox on
+    /// the Global page updates the title immediately while the write stays
+    /// staged until Save. `sync_window_title` runs every frame from `logic()`
+    /// and only sends when the string actually changes, so this costs nothing
+    /// per frame.
     fn window_title(&self) -> String {
-        window_title(&self.active_profile_name())
+        window_title(
+            &self.active_profile_name(),
+            self.prefs.ui.show_version_in_title,
+        )
     }
 
     /// Push the title to the window when the active profile's name changed.
@@ -792,8 +823,8 @@ impl PingApp {
     ///
     /// The counts cost one file read per profile, so this only runs on a user
     /// action. Arriving on the Profiles page goes through `sync_profiles`;
-    /// everything else that can change a count — creating, renaming,
-    /// duplicating, deleting and switching a profile, and opening the switcher —
+    /// everything else that can change a count â€” creating, renaming,
+    /// duplicating, deleting and switching a profile, and opening the switcher â€”
     /// calls this directly. Never per frame.
     ///
     /// A profile whose file will not parse is left out of the count map rather
@@ -1451,7 +1482,7 @@ impl PingApp {
                     if !active {
                         draw_active_dot(ui.painter(), row_corner_dot_slot(rect), UI_ACCENT);
                     }
-                    hint.push_str(" — unsaved changes");
+                    hint.push_str(" â€” unsaved changes");
                 }
                 let response = response.on_hover_text(hint);
                 if response.clicked() {
@@ -1483,14 +1514,16 @@ impl PingApp {
         });
     }
 
-    /// Pane 2 for the current page. The Global page has no list.
+    /// Pane 2 for the current page. Only pages that have a list reach here.
     fn show_list_pane(&mut self, ui: &mut Ui, height: f32) {
         match self.page {
             Page::Overlays => self.show_overlays_page(ui, height),
             Page::Profiles => self.show_profiles_page(ui, height),
-            // The Global page has no list: `config_ui` drops pane 2 for it so
-            // the preferences get the full width.
-            Page::Global => {}
+            // `config_ui` only allocates pane 2 when `page_has_list_pane` says
+            // so, so a list-free page cannot reach this match. The arms are
+            // still spelled out rather than folded into a catch-all so a new
+            // page cannot be added without the compiler asking which case it is.
+            Page::Global | Page::About => {}
         }
     }
 
@@ -1527,6 +1560,19 @@ impl PingApp {
                     self.prefs_dirty = true;
                 }
 
+                // The live value, not the draft, so the title changes as the box
+                // is ticked. `discard_prefs` puts the stored value back, which
+                // puts the title back with it.
+                let mut show_version = self.prefs_draft.ui.show_version_in_title;
+                if ui
+                    .checkbox(&mut show_version, "Show the version in the window title")
+                    .changed()
+                {
+                    self.prefs_draft.ui.show_version_in_title = show_version;
+                    self.prefs.ui.show_version_in_title = show_version;
+                    self.prefs_dirty = true;
+                }
+
                 ui.add_space(12.0);
                 ui.label(RichText::new("STORAGE").color(UI_ACCENT));
                 ui.separator();
@@ -1560,6 +1606,68 @@ impl PingApp {
                         .on_hover_text(path.clone());
                     });
                 }
+            });
+    }
+
+    /// Pane 3 of the About page: what this is, which version, and who wrote it.
+    ///
+    /// Read-only, and it has no list pane, so it gets the full width like the
+    /// Global page. The version used to sit in the status bar; being here instead
+    /// is the point of the page, so it is the one line drawn large.
+    fn show_about_page(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new("PingLatencyOverlay").heading().color(UI_TEXT));
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("A small overlay that shows live network latency.")
+                        .color(UI_TEXT_SECONDARY),
+                );
+
+                ui.add_space(16.0);
+                ui.label(RichText::new("VERSION").color(UI_ACCENT));
+                ui.separator();
+                ui.label(
+                    RichText::new(app_version())
+                        .font(egui::FontId::proportional(22.0))
+                        .color(UI_TEXT),
+                );
+
+                ui.add_space(16.0);
+                ui.label(RichText::new("PROJECT").color(UI_ACCENT));
+                ui.separator();
+                for (label, value) in [
+                    ("Repository", ABOUT_REPOSITORY),
+                    ("Licence", "GPL-3.0-only"),
+                ] {
+                    ui.horizontal(|ui| {
+                        let label_width = 96.0;
+                        let gap = ui.spacing().item_spacing.x;
+                        let value_width = (ui.available_width() - label_width - gap).max(60.0);
+                        ui.add_sized(
+                            [label_width, 26.0],
+                            egui::Label::new(RichText::new(label).color(UI_TEXT_SECONDARY)),
+                        );
+                        ui.add_sized(
+                            [value_width, 26.0],
+                            egui::Label::new(RichText::new(value).color(UI_TEXT)).truncate(),
+                        )
+                        .on_hover_text(value);
+                    });
+                }
+
+                ui.add_space(16.0);
+                ui.label(RichText::new("CREDITS").color(UI_ACCENT));
+                ui.separator();
+                ui.label(RichText::new("Written by Evert Chin").color(UI_TEXT));
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("github.com/megablue")
+                        .color(UI_TEXT_SECONDARY)
+                        .small(),
+                );
             });
     }
 
@@ -1865,6 +1973,7 @@ impl PingApp {
                 Page::Overlays => self.show_editor(ui),
                 Page::Profiles => self.show_profile_detail(ui),
                 Page::Global => self.show_global_page(ui),
+                Page::About => self.show_about_page(ui),
             },
         );
         if has_footer {
@@ -1937,7 +2046,7 @@ impl PingApp {
                         self.show_rail(ui);
                     });
                     draw_pane_divider(ui);
-                    if self.page != Page::Global {
+                    if page_has_list_pane(self.page) {
                         ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, content_height), |ui| {
                             self.show_list_pane(ui, content_height);
                             // A list pane page draws itself as a positioned
@@ -1968,19 +2077,19 @@ impl PingApp {
     /// Save and Discard used to live here so they would be reachable from every
     /// page. They are in the detail pane's footer now, next to the edits they
     /// write, so this only reads state and needs no clone.
+    /// The bottom row: transient operation messages only.
+    ///
+    /// The version used to be right-aligned here and now lives on the About
+    /// page, optionally in the window title. It is a paint-only function, so
+    /// unlike the rest of the window layout there is no test that can hold it
+    /// to shape, which is worth knowing before changing what goes in it.
     fn show_status_bar(&self, ui: &mut Ui) {
-        let version = format!("v{}", env!("APP_BUILD_VERSION"));
         ui.allocate_ui(egui::vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
-            ui.horizontal(|ui| {
-                let message = self.status.as_str();
-                let response = ui.add(egui::Label::new(message).truncate());
-                if !message.is_empty() {
-                    response.on_hover_text(message);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(version).color(UI_TEXT_SECONDARY));
-                });
-            });
+            let message = self.status.as_str();
+            let response = ui.add(egui::Label::new(message).truncate());
+            if !message.is_empty() {
+                response.on_hover_text(message);
+            }
         });
     }
 }
@@ -2034,9 +2143,17 @@ fn can_switch_profile(dirty: bool) -> bool {
     !dirty
 }
 
-/// The Config window title, which names the active profile.
-fn window_title(profile_name: &str) -> String {
-    format!("PingLatencyOverlay - Current Profile: {profile_name}")
+/// The Config window title, which names the active profile and optionally carries
+/// the app version after it.
+fn window_title(profile_name: &str, show_version: bool) -> String {
+    if show_version {
+        format!(
+            "PingLatencyOverlay - Current Profile: {profile_name} (v{})",
+            env!("APP_BUILD_VERSION")
+        )
+    } else {
+        format!("PingLatencyOverlay - Current Profile: {profile_name}")
+    }
 }
 
 /// Row text for a profile.
@@ -2449,22 +2566,42 @@ fn confirm_controls_width(gap: f32) -> f32 {
 fn page_has_detail_footer(page: Page) -> bool {
     match page {
         Page::Overlays | Page::Global => true,
-        Page::Profiles => false,
+        Page::Profiles | Page::About => false,
     }
 }
 
-/// The text shown in the detail pane when no overlay is selected.
+/// Whether the page has a list in the middle pane.
 ///
-/// One string, not two labels: `centered_and_justified` is a one-widget builder,
-/// and a child that reports a min rect larger than the box it was given drags
-/// everything laid out after it. Three widgets here once pushed the detail
-/// footer 19.5px down into the status bar. The second line rides along inside
-/// this one string, so the child reports exactly its box.
+/// The Global and About pages are a single wide pane with nothing to list, so
+/// `config_ui` drops the list pane for them and the page gets the full width.
+/// This is a function rather than `self.page != Page::Global` at the call site
+/// so a new list-free page is a one-line change here instead of an edit buried
+/// in the layout code, which is how a fifth page would otherwise be forgotten.
+fn page_has_list_pane(page: Page) -> bool {
+    match page {
+        Page::Overlays | Page::Profiles => true,
+        Page::Global | Page::About => false,
+    }
+}
+
+/// The detail pane's message when nothing is selected, as one string.
+///
+/// One `Label` with a newline in it, because `Ui::centered_and_justified` is a
+/// one-widget builder: adding a second label and an `add_space` made it report
+/// a min rect taller than the box it was given, which shoved the detail pane's
+/// footer down into the status bar. Free so the test can assert it is one
+/// string rather than a list of widgets.
 fn empty_editor_message(_style: &egui::Style) -> &'static str {
     "No overlay selected.\nPick one from the list on the left."
 }
 
-/// The detail pane's empty state: one label, centred.
+/// Draws the detail pane's message when no overlay is selected.
+///
+/// One `Label` carrying both lines, inside `ui.centered_and_justified`, which by
+/// contract holds exactly one widget. Two labels and an `add_space` between them
+/// broke that contract, and the builder then reported a min rect 22px *taller*
+/// than the box it had been given, which pushed Save and Discard 19.5px down
+/// into the status bar. See `the_detail_footer_stays_under_the_detail_pane`.
 fn empty_editor(ui: &mut Ui) {
     ui.centered_and_justified(|ui| {
         ui.label(RichText::new(empty_editor_message(ui.style())).color(UI_TEXT_SECONDARY));
@@ -3278,6 +3415,34 @@ fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: C
                 );
             }
         }
+        // A lower case `i`, drawn as a dot over a short stem. The two vertical
+        // offsets do not sum to zero because the dot and the stem are not the
+        // same shape, so centring is checked against the drawn extent rather
+        // than the offsets: `the_about_glyph_stays_inside_its_box` holds the
+        // span to half a unit either way.
+        Page::About => {
+            for (row, half_width) in ABOUT_ICON_ROWS {
+                let y = center.y + row * unit;
+                let half = half_width * unit;
+                if half <= 0.0 {
+                    // The dot: a filled circle, so it needs no stroke.
+                    painter.circle_filled(
+                        egui::pos2(center.x, y),
+                        ABOUT_ICON_DOT_RADIUS * unit,
+                        color,
+                    );
+                } else {
+                    // The stem.
+                    painter.line_segment(
+                        [
+                            egui::pos2(center.x - half, y),
+                            egui::pos2(center.x + half, y),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -3337,12 +3502,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_switch_profile, config_notice_status, config_notices_status, deselect_strip_rect,
-        draw_pane_divider, empty_editor, list_pane_column, list_pane_row_height,
-        list_pane_row_width_for, overlay_count_label, overlay_name_width, overlay_row_contents,
-        page_has_detail_footer, profile_name_width, profile_row_contents, profile_row_label,
-        rail_width, row_inner, selected_overlay_for_border, sync_profile_cache, toggled_selection,
-        window_title, Frame, Page, ProfileSnapshot, DETAIL_FOOTER_BUTTON_HEIGHT,
+        app_version, can_switch_profile, config_notice_status, config_notices_status,
+        deselect_strip_rect, draw_pane_divider, empty_editor, list_pane_column,
+        list_pane_row_height, list_pane_row_width_for, overlay_count_label, overlay_name_width,
+        overlay_row_contents, page_has_detail_footer, page_has_list_pane, profile_name_width,
+        profile_row_contents, profile_row_label, rail_width, row_inner,
+        selected_overlay_for_border, sync_profile_cache, toggled_selection, window_title, Frame,
+        Page, ProfileSnapshot, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, DETAIL_FOOTER_BUTTON_HEIGHT,
         DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
         GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES,
         PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
@@ -3655,117 +3821,6 @@ mod tests {
     /// same `rail_width`, the same `SIDEBAR_WIDTH`, the same frame margin and the
     /// same `list_pane_column`, and its list pane draws itself as a positioned
     /// child exactly as the real pages do.
-    /// The detail pane's content rect, footer rect and footer band, measured.
-    ///
-    /// A mirror of `show_detail_pane`, not a call: that is a method on `PingApp`,
-    /// and standing one up needs a creation context, live probes and a tray.
-    ///
-    /// The mirror has to reproduce the real pane's bounds, width AND height, and
-    /// getting that wrong produced three false results in a row: run in the
-    /// full-height root `Ui`, `with_layout(right_to_left(Center))` gave the
-    /// footer button all the leftover *window* height and parked it 17.5px low,
-    /// and before the width was bounded too its right edge sat at the window's
-    /// edge instead of the pane's. Wrapping the body in a positioned child at the
-    /// pane's rect is what makes the numbers mean anything.
-    fn detail_pane_geometry(
-        window: (f32, f32),
-        selected: bool,
-    ) -> (egui::Rect, egui::Rect, egui::Rect) {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(window.0, window.1),
-            )),
-            ..Default::default()
-        };
-        let pane_left = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH + PANE_GAP + PANE_MARGIN;
-        let pane = egui::Rect::from_min_max(
-            egui::pos2(pane_left, PANE_MARGIN),
-            egui::pos2(window.0 - PANE_MARGIN, window.1),
-        );
-        let content_height = (pane.height() - DETAIL_FOOTER_HEIGHT).max(120.0);
-        let content_rect =
-            egui::Rect::from_min_size(pane.min, egui::vec2(pane.width(), content_height));
-        let band = egui::Rect::from_min_max(
-            egui::pos2(pane.min.x, content_rect.bottom() + 4.0),
-            pane.max,
-        );
-        let mut measured = (egui::Rect::ZERO, egui::Rect::ZERO);
-        let ctx = egui::Context::default();
-        let mut output = ctx.run_ui(input, |ui| {
-            let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(pane));
-            pane_ui.vertical(|ui| {
-                ui.set_height(pane.height());
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
-                if selected {
-                    let inner_width = child.available_width();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(&mut child, |ui| {
-                            ui.allocate_exact_size(
-                                egui::vec2(inner_width, 200.0),
-                                egui::Sense::hover(),
-                            );
-                        });
-                } else {
-                    empty_editor(&mut child);
-                }
-                measured.0 = child.min_rect();
-                ui.advance_cursor_after_rect(content_rect);
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    measured.1 = ui
-                        .add_sized(
-                            [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
-                            egui::Button::new("Save"),
-                        )
-                        .rect;
-                });
-            });
-        });
-        // `FullOutput` owns a `TexturesDelta` whose `Drop` panics if the deltas
-        // were never applied, and there is no headless pass to apply them in.
-        output.textures_delta.clear();
-        (measured.0, measured.1, band)
-    }
-
-    /// The detail footer belongs directly under the detail pane, and it must
-    /// still be there when there is nothing to show above it.
-    ///
-    /// The footer used to be pushed 19.5px down into the status bar, and only in
-    /// the nothing-selected state, because the empty state was three widgets in a
-    /// one-widget builder and reported a min rect 22px taller than its box. A
-    /// scrolling list reports its box exactly, which is why selecting an overlay
-    /// made the symptom vanish and hide it for a release.
-    ///
-    /// The footer is centred in its band, so the tolerance is deliberately loose:
-    /// egui rounds the centred region to whole pixels and adds half the item
-    /// spacing, so the exact figure is 741.5 rather than 740. Re-deriving that
-    /// arithmetic here is the same mistake that produced the bug, and the bug was
-    /// 19.5px, so 2px is an order of magnitude tighter than what must be caught.
-    /// What actually pins it is the band, which cannot move at all if the content
-    /// child stops over-reporting.
-    #[test]
-    fn the_detail_footer_stays_under_the_detail_pane() {
-        for (what, selected) in [("nothing selected", false), ("overlay selected", true)] {
-            let (content, footer, band) = detail_pane_geometry((1000.0, 800.0), selected);
-            assert!(
-                band.contains_rect(footer),
-                "with {what} the footer {footer:?} escaped its band {band:?}"
-            );
-            let centred = band.top() + (band.height() - footer.height()) / 2.0;
-            assert!(
-                (footer.top() - centred).abs() <= 2.0,
-                "with {what} the footer sat at {footer:?} but the band {band:?} centres it at {centred}"
-            );
-            assert_eq!(
-                band.top(),
-                content.bottom() + 4.0,
-                "with {what} the content reported {content:?}, which moved the band"
-            );
-        }
-    }
-
     fn pane_rects(claim_pane_width: bool) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -3981,11 +4036,66 @@ mod tests {
     #[test]
     fn the_rail_offers_every_page_once() {
         let labels: Vec<&str> = PAGES.iter().map(|page| page.label()).collect();
-        assert_eq!(labels, vec!["Overlays", "Profiles", "Global"]);
+        assert_eq!(labels, vec!["Overlays", "Profiles", "Global", "About"]);
         let mut unique = labels.clone();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), labels.len());
+    }
+
+    /// Overlays and Profiles list something; Global and About are a single wide
+    /// pane. This is a function rather than a `page != Global` test at the layout
+    /// call site so a fifth page is one line here instead of an edit buried in
+    /// `config_ui` that nothing would point at.
+    #[test]
+    fn only_the_pages_with_a_list_get_one() {
+        let cases = [
+            (Page::Overlays, true),
+            (Page::Profiles, true),
+            (Page::Global, false),
+            (Page::About, false),
+        ];
+        for (page, expected) in cases {
+            assert_eq!(
+                page_has_list_pane(page),
+                expected,
+                "{} {}",
+                page.label(),
+                if expected { "lists" } else { "has no list" }
+            );
+        }
+    }
+
+    /// The About glyph is a lower case `i`: a dot over a short stem. Its two
+    /// vertical offsets deliberately do NOT sum to zero, because the dot and the
+    /// stem are different shapes, so the check is against the drawn extent rather
+    /// than the offsets. The Global glyph shipped with its offsets read as loop
+    /// indices and one knob poking past its track, so this is worth pinning from
+    /// the first release rather than after a screenshot.
+    #[test]
+    fn the_about_glyph_stays_inside_its_box() {
+        let dot = ABOUT_ICON_ROWS
+            .iter()
+            .find(|(_, half)| *half <= 0.0)
+            .map(|(row, _)| *row)
+            .expect("the glyph needs a dot");
+        let stem = ABOUT_ICON_ROWS
+            .iter()
+            .find(|(_, half)| *half > 0.0)
+            .map(|(row, _)| *row)
+            .expect("the glyph needs a stem");
+        assert!(
+            dot.abs() + ABOUT_ICON_DOT_RADIUS <= 0.5,
+            "the dot at {dot} of the half box plus its radius leaves the box"
+        );
+        assert!(
+            stem.abs() <= 0.5,
+            "the stem at {stem} of the half box leaves the box"
+        );
+        assert!(
+            dot < stem,
+            "the dot at {dot} must sit above the stem at {stem}, or it is not an i"
+        );
     }
 
     #[test]
@@ -4027,7 +4137,7 @@ mod tests {
     /// The strip's two runtime facts, measured through a real scroll area rather
     /// than assumed: the inner `Ui`'s `max_rect` is the viewport, so the strip can
     /// be sized from it, and `ui.interact` leaves the cursor where it found it, so
-    /// the strip cannot grow the content. The second is the one that matters —
+    /// the strip cannot grow the content. The second is the one that matters â€”
     /// had the strip been a real widget, a list that exactly filled the viewport
     /// would have pushed the content one widget past it and conjured a scrollbar.
     #[test]
@@ -4080,6 +4190,133 @@ mod tests {
             "the strip was {strip_height}px tall but the leftover space is {}px",
             viewport.bottom() - rows_bottom
         );
+    }
+
+    /// Lays the detail pane out the way `show_detail_pane` does and reports the
+    /// box it gave the content, the rect the footer ended up in, and the band the
+    /// footer is supposed to live in.
+    ///
+    /// A mirror rather than a call: `show_detail_pane` is a method on `PingApp`,
+    /// and standing one up needs a creation context, probes and a tray. The one
+    /// thing that has to be reproduced faithfully is the *height bound*: in the
+    /// real window the pane sits inside `ui.vertical` with its height set, so the
+    /// space left over after the content is exactly the footer band. Without that
+    /// bound `with_layout(Align::Center)` centres the button in the whole rest of
+    /// the window and every number comes out wrong, which is how this helper
+    /// briefly blamed the code for something the code was not doing.
+    fn detail_pane_geometry(
+        window: (f32, f32),
+        selected: bool,
+    ) -> (egui::Rect, egui::Rect, egui::Rect) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(window.0, window.1),
+            )),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut measured = (egui::Rect::ZERO, egui::Rect::ZERO, egui::Rect::ZERO);
+        let mut output = ctx.run_ui(input, |ui| {
+            // The pane starts under the rail, the list pane and two dividers.
+            let left = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH + PANE_GAP + PANE_MARGIN;
+            let top = PANE_MARGIN;
+            let height = window.1 - top - STATUS_BAR_HEIGHT;
+            let content_height = (height - DETAIL_FOOTER_HEIGHT).max(120.0);
+            let pane = egui::Rect::from_min_size(
+                egui::pos2(left, top),
+                egui::vec2(window.0 - left - PANE_MARGIN, height),
+            );
+            let content_rect =
+                egui::Rect::from_min_size(pane.min, egui::vec2(pane.width(), content_height));
+
+            // The bounds the real pane has: in the window the vertical only ever
+            // sees the width left over after the rail, the list pane and the two
+            // dividers, and its height is pinned to the pane. Handing it a
+            // positioned child at the pane's rect reproduces both, which is what
+            // keeps the footer's right edge on the pane's right edge.
+            let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(pane));
+            pane_ui.vertical(|ui| {
+                ui.set_height(pane.height());
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+                if selected {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(&mut child, |ui| {
+                            ui.label("an overlay's settings");
+                        });
+                } else {
+                    empty_editor(&mut child);
+                }
+                measured.0 = child.min_rect();
+                ui.advance_cursor_after_rect(content_rect);
+                ui.add_space(4.0);
+                measured.2 = egui::Rect::from_min_max(
+                    egui::pos2(pane.left(), content_rect.bottom() + 4.0),
+                    pane.max,
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT),
+                        egui::Sense::click(),
+                    );
+                    measured.1 = rect;
+                });
+            });
+        });
+        output.textures_delta.clear();
+        measured
+    }
+
+    /// The detail pane's footer has to sit under the detail content whether or
+    /// not anything is selected.
+    ///
+    /// It did not. The empty pane drew two labels inside `ui.centered_and_justified`,
+    /// which is a one-widget builder, and with three widgets inside it the builder
+    /// reported a min rect 22px *taller* than the box it had been given. The
+    /// parent advanced its cursor by that inflated height, so Save and Discard
+    /// landed 19.5px low: at y=793 in a 800px window, past the frame's own bottom
+    /// margin and on top of the status bar. With an overlay selected the editor
+    /// is a ScrollArea that reports its box exactly, and the footer was correct,
+    /// which is why the bug only ever showed up empty.
+    ///
+    /// Both states are driven here, and the assertion is on the footer's position
+    /// rather than on the message, so any future change to the empty state's
+    /// content cannot quietly move the footer again.
+    #[test]
+    fn the_detail_footer_stays_under_the_detail_pane() {
+        const WINDOW: (f32, f32) = (1000.0, 800.0);
+        for (label, selected) in [("nothing selected", false), ("overlay selected", true)] {
+            let (content_box, footer, band) = detail_pane_geometry(WINDOW, selected);
+            // The footer is centred in the band, so the invariant is that it sits
+            // in that band and not that it starts the instant the content ends.
+            // The centring carries a 2px tolerance: egui rounds the centred region
+            // to whole pixels and adds half the item spacing, and re-deriving that
+            // arithmetic here would be the same mistake that produced this bug in
+            // the first place. The bug was 19.5px, so 2px is an order of magnitude
+            // tighter than what has to be caught, and the containment check below
+            // is the assertion that actually pins it.
+            let expected_top = band.top() + (band.height() - DETAIL_FOOTER_BUTTON_HEIGHT) / 2.0;
+            assert!(
+                (footer.top() - expected_top).abs() <= 2.0,
+                "with {label} the footer sat at {footer:?} but the band is {band:?}, \
+                 so it should have started at {expected_top}"
+            );
+            assert!(
+                band.contains_rect(footer),
+                "with {label} the footer {footer:?} escaped its band {band:?}"
+            );
+            assert!(
+                footer.bottom() <= WINDOW.1 - PANE_MARGIN,
+                "with {label} the footer ran to {footer:?}, past the {WINDOW:?} window"
+            );
+            // And the content must never be the thing that decides: whatever the
+            // pane drew, the band starts a fixed gap below the box it was given.
+            assert!(
+                (band.top() - (content_box.bottom() + 4.0)).abs() < f32::EPSILON,
+                "with {label} the content reported {content_box:?}, which moved the band"
+            );
+        }
     }
 
     /// The border preview needs the window open, the Overlays page showing and
@@ -4227,13 +4464,26 @@ mod tests {
     #[test]
     fn the_window_title_names_the_active_profile() {
         assert_eq!(
-            window_title("Home Net"),
+            window_title("Home Net", false),
             "PingLatencyOverlay - Current Profile: Home Net"
         );
         assert_eq!(
-            window_title("default"),
+            window_title("default", false),
             "PingLatencyOverlay - Current Profile: default",
             "a name that is not stored yet still shows the id"
+        );
+    }
+
+    /// The version is a preference and it is off by default, because the title is
+    /// already long and the About page is where the version belongs.
+    #[test]
+    fn the_window_title_can_carry_the_version() {
+        assert_eq!(
+            window_title("Home Net", true),
+            format!(
+                "PingLatencyOverlay - Current Profile: Home Net ({})",
+                app_version()
+            )
         );
     }
 

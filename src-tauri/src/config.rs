@@ -440,6 +440,12 @@ pub struct UiPrefs {
     /// Whether the navigation rail is collapsed to its icons.
     #[serde(default)]
     pub rail_collapsed: bool,
+    /// Whether the window title carries the app version after the profile name.
+    ///
+    /// Off by default: the title is already long, and the About page is where
+    /// the version belongs.
+    #[serde(default)]
+    pub show_version_in_title: bool,
 }
 
 /// A profile in the profiles directory: its id and the name shown in the UI.
@@ -1891,6 +1897,38 @@ mod tests {
     }
 
     #[test]
+    fn the_title_version_preference_defaults_to_off_and_round_trips() {
+        let root = TestDir::new("prefs-title-version");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+
+        assert!(
+            !store.read_global_prefs().ui.show_version_in_title,
+            "the window title is already long, so the version is opt-in"
+        );
+
+        let prefs = GlobalPrefs {
+            ui: UiPrefs {
+                show_version_in_title: true,
+                ..UiPrefs::default()
+            },
+        };
+        store.write_global_prefs(&prefs).expect("write prefs");
+        assert!(
+            store.read_global_prefs().ui.show_version_in_title,
+            "the preference did not survive a round trip"
+        );
+
+        // A file written before the preference existed must not fail to load.
+        let raw = store.global_config_path().to_string_lossy().to_string();
+        std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
+        assert!(
+            !store.read_global_prefs().ui.show_version_in_title,
+            "a ui key without the preference must fall back to the default"
+        );
+    }
+
+    #[test]
     fn global_prefs_round_trip_through_global_config() {
         let root = TestDir::new("prefs-round-trip");
         let store = store_at(root.path());
@@ -1903,6 +1941,7 @@ mod tests {
         let prefs = GlobalPrefs {
             ui: UiPrefs {
                 rail_collapsed: true,
+                ..UiPrefs::default()
             },
         };
         store.write_global_prefs(&prefs).expect("write prefs");
@@ -1929,6 +1968,7 @@ mod tests {
             .write_global_prefs(&GlobalPrefs {
                 ui: UiPrefs {
                     rail_collapsed: true,
+                    ..UiPrefs::default()
                 },
             })
             .expect("write prefs");

@@ -98,11 +98,13 @@
   on. A profile renamed to a name that resolves to its own id keeps its file.
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
-  be stored. Preferences live under a single `ui` object, currently just
-  `ui.railCollapsed`. Only that object is ever rewritten: the active profile
-  pointer and any key a future version adds survive a preferences write, and a
-  file that is missing, unparseable or holds unrelated keys simply yields the
-  defaults.
+  be stored. Preferences live under a single `ui` object, currently
+  `ui.railCollapsed` and `ui.showVersionInTitle`. Only that object is ever
+  rewritten: the active profile pointer and any key a future version adds
+  survive a preferences write, and a file that is missing, unparseable or holds
+  unrelated keys simply yields the defaults. `ui.showVersionInTitle` is off by
+  default, because the window title is already long and the About page is where
+  the version belongs.
 - The active profile is recorded in that file as `activeProfile` (the id) plus
   `activeProfileFile` (the `profile_<id>.json` name), and both keys are removed
   when the active profile is `default`, so an absent key means `default`.
@@ -137,9 +139,9 @@
 ## Config window layout
 - The Config window has three panes and a status bar.
 - The **navigation rail** is the leftmost pane: one row per page (**Overlays**,
-  **Profiles**, **Global**) plus a chevron that collapses it to icons only. The
-  rail is 148px labelled and 44px collapsed, and its glyphs are painted, so
-  they never depend on font coverage.
+  **Profiles**, **Global**, **About**) plus a chevron that collapses it to icons
+  only. The rail is 148px labelled and 44px collapsed, and its glyphs are
+  painted, so they never depend on font coverage.
 - The **list pane** holds the current page's list, headed by the page's own
   controls. The Overlays page heads it with the profile switcher, which shows
   the active profile's display name and opens the profile menu. Its footer holds
@@ -181,17 +183,26 @@
   `globalconfig.json` as read-only paths, truncated with the full path on hover.
   Toggling the rail applies immediately, so the user watches it collapse as they
   click, but the value is only written when the draft is saved and **Discard**
-  puts the rail back.
+  puts the rail back. The Appearance group also holds **Show the version in the
+  window title**, which appends the version in brackets to the title
+  (`PingLatencyOverlay - Current Profile: Home (v0.1.68)`). Like the rail
+  checkbox it previews immediately and is written only on Save. The About page
+  has no list either, so its detail pane spans the same full width, and is
+  read-only: the app name, the version large, the repository link, the licence
+  and the credits. Nothing on it can be edited, and it carries no Save/Discard
+  footer because it stages nothing.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
   right aligned with Save as the filled primary action, under a scrolling detail.
   Both are enabled only while there is something to write, which is also how
   unsaved edits are signalled. Only a page that stages a draft carries it: the
-  Overlays and Global pages do, the Profiles page does not, because it acts on
-  profile files immediately. On the Profiles page the pending-draft hint in the
-  detail names the Overlays page as the place to resolve it, and the rail's
-  Overlays row carries a dot and an "unsaved changes" hover while one is open.
-- The **status bar** spans the full width and holds the transient message on the
-  left and the version on the right.
+  Overlays and Global pages do, the Profiles and About pages do not, because
+  they act on files immediately or stage nothing at all. On the Profiles page
+  the pending-draft hint in the detail names the Overlays page as the place to
+  resolve it, and the rail's Overlays row carries a dot and an "unsaved changes"
+  hover while one is open.
+- The **status bar** spans the full width and holds the transient operation
+  message. The version is not here; it is on the About page, and optionally in
+  the window title.
 - Both panes are a scrolling area above a fixed footer, so a pane's own actions
   sit next to the content they act on instead of a pane away in the status bar.
 - A row in the list pane is its contents plus the same margin on every side, so

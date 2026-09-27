@@ -94,17 +94,26 @@ Installer (run from the repository root):
 
 ## The Config window
 - Three panes plus a status bar (`config_ui`): a navigation rail (`show_rail`,
-  `Page`/`PAGES`, `rail_width`), a list pane (`show_list_pane`, dropped on the
-  Global page) and a detail pane (`show_detail_pane`). Pane switching is never
-  guarded; only profile switching is.
+  `Page`/`PAGES`, `rail_width`), a list pane (`show_list_pane`, dropped by
+  `page_has_list_pane`) and a detail pane (`show_detail_pane`). Pane switching is
+  never guarded; only profile switching is. `page_has_list_pane` is a function
+  rather than a `page != Global` test at the call site so a new list-free page is
+  one line in it, not an edit buried in the layout code that nothing points at.
 - Each pane is a scrolling area above a fixed footer. **Save** and **Discard**
   are the detail pane's sticky footer (`show_detail_footer`,
   `DETAIL_FOOTER_HEIGHT`), right aligned, enabled only while `dirty`, which is
   also how unsaved edits are signalled. `page_has_detail_footer` decides which
   pages carry it: only a page that stages a draft, so Overlays and Global do and
-  Profiles does not.
-- The status bar (`show_status_bar`) shows only the transient operation message
-  and the right-aligned version, so it takes `&self`.
+  Profiles and About do not.
+- The status bar (`show_status_bar`) shows only the transient operation message,
+  so it takes `&self`. The version is on the About page instead, and optionally
+  in the window title via `prefs.ui.show_version_in_title` — which
+  `PingApp::window_title` reads from the **live** `prefs`, not `prefs_draft`, so
+  ticking the box updates the title on the spot while the write stays staged.
+  `sync_window_title` runs every frame from `logic()` and only sends on change,
+  so reading a preference there costs nothing.
+- `show_status_bar` is paint-only, so unlike the rest of the window layout no
+  test can hold its shape. That is a known gap, not an oversight.
 - Edits are staged per source. Detail-pane edits and Add overlay stage into the
   profile draft; list-pane enable/delete and Pause/Resume apply immediately.
   Delete uses an inline confirmation because native script dialogs are not used.
@@ -197,11 +206,12 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   `the_detail_footer_stays_under_the_detail_pane`.
 - **A mirror test must reproduce the real bounds, width AND height, or its
   numbers are meaningless.** `detail_pane_geometry` stands in for
-  `show_detail_pane`, which needs a live `PingApp`. Run in the full-height root
-  `Ui` it gave the footer all the leftover *window* height and parked it 17.5px
-  low, and before the width was bounded too its right edge sat at the window's
-  edge instead of the pane's. A mirror that does not reproduce the bounds blames
-  the code for things the code is not doing.
+  `show_detail_pane`, which needs a live `PingApp`. Without wrapping its body in
+  a positioned child the mirror's vertical saw the whole window, which produced
+  three different false results in a row: the footer 17.5px low, then its right
+  edge at x=1000 instead of the pane's 988, and only then the real figures. A
+  mirror that does not reproduce the bounds blames the code for things the code
+  is not doing.
 - **Rows are painted, never `egui::Frame::group`,** because a group frame draws
   a 1px border and the rows must match the rail's borderless look. Allocate the
   row with `allocate_exact_size`, `rect_filled` the background yourself, then
