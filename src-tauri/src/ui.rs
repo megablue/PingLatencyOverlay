@@ -55,13 +55,147 @@ const ABOUT_ICON_ROWS: [(f32, f32); 2] = [(-0.2, 0.0), (0.16, 0.16)];
 const ABOUT_ICON_DOT_RADIUS: f32 = 0.12;
 /// The About page's repository, shown as a read-only row.
 const ABOUT_REPOSITORY: &str = "https://github.com/megablue/PingLatencyOverlay";
+/// The author's own page, linked from the About page.
+const ABOUT_AUTHOR_URL: &str = "https://github.com/megablue";
+/// Where the About page's licence name links to. The licence itself is not
+/// bundled with the app, so the link goes to the canonical text online.
+const ABOUT_LICENCE_URL: &str = "https://www.gnu.org/licenses/gpl-3.0.html";
+/// Space above the About page's centred column, so it does not sit hard against
+/// the top of the pane.
+const ABOUT_TOP_GAP: f32 = 12.0;
+/// Extra air before the About page's link block, which reads as a group
+/// separate from the name, the tagline and the version above it.
+const ABOUT_GROUP_GAP: f32 = 10.0;
 
 /// The app version as the About page shows it, in the `v0.1.x` form.
 ///
 /// One place formats it, so the page and the optional window title cannot
 /// disagree about what the app is called.
+/// The body text size, so the About page's sizes are relative to it rather than
+/// hard-coded. Read from the style so a theme change cannot leave the page
+/// shouting in a size the rest of the window has moved on from.
+fn ui_text_size() -> f32 {
+    egui::TextStyle::Body.resolve(&egui::Style::default()).size
+}
+
 fn app_version() -> String {
     format!("v{}", env!("APP_BUILD_VERSION"))
+}
+
+/// Where an About-page line opens when it is clicked, if it does at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AboutKind {
+    /// Plain text, not clickable.
+    Text,
+    /// Opens `url` in the default browser when clicked.
+    Link(&'static str),
+}
+
+/// One centred line of the About page.
+///
+/// The size is carried here rather than at the call site so a test can hold a
+/// floor over the whole page. The page was criticised for using `.small()`,
+/// and "do not use very small text here" is worth more as a rule in the suite
+/// than as a preference in someone's head.
+#[derive(Clone, Debug, PartialEq)]
+struct AboutLine {
+    text: String,
+    size: f32,
+    kind: AboutKind,
+}
+
+/// The text of every line on the About page, in order.
+///
+/// The page used to be a labelled table with accent section headers, which read
+/// as settings rather than as an About box. It is one centred column now, and
+/// the facts are unchanged: what this is, which version, where the source is,
+/// who wrote it, under what licence. The copyright carries no year on purpose,
+/// so nothing here can go stale between releases.
+fn about_page_lines() -> Vec<AboutLine> {
+    let body = ui_text_size();
+    vec![
+        AboutLine {
+            text: "PingLatencyOverlay".to_string(),
+            size: body + 12.0,
+            kind: AboutKind::Text,
+        },
+        AboutLine {
+            text: "A small overlay that shows live network latency.".to_string(),
+            size: body,
+            kind: AboutKind::Text,
+        },
+        AboutLine {
+            text: app_version(),
+            size: body + 4.0,
+            kind: AboutKind::Text,
+        },
+        AboutLine {
+            text: "github.com/megablue/PingLatencyOverlay".to_string(),
+            size: body,
+            kind: AboutKind::Link(ABOUT_REPOSITORY),
+        },
+        AboutLine {
+            text: "github.com/megablue".to_string(),
+            size: body,
+            kind: AboutKind::Link(ABOUT_AUTHOR_URL),
+        },
+        AboutLine {
+            text: "Copyright \u{a9} Evert Chin".to_string(),
+            size: body,
+            kind: AboutKind::Text,
+        },
+        AboutLine {
+            text: "GPL-3.0-only".to_string(),
+            size: body,
+            kind: AboutKind::Link(ABOUT_LICENCE_URL),
+        },
+    ]
+}
+
+/// Draws the About page's centred column.
+///
+/// The centring uses `ui.with_layout(Layout::top_down(Align::Center), ..)`
+/// and NOT `ui.vertical_centered(..)`. `with_layout` re-lays-out the *existing*
+/// `Ui` and creates no child, so there is no child min rect to overshoot and no
+/// 18px `interact_size.y` band. `vertical_centered(..)` is a `scope_builder`
+/// child, which is the exact shape that made the detail footer report 22px
+/// more than its box and slide into the status bar. `show_detail_footer` uses
+/// `with_layout` with two children and is correct, so the counter-example is
+/// right here in the file.
+///
+/// For `Layout::top_down` the main axis is vertical, so `Align::Center` is the
+/// cross axis and centres each line horizontally, which is what a centred
+/// column needs.
+fn about_page_column(ui: &mut Ui) {
+    ui.add_space(ABOUT_TOP_GAP);
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        for (index, line) in about_page_lines().iter().enumerate() {
+            if index == 3 {
+                // A little more air before the links than between the rest, so
+                // the block reads as name, what it is, version, then contact.
+                ui.add_space(ABOUT_GROUP_GAP);
+            } else if index > 0 {
+                ui.add_space(2.0);
+            }
+            let font = egui::FontId::proportional(line.size);
+            match line.kind {
+                AboutKind::Text => {
+                    let colour = if index == 1 {
+                        UI_TEXT_SECONDARY
+                    } else {
+                        UI_TEXT
+                    };
+                    ui.label(RichText::new(&line.text).font(font).color(colour));
+                }
+                AboutKind::Link(url) => {
+                    ui.add(egui::Hyperlink::from_label_and_url(
+                        RichText::new(&line.text).font(font),
+                        url,
+                    ));
+                }
+            }
+        }
+    });
 }
 /// Space kept free at the right of a profile row for its overlay count and the
 /// active dot, so a long name truncates instead of running under them. The
@@ -1632,62 +1766,15 @@ impl PingApp {
     /// Pane 3 of the About page: what this is, which version, and who wrote it.
     ///
     /// Read-only, and it has no list pane, so it gets the full width like the
-    /// Global page. The version used to sit in the status bar; being here instead
-    /// is the point of the page, so it is the one line drawn large.
+    /// Global page. It is one centred column rather than a labelled table,
+    /// because the page used to read as settings instead of as an About box.
+    /// The facts come from `about_page_lines` so they can be tested; the
+    /// centring deliberately uses `with_layout`, see the note there.
     fn show_about_page(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.label(RichText::new("PingLatencyOverlay").heading().color(UI_TEXT));
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new("A small overlay that shows live network latency.")
-                        .color(UI_TEXT_SECONDARY),
-                );
-
-                ui.add_space(16.0);
-                ui.label(RichText::new("VERSION").color(UI_ACCENT));
-                ui.separator();
-                ui.label(
-                    RichText::new(app_version())
-                        .font(egui::FontId::proportional(22.0))
-                        .color(UI_TEXT),
-                );
-
-                ui.add_space(16.0);
-                ui.label(RichText::new("PROJECT").color(UI_ACCENT));
-                ui.separator();
-                for (label, value) in [
-                    ("Repository", ABOUT_REPOSITORY),
-                    ("Licence", "GPL-3.0-only"),
-                ] {
-                    ui.horizontal(|ui| {
-                        let label_width = 96.0;
-                        let gap = ui.spacing().item_spacing.x;
-                        let value_width = (ui.available_width() - label_width - gap).max(60.0);
-                        ui.add_sized(
-                            [label_width, 26.0],
-                            egui::Label::new(RichText::new(label).color(UI_TEXT_SECONDARY)),
-                        );
-                        ui.add_sized(
-                            [value_width, 26.0],
-                            egui::Label::new(RichText::new(value).color(UI_TEXT)).truncate(),
-                        )
-                        .on_hover_text(value);
-                    });
-                }
-
-                ui.add_space(16.0);
-                ui.label(RichText::new("CREDITS").color(UI_ACCENT));
-                ui.separator();
-                ui.label(RichText::new("Written by Evert Chin").color(UI_TEXT));
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new("github.com/megablue")
-                        .color(UI_TEXT_SECONDARY)
-                        .small(),
-                );
+                about_page_column(ui);
             });
     }
 
@@ -3539,18 +3626,19 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_version, can_switch_profile, config_notice_status, config_notices_status,
-        deselect_strip_rect, draw_pane_divider, empty_editor, list_pane_column,
-        list_pane_row_height, list_pane_row_width_for, overlay_count_label, overlay_name_width,
-        overlay_row_contents, page_has_detail_footer, page_has_list_pane, pending_edits,
-        profile_name_width, profile_row_contents, profile_row_label, rail_width, row_inner,
-        selected_overlay_for_border, sync_profile_cache, toggled_selection, window_title, Frame,
-        Page, ProfileSnapshot, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, DETAIL_FOOTER_BUTTON_HEIGHT,
-        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
-        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES,
-        PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
-        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
-        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        about_page_lines, app_version, can_switch_profile, config_notice_status,
+        config_notices_status, deselect_strip_rect, draw_pane_divider, empty_editor,
+        list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_count_label,
+        overlay_name_width, overlay_row_contents, page_has_detail_footer, page_has_list_pane,
+        pending_edits, profile_name_width, profile_row_contents, profile_row_label, rail_width,
+        row_inner, selected_overlay_for_border, sync_profile_cache, toggled_selection,
+        ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot, ABOUT_AUTHOR_URL,
+        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_LICENCE_URL, ABOUT_REPOSITORY,
+        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
+        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
+        OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
+        RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
+        STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use crate::config::{Anchor, ConfigNotice, ProfileEntry};
     use eframe::egui;
@@ -3987,6 +4075,55 @@ mod tests {
                 "with the profile draft {dirty} and the preferences draft {prefs_dirty} \
                  Save and Discard should be {}",
                 if expected { "enabled" } else { "disabled" }
+            );
+        }
+    }
+
+    /// No line on the About page may be smaller than the rest of the window's
+    /// body text.
+    ///
+    /// The page shipped one line at `.small()` and was criticised for it, which
+    /// is a preference everyone shares and only one person remembers. This makes
+    /// it a rule: any line below the body size fails, so the floor cannot be
+    /// quietly lowered to make a new line fit.
+    #[test]
+    fn no_about_page_line_is_tiny() {
+        let floor = ui_text_size();
+        for line in about_page_lines() {
+            assert!(
+                line.size >= floor,
+                "the About page's {:?} is {}px, below the {floor}px body size",
+                line.text,
+                line.size
+            );
+        }
+    }
+
+    /// Every clickable About line opens a real web address.
+    ///
+    /// The display text drops the `https://` prefix, so a typo in a URL would
+    /// not be visible on the page at all; only the click would fail, and then in
+    /// the user's browser rather than in this app. Checking the constants here
+    /// catches that, and also catches a line quietly losing its link.
+    #[test]
+    fn about_page_links_open_a_web_address() {
+        let lines = about_page_lines();
+        let linked: Vec<&str> = lines
+            .iter()
+            .filter_map(|line| match line.kind {
+                AboutKind::Link(url) => Some(url),
+                AboutKind::Text => None,
+            })
+            .collect();
+        assert_eq!(
+            linked,
+            vec![ABOUT_REPOSITORY, ABOUT_AUTHOR_URL, ABOUT_LICENCE_URL],
+            "the About page's links changed, so check the text says what each one opens"
+        );
+        for url in linked {
+            assert!(
+                url.starts_with("https://"),
+                "{url} is shown on the About page and would not open"
             );
         }
     }

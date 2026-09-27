@@ -209,6 +209,15 @@ Installer (run from the repository root):
 
 ## egui layout traps
 Every trap below shipped once. Each test named here fails on the old behaviour.
+- **Centre a column with `ui.with_layout(..)`, never `ui.vertical_centered(..)`.**
+  `with_layout` re-lays-out the *existing* `Ui` and creates no child, so there is
+  no child min rect to overshoot and no 18px `interact_size.y` band.
+  `vertical_centered(..)` is a `scope_builder` child, which is the exact shape
+  that made the detail footer report 22px more than its box and slide into the
+  status bar. `show_detail_footer` uses `with_layout` with two children and is
+  correct, so the counter-example is right here in the file. Used by
+  `about_page_column`. For `Layout::top_down` the main axis is vertical, so
+  `Align::Center` is the cross axis and centres each line horizontally.
 - **A child that does not fill its box can report a min rect LARGER than the box
   it was given**, and the parent advances its cursor by whatever the child
   reports. `show_editor`'s empty state sat in `ui.centered_and_justified`, whose
