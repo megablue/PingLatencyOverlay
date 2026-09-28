@@ -2239,19 +2239,28 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "ping-latency-overlay"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "eframe",
  "env_logger",
  "image",
+ "log",
+ "ping-latency-overlay-core",
+ "tokio",
+ "tray-icon",
+ "windows-sys 0.61.2",
+ "winresource",
+]
+
+[[package]]
+name = "ping-latency-overlay-core"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
  "log",
  "ping-rs",
  "serde",
  "serde_json",
  "tiny-skia",
  "tokio",
- "tray-icon",
- "windows-sys 0.61.2",
- "winresource",
 ]
 
 [[package]]

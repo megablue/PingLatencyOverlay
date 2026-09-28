@@ -7,10 +7,15 @@ use eframe::egui::{
 };
 use eframe::{App, CreationContext, NativeOptions};
 
-use crate::config::{self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig};
-use crate::overlay::OverlayManager;
-use crate::probes::ProbeManager;
+// Probing, rendering and the layered overlay windows live in the core crate so
+// that a renderer process can be built from them without a GUI stack. Only
+// `tray` is local; `ui` is this module.
 use crate::tray::{self, TrayAction, TrayState};
+use ping_latency_overlay_core::config::{
+    self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig,
+};
+use ping_latency_overlay_core::overlay::OverlayManager;
+use ping_latency_overlay_core::probes::ProbeManager;
 
 const SIDEBAR_WIDTH: f32 = 270.0;
 /// Width a scroll bar's contents may use, the difference between the list
@@ -3714,7 +3719,7 @@ fn draw_dropdown_arrow(painter: &egui::Painter, rect: egui::Rect, color: Color32
 }
 
 pub fn run() {
-    crate::overlay::enable_dpi_awareness();
+    ping_latency_overlay_core::overlay::enable_dpi_awareness();
     let native_options = NativeOptions {
         viewport: ViewportBuilder::default()
             .with_app_id("ping-latency-overlay")
@@ -3753,8 +3758,8 @@ mod tests {
         RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
         UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
-    use crate::config::{Anchor, ConfigNotice, ProfileEntry};
     use eframe::egui;
+    use ping_latency_overlay_core::config::{Anchor, ConfigNotice, ProfileEntry};
     use std::collections::HashMap;
 
     /// Where a list pane row's contents landed, measured through the real row

@@ -1,0 +1,44 @@
+[package]
+name = "ping-latency-overlay-core"
+version = "0.1.0"
+description = "Latency probing, graph rendering and layered overlay windows"
+authors = ["megablue"]
+license = "GPL-3.0-only"
+repository = "https://github.com/megablue/PingLatencyOverlay"
+edition = "2021"
+rust-version = "1.88"
+
+[lib]
+name = "ping_latency_overlay_core"
+crate-type = ["rlib"]
+
+# This crate is what the renderer process will be built from, and the whole
+# reason it exists separately is that the renderer must never be able to
+# create a GPU context or open a window. That is only true as long as nothing
+# in the dependency list below can pull a GUI stack in transitively, so:
+#
+#   * no eframe, egui, glow, winit, accesskit or wgpu, directly or otherwise;
+#   * no tray-icon, because a renderer has no tray;
+#   * no `windows-sys`, because the layered-window code declares the handful
+#     of user32/gdi32 entry points it needs as its own `extern "system"`
+#     blocks, which keeps this crate free of a Windows SDK binding crate.
+#
+# `tests/no_gui_dependencies.rs` enforces the first rule by running
+# `cargo tree` on this package, so adding a dependency that drags the GUI
+# stack along fails the suite rather than quietly inflating the renderer.
+#
+# The list itself, and why each entry is here:
+#   serde / serde_json  config, profile and preference storage
+#   tokio               the probe tasks; also the future named-pipe transport
+#   ping-rs             ICMP echo, via Win32 IcmpSendEcho2 (no Administrator)
+#   dirs                locating the config directory
+#   log                 overlay window diagnostics
+#   tiny-skia           software rendering of the graph; no GPU, no shaders
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+ping-rs = "0.1"
+dirs = "5"
+log = "0.4"
+tiny-skia = "0.11.4"

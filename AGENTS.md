@@ -7,18 +7,23 @@ on Tokio tasks and the system tray uses `tray-icon`. See `docs/SPEC.md` for
 product behavior.
 
 ## Layout
-- `src-tauri/` — the Cargo project; run Cargo commands here.
-  - `src/lib.rs` — module wiring and the application entry point.
-  - `src/config.rs` — config schema, profiles, persistence, and directory
-    migration.
-  - `src/probe.rs` — one-shot ICMP or TCP latency measurement.
-  - `src/probes.rs` — long-lived Tokio probe tasks and bounded sample buffers.
-  - `src/overlay.rs` — native layered HWND creation, DPI/work-area layout, and
-    per-window alpha compositing with `UpdateLayeredWindow`.
-  - `src/render.rs` — software graph rendering into premultiplied RGBA.
-  - `src/border.rs` — runtime border-effect state and software RGB border drawing.
+- `src-tauri/` — the Cargo workspace; run Cargo commands here. The root
+  manifest is both the workspace and the application package; `crates/core` is
+  the other member.
+  - `src/lib.rs` — module wiring and the application entry point (the shell).
   - `src/ui.rs` — tray-mode egui configuration editor.
   - `src/tray.rs` — tray icon, menu, and bundled artwork.
+  - `crates/core/` — the `ping-latency-overlay-core` crate. Everything the
+    renderer needs and **no GUI dependency at all**:
+    - `src/config.rs` — config schema, profiles, persistence, and directory
+      migration.
+    - `src/probe.rs` — one-shot ICMP or TCP latency measurement.
+    - `src/probes.rs` — long-lived Tokio probe tasks and bounded sample buffers.
+    - `src/overlay.rs` — native layered HWND creation, DPI/work-area layout, and
+      per-window alpha compositing with `UpdateLayeredWindow`.
+    - `src/render.rs` — software graph rendering into premultiplied RGBA.
+    - `src/border.rs` — runtime border-effect state and software RGB border
+      drawing.
 - `scripts/gen-icons.mjs` — generates native artwork with no dependencies.
 - `packaging/nsis/` and `scripts/build-nsis.ps1` — native installer packaging.
 - The pre-egui Tauri/React implementation remains available on `main`.
@@ -48,6 +53,13 @@ Installer (run from the repository root):
   friends are clippy-only, and `cargo test` compiles and passes with them
   present. The gate is `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test`, `cargo build --release`.
+- **A manifest that is both a workspace root and a package narrows plain
+  `cargo test` to that package alone.** The split into `crates/core` made
+  `cargo test` report 35 passed against a 94-test suite and exit 0, silently
+  skipping all 59 tests in `core`. `default-members = [".", "crates/core"]` in
+  the root manifest is what makes the ordinary command cover the workspace, and
+  it is load-bearing. If the test count ever drops without a deletion, suspect
+  this before suspecting a filter.
 - **Commit messages go through a file.** Write the message to a scratch file
   (this session uses `%LOCALAPPDATA%\Temp\opencode\plo-commit-msg.txt`) and run
   `git commit -F <path>`; a PowerShell here-string gets its terminator mangled
@@ -327,6 +339,15 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   are stopped. This keeps Save from pausing the graph.
 
 ## Hard rules
+- **`crates/core` must never gain a GUI dependency.** The renderer process is
+  built from it precisely so that it can never create a GPU context or run an
+  event loop; that is a property of the dependency graph, and graph properties
+  decay silently. No `eframe`, `egui`, `glow`, `winit`, `accesskit`, `wgpu` or
+  `tray-icon`, directly or transitively, and no `windows-sys` either (the
+  layered-window code declares its own `extern "system"` blocks).
+  `crates/core/tests/no_gui_dependencies.rs` runs `cargo tree` and fails the
+  suite if one appears, so do not "fix" a deny-list entry instead of the
+  dependency. The shell package is the only thing allowed a GUI stack.
 - Windows-only: MSVC toolchain (`x86_64-pc-windows-msvc` or
   `aarch64-pc-windows-msvc`) + MSVC Build Tools. No WebView2 runtime is needed.
 - ICMP uses the `ping-rs` crate (Win32 `IcmpSendEcho2`) and does not require
