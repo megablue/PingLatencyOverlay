@@ -82,17 +82,34 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 
 !insertmacro MUI_LANGUAGE "English"
 
+; Stop a process by image name, but only if that executable is actually
+; installed. Used for the pre-0.2.0 names, which a current install does not
+; have, so that the common case spawns three `taskkill`s instead of seven.
+;
+; The jump uses a label rather than a `+N` offset on purpose. A relative jump
+; counts instructions in the generated code, and this body expands to three of
+; them, so the arithmetic is the kind of thing that is right until the macro is
+; edited. A label is checked by makensis instead of by me.
+;
+; The label carries the image name so that expanding this twice in one section
+; does not define the same label twice.
+!macro KILL_IF_INSTALLED image
+  IfFileExists "$INSTDIR\${image}" 0 skipped_${image}
+  nsExec::ExecToStack 'taskkill /F /IM ${image} /T'
+  Pop $0
+  Pop $1
+  skipped_${image}:
+!macroend
+
 Section "Install"
   ; An upgrade has to take the old installation away, and Windows will not let us
   ; delete or overwrite a RUNNING executable. With the app up, the old
   ; uninstaller silently fails to remove the binaries and the new install
   ; silently fails to replace them, which is exactly the pile of stale
   ; executables this is here to prevent. So the processes are stopped first.
-  ; `taskkill` is run through `ExecWait` because that is a builtin -- no plugin,
-  ; and the exit code is ignored because "no such process" is the normal answer
-  ; on a first install. Killing without asking is deliberate: the user has just
-  ; chosen to run an installer, and an overlay that has to be redrawn afterwards
-  ; is not a real cost.
+  ; Killing without asking is deliberate: the user has just chosen to run an
+  ; installer, and an overlay that has to be redrawn afterwards is not a real
+  ; cost.
   ;
   ; None of this touches your settings. They live in
   ; %USERPROFILE%\.config\.PingLatencyOverlay\, outside $INSTDIR, and the
@@ -108,20 +125,46 @@ Section "Install"
   ; earlier release is running those. A file cannot be deleted while its process
   ; holds it open, so an old name left running would make the uninstall below
   ; fail silently and the install quietly leave the previous copy in place.
-  ; `taskkill` is a Windows builtin, so this needs no NSIS plugin.
-  ; The exit code is deliberately ignored: "no such process" is the normal
-  ; answer on a first install and is not a failure.
-  ExecWait 'taskkill /F /IM plo-tray.exe /T' $0
-  ExecWait 'taskkill /F /IM plo-config.exe /T' $0
-  ExecWait 'taskkill /F /IM plo-renderer.exe /T' $0
-  ExecWait 'taskkill /F /IM ping-latency-overlay-tray.exe /T' $0
-  ExecWait 'taskkill /F /IM ping-latency-overlay-config.exe /T' $0
-  ExecWait 'taskkill /F /IM ping-latency-overlay-renderer.exe /T' $0
-  ; The single executable the app shipped as before the three-process split. Only
-  ; a user upgrading across that boundary still has one, and the older
-  ; uninstaller in the next step knows how to delete it, but only if it is not
-  ; still running.
-  ExecWait 'taskkill /F /IM ping-latency-overlay.exe /T' $0
+  ;
+  ; `nsExec` rather than `ExecWait`, and the exit code is deliberately ignored:
+  ; "no such process" is the normal answer on a first install and is not a
+  ; failure. ExecWait is not an option here. This installer is a windowed
+  ; program and `taskkill` is a console one, so a plain ExecWait hands it a
+  ; brand new console and the user gets a terminal window flashing once per
+  ; call. Measured, with a probe that asks GetConsoleWindow about itself:
+  ; ExecWait reports a visible console (verdict 2), nsExec reports one that is
+  ; allocated but never shown (verdict 1). nsExec uses CREATE_NO_WINDOW. It
+  ; ships with every NSIS distribution alongside MUI2, so makensis already has
+  ; it and the build script needs no change.
+  nsExec::ExecToStack 'taskkill /F /IM plo-tray.exe /T'
+  Pop $0
+  Pop $1
+  nsExec::ExecToStack 'taskkill /F /IM plo-config.exe /T'
+  Pop $0
+  Pop $1
+  nsExec::ExecToStack 'taskkill /F /IM plo-renderer.exe /T'
+  Pop $0
+  Pop $1
+  ; The three pre-rename names, and the single pre-split one, only exist in
+  ; $INSTDIR if this is a real upgrade across that boundary, so each kill is
+  ; gated on the file being there. A current install spawns three processes
+  ; instead of seven. The gate narrows those four from a system-wide kill to
+  ; the installed copy, which costs nothing: a stale executable running from
+  ; some other directory was never going to be removed by this installer either,
+  ; because the old uninstaller below only deletes inside $INSTDIR.
+  ;
+  ; The current three stay ungated. A developer running the build out of
+  ; target\debug has those running from a directory $INSTDIR knows nothing
+  ; about, and that is exactly the case the ungated call catches.
+  ;
+  ; These four names are the same list as LEGACY_EXE_NAMES in transport.rs and
+  ; are hand-copied, because an NSIS script cannot import a Rust constant. The
+  ; two lists are the sort of thing that drifts; if a name is added there, add
+  ; it here.
+  !insertmacro KILL_IF_INSTALLED ping-latency-overlay-tray.exe
+  !insertmacro KILL_IF_INSTALLED ping-latency-overlay-config.exe
+  !insertmacro KILL_IF_INSTALLED ping-latency-overlay-renderer.exe
+  !insertmacro KILL_IF_INSTALLED ping-latency-overlay.exe
 
   ; And now the previous installation, if there was one. This is here and not in
   ; .onInit because .onInit runs BEFORE the directory page, so $INSTDIR is not
@@ -130,6 +173,11 @@ Section "Install"
   ; tells it to use this run's directory rather than the one it recorded when it
   ; was installed -- otherwise a user who moved the app would have the old
   ; uninstaller delete somewhere else entirely.
+  ;
+  ; This one stays on `ExecWait` rather than nsExec. The old uninstaller is a
+  ; windowed program, so there is no console to flash, and the console problem
+  ; above is specific to spawning a console-subsystem child. It also has to be
+  ; waited on, because the files are deleted underneath us in the next step.
   IfFileExists "$INSTDIR\Uninstall.exe" 0 +2
     DetailPrint "Removing the previous installation..."
     ExecWait '"$INSTDIR\Uninstall.exe" /S _?=$INSTDIR' $0

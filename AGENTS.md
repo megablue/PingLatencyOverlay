@@ -548,6 +548,24 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   `MUI_FINISHPAGE_SHOWREADME_FUNCTION`, and MUI calls the function instead of
   `ExecShell open`ing a file. That is how the desktop shortcut is offered, and
   the name is misleading, so the script says so at the definition.
+- **`ExecWait` of a console-subsystem program flashes a terminal, and there is
+  no flag to stop it.** The installer is a windowed program and `taskkill` is a
+  console one, so a plain `ExecWait` hands it a new console and the user sees
+  one flash per call — seven of them. `SW_HIDE` is **not** the answer: it is an
+  `ExecShell` flag, and makensis rejects it on `ExecWait` ("expects 1-2
+  parameters"). Measured with a probe that calls `GetConsoleWindow` on itself —
+  a bare `ExecWait` reports a *visible* console, `nsExec::ExecToStack` reports
+  one that is allocated but never shown, because it uses `CREATE_NO_WINDOW`.
+  `nsExec` ships with every NSIS distribution, so the build script needs no
+  change. Keep the old-uninstaller `ExecWait` on `ExecWait`: that one is a
+  windowed program and has no console to flash.
+- **A gate needs both directions tested, and `$INSTDIR` in a test installer is
+  not the directory you set.** `InstallDirRegKey` reads the *real*
+  installation's `InstallLocation`, so a test that sets `InstallDir` to a temp
+  directory still installs over the user's real one unless the uninstall key is
+  repointed too. That is not hypothetical: a gate test that read 3 kills for an
+  upgrade that should have made 7 was the harness lying, the macro was right.
+  A count-only assertion would have called that a pass.
 - Two NSIS traps, both of which cost time here. `MUI_PAGE_CUSTOMFUNCTION_PRE`,
   `_SHOW` and `_LEAVE` are **not page-scoped**: `Pages.nsh` `!undef`s them after
   the first page that reaches the insertion point, so they fire on the welcome
@@ -561,6 +579,12 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
 - The installer stops seven executable names before removing the old
   installation: the three current ones, the three pre-rename names in
   `LEGACY_EXE_NAMES`, and the single pre-split `ping-latency-overlay.exe`.
+  The current three are killed unconditionally — a developer running the build
+  out of `target\debug` has them running from a directory `$INSTDIR` knows
+  nothing about. The four pre-0.2.0 names go through `KILL_IF_INSTALLED`, which
+  checks `$INSTDIR` first, so a current install spawns three `taskkill`s
+  instead of seven. The four names are hand-copied from `LEGACY_EXE_NAMES`
+  because an NSIS script cannot import a Rust constant.
   Windows will not delete a file its process holds open, so an upgrade over a
   running app otherwise leaves the previous copy in place and says nothing. The
   uninstall section only ever deletes the binaries, the LICENSE, the two
