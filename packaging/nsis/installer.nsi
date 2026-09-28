@@ -83,6 +83,41 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+  ; An upgrade has to take the old installation away, and Windows will not let us
+  ; delete or overwrite a RUNNING executable. With the app up, the old
+  ; uninstaller silently fails to remove the binaries and the new install
+  ; silently fails to replace them, which is exactly the pile of stale
+  ; executables this is here to prevent. So the processes are stopped first.
+  ; `taskkill` is run through `ExecWait` because that is a builtin -- no plugin,
+  ; and the exit code is ignored because "no such process" is the normal answer
+  ; on a first install. Killing without asking is deliberate: the user has just
+  ; chosen to run an installer, and an overlay that has to be redrawn afterwards
+  ; is not a real cost.
+  ;
+  ; None of this touches your settings. They live in
+  ; %USERPROFILE%\.config\.PingLatencyOverlay\, outside $INSTDIR, and the
+  ; Uninstall section below only ever deletes the binaries, the LICENSE, the two
+  ; shortcuts and its own registry key.
+  ; `both` rather than `textonly` so the progress bar stays and the wait does not
+  ; look like a freeze. Without these two lines the uninstall below is a pause
+  ; with nothing to explain it.
+  SetDetailsPrint both
+  DetailPrint "Stopping any running PingLatencyOverlay processes..."
+  ExecWait 'taskkill /F /IM ping-latency-overlay-tray.exe /T' $0
+  ExecWait 'taskkill /F /IM ping-latency-overlay-config.exe /T' $0
+  ExecWait 'taskkill /F /IM ping-latency-overlay-renderer.exe /T' $0
+
+  ; And now the previous installation, if there was one. This is here and not in
+  ; .onInit because .onInit runs BEFORE the directory page, so $INSTDIR is not
+  ; final yet and we would be looking in the wrong place. `/S` keeps the old
+  ; uninstaller from putting up its own confirmation page, and `_?=$INSTDIR`
+  ; tells it to use this run's directory rather than the one it recorded when it
+  ; was installed -- otherwise a user who moved the app would have the old
+  ; uninstaller delete somewhere else entirely.
+  IfFileExists "$INSTDIR\Uninstall.exe" 0 +2
+    DetailPrint "Removing the previous installation..."
+    ExecWait '"$INSTDIR\Uninstall.exe" /S _?=$INSTDIR' $0
+
   SetOutPath "$INSTDIR"
   ; Three executables, and all three MUST land in the same directory: each finds
   ; the others by looking for a sibling of its own binary. Putting any of them

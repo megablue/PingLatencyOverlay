@@ -1,7 +1,8 @@
 # PingLatencyOverlay
 
 Live network latency as a small graph that sits on top of your screen. Always
-visible, click-through, and out of the way.
+visible, click-through, and out of the way — and cheap enough to leave running
+all day.
 
 <!-- Add a screenshot here: the Config window. -->
 <!-- Add a screenshot here: an overlay above a game or a video call. -->
@@ -10,6 +11,9 @@ visible, click-through, and out of the way.
 
 - **Always-on-top graphs** that never steal your clicks. The overlay is
   click-through, so you can keep playing or working underneath it.
+- **Small enough to leave running.** With no settings window open, the tray and
+  the overlay use about 35 MB of memory between them. Close the tray and leave
+  the overlay running and it drops to about 17 MB. Figures vary by machine.
 - **Genuinely transparent.** Set the background to fully invisible and you are
   left with just the line, or a soft tinted panel if you prefer.
 - **Ping or TCP.** Measure ICMP latency, or the time it takes to complete a TCP
@@ -37,7 +41,8 @@ it up.
 ## Getting started
 
 1. **Open the Config window.** Left-click the tray icon to open it. Right-click
-   for a menu with **Pause** / **Resume**, **Config** and **Exit**.
+   for a menu with **Config**, **Pause / Resume**, **Close tray, keep overlays
+   running** and **Exit**.
 2. **Add an overlay.** Press **Add overlay** in the list pane. Give it a name you
    will recognise later.
 3. **Choose a protocol and a target.**
@@ -111,6 +116,15 @@ switch between them without rebuilding anything each time.
 **Save** and **Discard** live in a fixed bar under the right-hand pane, so they
 sit next to the settings they write.
 
+Closing the window closes the window — the tray and your overlays carry on
+running. If you have unsaved changes it asks first, offering **Save**,
+**Discard** or **Cancel**. To stop everything, use the tray's **Exit**.
+
+**Close tray, keep overlays running** is the one to reach for if you want the
+lowest footprint: the tray goes, the overlay stays, and the app is down to
+about 17 MB. Bring the tray back whenever you like by running it again from the
+Start menu.
+
 ## Where your settings live
 
 ```text
@@ -132,14 +146,15 @@ single `config.json`, it is migrated for you on first launch.
 Requires the MSVC toolchain and Build Tools. From `src-tauri/`:
 
 ```powershell
-cargo run                  # development build
-cargo run -- --show-config # ...and open the Config window immediately
-cargo build --release      # optimised standalone executable
+cargo run                  # development build; opens the Config window
+cargo build --release      # optimised standalone executables
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The executable is written to `src-tauri\target\release\ping-latency-overlay.exe`.
+Three executables are written to `src-tauri\target\release\`: the tray, the
+Config window, and the renderer. `cargo run` starts the window, which brings up
+the other two if they are not already running.
 
 To build an installer, commit first — the version number comes from the Git
 commit count — then from the repository root:
