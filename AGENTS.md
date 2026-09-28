@@ -8,11 +8,14 @@ product behavior.
 
 ## Layout
 - `src-tauri/` — the Cargo workspace; run Cargo commands here. The root
-  manifest is both the workspace and the application package; `crates/core` is
-  the other member.
-  - `src/lib.rs` — module wiring and the application entry point (the shell).
-  - `src/ui.rs` — tray-mode egui configuration editor.
-  - `src/tray.rs` — tray icon, menu, and bundled artwork.
+  manifest is both the workspace and the application package; `crates/core`
+  and `crates/tray` are the other members.
+  - `src/lib.rs` — the Config window process: module wiring and entry point.
+    The only crate in the project allowed to depend on eframe.
+  - `src/ui.rs` — the egui configuration editor. It was "tray-mode" when the
+    tray shared this process; it is now its own process that exits on close.
+  - `crates/tray/` — the `ping-latency-overlay-tray` crate, and the tray icon,
+    menu and bundled artwork. The resident process, and it has no eframe.
   - `crates/core/` — the `ping-latency-overlay-core` crate. Everything the
     renderer needs and **no GUI dependency at all**:
     - `src/config.rs` — config schema, profiles, persistence, and directory
@@ -33,9 +36,9 @@ product behavior.
 
 ## Commands
 Native app (run from `src-tauri/`):
-- `cargo run` — development build
-- `cargo run -- --show-config` — development launch with Config visible
-- `cargo build --release` — optimized standalone executable
+- `cargo run` — development build. Starts the Config window, which brings up
+  the tray and renderer if they are not already running.
+- `cargo build --release` — optimized standalone executables
 - `cargo fmt`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test`
@@ -333,31 +336,155 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   minimum sizes honest.
 
 ## Processes and the pipe
-- The app is **three processes**. The tray (`plo-tray.exe`) is what a user launches and the only one that stays resident; the Config window (`plo-config.exe`) starts on demand and **exits when it is closed**; the renderer (`plo-renderer.exe`, built from `crates/core`) draws the overlays. The three executables are named tersely on purpose — they sit side by side in the install folder and in Task Manager, and a name long enough to abbreviate is hard to tell from its neighbour at a glance. The **crates** keep their descriptive names; only the binaries are short. The product name, the installer file name, the Start Menu folder and the window title are all still PingLatencyOverlay. `LEGACY_EXE_NAMES` in `transport.rs` holds the pre-rename names, and the installer kills those before removing a previous install, because a file cannot be deleted while its process holds it open. Two processes carry no eframe at all, which is the entire point: the GL context exists only while the window is open. A hidden-but-alive window would hold it, which is why close means exit and not hide.
-- **No package may reach a GPU context or an event loop.** That is the property the memory win depends on, and it is checked: `crates/core/tests/no_gui_dependencies.rs` runs `cargo tree` over `GUI_FREE_PACKAGES` and fails on `eframe`/`egui`/`glow`/`winit`/`accesskit`/`wgpu` for the core, and on `tray-icon`/`muda` for the core only. The tray is allowed `tray-icon` — it IS the tray — so the lists are two-tier and the rule is named for what it forbids rather than for the crates it happens to list. Applying the renderer's blanket list to the tray was tried and was wrong.
-- The renderer is a `[[bin]]` in `crates/core` rather than its own package because it needs nothing the library does not already depend on, and `cargo tree` reports deps across **every** target — so the dependency test guards the renderer binary for free. The tray needs a package of its own, because a `[[bin]]` in the same crate as the window would link eframe into the resident process, which is the whole thing being avoided.
-- `default-run` on the root package is set, because `cargo run` with two binaries is ambiguous and it is ambiguous exactly where a developer starts the app. The window is the default because it starts whatever it needs.
-- **Every process here is `windows_subsystem = "windows"`, so `eprintln!` goes nowhere.** That is not a style note, it is why this app shipped a release with an unreachable Config window and a tray that did nothing on right-click, and why the only symptom was "it does not do anything". `crates/core/src/diagnostics.rs` is the answer: `log_line` appends to `pinglatencyoverlay.log` beside the config, and `fatal` puts up a `MessageBox` for the tray's two startup failures, because the tray is the one process here that never draws a window and so the only one that can talk to a user at all. **Any `return` on an error path in the tray needs one of the two** — a bare `return` is invisible forever. The tray also logs a heartbeat every few hundred passes, because a loop that has wedged and a feature that was never written look identical from the outside; the log turns "the loop stopped" into a fact.
-- **The launch matrix is `should_start(me, missing)` and it is tested over all nine cells.** A process never starts itself; the renderer starts nothing; the tray does not open the window on its own (that is a menu item, not a side effect); everything else that is missing gets started, because a user who launched one executable should end up with a working app rather than a piece of one. It is a function rather than a comment because all three of the bugs it fixes came from the rule living in three places and none of them agreeing.
-- **The tray supervises the PIPE, not the child handle.** An older version returned early whenever it had not spawned the renderer, which is exactly the attach case, so a user who launched the Config window first got an app that never recovered from a crash. "Only ever stop a process you did not spawn" is about *killing* something with state worth protecting; a dead process has none, and not restarting it leaves the user with an app that silently does nothing. `PeekNamedPipe` is the probe (see below), and a lost pipe is a better signal than a child handle, because a hung renderer still holds its mutex while answering nothing.
-- **Bringing a renderer up and noticing a crash are two different states, and only the second one costs an attempt.** `App::starting` is an `Option<Instant>`; while it is set, `finish_starting` retries the pipe and the config push and nothing is counted against the storm guard. It was one check, and a fresh renderer is briefly indistinguishable from a dead one, so one slow start reported itself as a crash every 200ms, burned all five attempts in about a second, and left a tray that had quietly decided never to try again. The storm guard's job is to stop a **crash loop**; a renderer that has not answered yet is not crashing. `START_TIMEOUT` (10s) is what ends the grace period and hands the attempt back to the crash path.
-- **Never discard a send error.** Both fire-and-forget pushes — the config handed to a relaunched renderer, and `set_paused` from the tray menu — used `let _ = self.send(..)`, so a command that never left the process looked exactly like one that was obeyed. That is the same shape of quiet wrongness as the profile-count zero and the "Saved." that did not reach the renderer, and it is the reason a relaunched renderer could come back with no overlays and no explanation. `finish_starting` now retries the config push until it lands, and `toggle_running` logs both halves of the action.
-- **The renderer serves SEVERAL clients at once, and it has to.** `serve` spawns two `instance_loop`s, each holding one pipe instance and making the next one when it finishes with a client, so while one instance is busy serving, another is already waiting. A single sequential loop — create, connect, read to EOF, create again — is what shipped and it is why the tray looked dead: you launched the Config window first, it took the only instance, the tray's `CreateFileW` got `ERROR_FILE_NOT_FOUND`, and `Client::connect` only special-cased `ERROR_PIPE_BUSY`, so the tray never attached and went round the restart guard while a healthy renderer drew the overlays. Both processes legitimately need a connection at the same time; a rendezvous designed for one caller and handed two is a defect, not a configuration.
-- **A liveness check must not be able to block, and must be given a handle that can answer it.** The tray asks with `PeekNamedPipe` — a query, not a transfer, which returns immediately whether the far end is there, has gone, or has stopped reading. The previous version probed with `send`, and `WriteFile` on a pipe nobody drains does not return; that probe ran in `step`, the same loop that services tray clicks, so a wedged probe meant *no click did anything at all* — the menu looked broken and it was the loop. Anything in a loop that also has to stay responsive to the user is a place a blocking call is a bug. The subtler half cost many more rounds: **`PeekNamedPipe` needs read access**, and the client handle was opened `GENERIC_WRITE` only, so every query failed with `ERROR_ACCESS_DENIED` and reported "the renderer is gone" the instant it was asked. The tray connected, asked, was told no, dropped the client and restarted the renderer, and repeated every 200ms — reporting "no renderer" forever while every individual call did exactly what it said. Nothing was wrong with `is_connected`; the handle it was given could not answer the question. **Every client handle is opened `GENERIC_READ | GENERIC_WRITE`**, and if a query is ever added here, the first question is whether the handle can answer it.
-- **"No renderer is listening" is an answer, not a fault.** `Client::connect` maps `ERROR_FILE_NOT_FOUND` to `io::ErrorKind::NotFound`, distinct from every other failure, because it is the result that says *start one*. `connecting_with_nothing_listening_fails_quickly` asserts the kind, not merely that it failed: lumping the ordinary answer in with a real fault is what made a working system look broken.
-- `crates/core/src/transport.rs` owns the wire format and **both ends are compiled from the same crate**, so the two processes cannot disagree about the protocol without a compile error. Messages are `set_config`, `set_paused`, `set_border_preview`, `ping` and `shutdown`, tagged with `#[serde(tag = "kind")]` so an **unknown kind is rejected rather than silently ignored** — a silently dropped command is indistinguishable from one that was obeyed. `ping` exists to be a no-op and nothing should ever act on it; borrowing `set_paused` for a probe would have quietly resumed the probes whenever the sender's mirror of the paused state was stale.
-- **Framing is one JSON object per line, and the newline is not optional.** A named pipe is a byte stream, so something must delimit messages. A length prefix is the usual source of off-by-one bugs; JSON escapes newlines inside strings, so a line break can only ever be a delimiter. `a_name_with_quotes_braces_and_newlines_survives` exists to hold that.
-- **The pipe is the rendezvous.** `Client::connect()` succeeding means a renderer is already running and the caller attaches; failing means spawn one and retry. There is no registry, no lock file and no heartbeat, which is what makes "run without the tray, then bring one later" free. `SingleInstance::acquire(Role)` uses a per-role named mutex (`Global\PingLatencyOverlay-v1-shell` / `-config` / `-renderer`) — **per role, not per app**: the tray must be able to exit while the window stays open, the window must be openable twice without a second one fighting for the pipe, and a crashed renderer must be replaceable. Three roles means three pairs, and `each_role_gets_its_own_versioned_mutex` checks all of them rather than one, because a test that compares only two lets the third silently share one. `None` from `acquire` means another process holds it, which is the ordinary "user ran it twice" answer and not an error.
-- **`renderer_process` is set only when THIS process started the renderer.** Never stop, poll or restart a process you did not spawn: a renderer somebody launched by hand is the tray-less case, and a blanket kill takes an overlay set the user still wants off their screen. The same rule governs the `Shutdown` on `Drop` and the tray's `Exit`, which kills the Config window only if the tray started it. `Child` is returned from `start_or_attach_renderer` only when the call actually spawned, which is the single place that rule is decided.
-- **The storm guard's clock is a parameter, not the system clock.** `RestartGuard::should_restart(now)` takes an `Instant` so a test can drive a whole crash history in microseconds, and `forget_expired` is split out so "an old attempt is forgotten" is a statement about the list rather than something inferred from a boolean. A crash loop is worse than a stopped app: it burns a core and buries the one message that would explain it. The tray has its own copy as a free fn over `&mut Vec<Instant>`, and it is the tray that supervises — a renderer with no tray is not restarted at all.
-- **Neither the tray nor the window has a `ProbeManager` or an `OverlayManager` any more.** Neither has a tokio runtime, and only the window has eframe. Anything the renderer needs to know — including the animated border preview, which used to be a direct call and is now `set_border_preview` — has to travel over the pipe, and an omitted one loses a feature silently. The preview is sent **only when it changes**; per frame is a pipe write per frame, and the window clears it as it closes (`release_border_preview`) so a border cannot outlive the window that asked for it.
-- **Say what actually happened.** Writing the profile file and telling the renderer are two things that can fail separately and only the first is under the window's control, so `persist_current` reports "Saved, but the overlays were not updated" rather than a confident "Saved." A profile that reached disk while the renderer was never told is the same shape of quiet wrongness this project has shipped before.
-- The renderer is found as a **sibling of the caller's own executable** (`sibling_exe`, which is `current_exe().pop().push(name)`), so the same code works installed and under `cargo run`. All three must therefore be installed into the same directory, and `build-nsis.ps1` checks all three paths exist before packaging. `the_renderer_is_a_sibling_exe` holds that, because a wrong directory yields an app that starts cleanly and shows no overlays with nothing at runtime to say why.
-- **A client is not a supervisor, and the restart half must not travel with the start half.** The Config window starts the renderer once at launch if nothing else has, and the tray supervises it from then on. When the window also gained a restart path the two processes fought: the tray's Exit stopped the renderer and the window brought it straight back, and neither could win. Factoring a supervisor into a function the client shares is how that happened — `start-if-missing` is a courtesy at launch, `restart-on-death` is ownership, and only the tray owns it. The window's `reconnect_renderer` reconnects and never spawns, and carries no storm guard: a storm guard stops a *crash loop*, and this is not the process that would be looping.
-- **Letting the default handler run can be worse than ignoring the message.** `WM_CLOSE` reached `DefWindowProcW`, which *destroys the window*; the renderer's loop then saw a missing handle and rebuilt it on the next pass. So Task Manager's "End task" closed the windows, waited, found the process alive with brand-new windows, and concluded its graceful close had succeeded — so it never escalated to a kill and the process simply never ended. `overlay_wnd_proc` now handles `WM_CLOSE | WM_QUERYENDSESSION` by setting a flag and returning `0` **without** calling `DefWindowProcW`, and the loop checks `quit_requested()` immediately after `pump_messages` — the only place a request can arrive, because the pump is what dispatches it. The flag is a static because those windows belong to that one loop thread, and a window procedure cannot stop the loop that called it. Any future `WM_*` we choose not to handle has to be checked against this: the default is not a safe place to land.
-- **Any thread in ANY of our processes that creates a window must pump that thread's messages.** The overlay windows are ordinary Win32 windows, so Windows posts cursor, hover-tracking and repaint messages to the thread that created them, and a **tray icon is a window too**. Windows only ever delivers a window message to a thread that pumps its queue, so a thread that sleeps or blocks instead does not merely behave oddly: it receives *nothing*, and the symptom is a window or an icon that looks completely correct and is completely dead. `tray-icon` says this at the top of its own crate documentation — "an event loop must be running on the thread" — and spawns no pump on Windows, so the caller has to; `pump_messages()` in `overlay.rs` is ours and both the renderer and the tray call it. **This exact bug shipped twice**, once per process, and cost four rounds of bisection the second time: the rule was already written down here for the renderer in v0.1.76, and the tray was written afterwards without it. A rule that names one caller is a rule the next caller will not find — so this bullet names the class, and `grep` for `windows_subsystem = "windows"` before assuming a new process is exempt. A second symptom of the same cause was Windows declaring the renderer "Not responding" with a black background, which is what the pump fixed.
-- **The repaint cap and the liveness cap are different decisions.** `MESSAGE_POLL_INTERVAL` (16ms) is deliberately independent of `REPAINT_INTERVAL` (100ms): tying them together would mean a slow repaint is also an unresponsive process. The wait is `min(until the repaint deadline, MESSAGE_POLL_INTERVAL)` via `wait_before`, so a far-off deadline still services messages and a near one still repaints on time. A command from the pipe resets the deadline, so a config change shows immediately instead of waiting out the interval. `the_wait_is_bounded_by_both_the_cap_and_the_deadline` holds the arithmetic — but only the user can confirm Windows stops calling the process hung.
-- **The pipe server builds a FRESH instance per connection.** Reusing one instance spins. Windows will not make `ConnectNamedPipe` wait on an instance a client was already connected to and has since disconnected: it returns `ERROR_PIPE_CONNECTED` at once, meaning "a client is already attached", which is stale by then. Tokio passes that through as a **success** (it special-cases only `ERROR_PIPE_BUSY`), so one instance makes every reconnect `connect`-returns-at-once, then the read hits end-of-file at once, and round again — with no sleep on any leg, because the loop's only sleep guards a *failed* connect. A renderer left running with no shell sat at **8% CPU** for exactly that reason. A brand new instance has never been connected, so `connect` blocks. Only the first instance may claim `first_pipe_instance`, which is safe because the renderer mutex, not that flag, is what guarantees one renderer. **No test can catch this one** — the spin is Windows returning success instead of blocking, and only the OS in front of you shows it. It is also the kind of change that gets "tidied" back into the old shape by someone who does not know why the instance is rebuilt, which is why the reason is a comment on the line rather than a commit message.
+### The three processes
+- `plo-tray.exe` is what a user launches and the only one that stays
+  resident; `plo-config.exe` starts on demand and **exits when closed**;
+  `plo-renderer.exe` (a `[[bin]]` in `crates/core`) draws the overlays.
+  Two of the three carry no eframe at all — that is the whole point, since
+  the GL context exists only while the window is open, so close means exit
+  and never hide.
+- The binaries are named tersely on purpose: they sit side by side in the
+  install folder and Task Manager, and a name long enough to abbreviate is
+  hard to tell from its neighbour. Crates keep descriptive names; the
+  product name, installer, Start Menu folder and window title are all still
+  PingLatencyOverlay. `LEGACY_EXE_NAMES` in `transport.rs` holds the
+  pre-rename names and the installer kills them, because a file cannot be
+  deleted while its process holds it open.
+- **No package may reach a GPU context or an event loop.** That is the
+  property the memory win depends on, and `crates/core/tests/
+  no_gui_dependencies.rs` checks it with `cargo tree`. The deny lists are
+  two-tier because the tray *is* `tray-icon`; the rule is named for what it
+  forbids, not for the crates it happens to list.
+- The renderer needs no package of its own — it uses nothing the library
+  does not already depend on, and `cargo tree` reports a package's deps
+  across every target, so the test guards the binary for free. The tray
+  does need one: a `[[bin]]` beside the window would link eframe into the
+  resident process.
+- `default-run` is set on the root package; `cargo run` with two binaries
+  is ambiguous exactly where a developer starts the app. The window is the
+  default because it starts whatever it needs.
+
+### Launching
+- **Every process is `windows_subsystem = "windows"`, so `eprintln!` goes
+  nowhere.** `crates/core/src/diagnostics.rs` is the answer: `log_line`
+  appends to `pinglatencyoverlay.log` beside the config, and `fatal` puts up
+  a `MessageBox` for the tray's startup failures, the tray being the one
+  process that never draws a window. **Any `return` on a tray error path
+  needs one of the two** — a bare `return` is invisible forever. The tray
+  also logs a heartbeat, because a wedged loop and a feature that was never
+  written look identical from outside.
+- The launch matrix is `should_start(me, missing)`, tested over all nine
+  cells: a process never starts itself, the renderer starts nothing, the
+  tray does not open the window on its own, and everything else missing
+  gets started. It is a function because three bugs came from the rule
+  living in three places and none agreeing.
+- **The pipe is the rendezvous**, with no registry, lock file or heartbeat,
+  which is what makes "run without the tray, bring one later" free.
+  `SingleInstance::acquire(Role)` uses a per-**role** mutex so the tray can
+  exit while the window stays open and a crashed renderer is replaceable;
+  three roles means three pairs, and `each_role_gets_its_own_versioned_
+  mutex` checks all of them, because comparing only two lets the third share
+  one. `Ok(None)` means somebody else holds it — the ordinary "ran it twice"
+  answer, not an error.
+
+### The pipe
+- `transport.rs` owns the wire format and **both ends are compiled from the
+  same crate**, so the two processes cannot disagree without a compile
+  error. Messages are `set_config`, `set_paused`, `set_border_preview`,
+  `ping` and `shutdown`, tagged `#[serde(tag = "kind")]` so an unknown kind
+  is **rejected rather than silently ignored**. `ping` is a no-op and
+  nothing may act on it; borrowing `set_paused` for a probe would resume
+  the probes whenever the sender's mirror was stale.
+- **Framing is one JSON object per line, and the newline is not optional.**
+  A pipe is a byte stream, a length prefix is the usual source of
+  off-by-one bugs, and JSON escapes its own newlines.
+- **The server serves several clients at once** — `serve` spawns two
+  `instance_loop`s, each holding one instance and making the next when it
+  finishes with a client, so a spare is always waiting. A rendezvous
+  designed for one caller and handed two is a defect, not a configuration.
+- **A fresh instance per connection.** Windows returns a stale
+  `ERROR_PIPE_CONNECTED` (a success to tokio) rather than blocking on an
+  instance a client has disconnected from, so reusing one spins at 8% CPU
+  with no sleep on any leg. Only the first instance may claim
+  `first_pipe_instance`; the renderer mutex, not that flag, is what
+  guarantees one renderer. **No test can catch this** — only the OS shows
+  you a spin.
+- Each process finds the others as **siblings of its own executable**
+  (`sibling_exe`), so all three must be installed into one directory and
+  `build-nsis.ps1` checks all three exist before packaging.
+- A client handle is opened `GENERIC_READ | GENERIC_WRITE`, and a liveness
+  check must not be able to block. `PeekNamedPipe` queries rather than
+  transfers, but it **needs read access**: a write-only handle answers
+  every query with `ERROR_ACCESS_DENIED`, which reads as "the renderer is
+  gone". Before adding a query here, check the handle can answer it.
+- `ERROR_FILE_NOT_FOUND` maps to `io::ErrorKind::NotFound`, distinct from
+  every other failure, because it is the answer that says *start one*.
+  Lumping the ordinary answer in with a fault is what makes a working
+  system look broken.
+
+### Supervision
+- **The tray supervises the pipe, not the child handle.** A lost pipe is a
+  better signal than a child, because a hung renderer still holds its mutex
+  while answering nothing.
+- **Only stop a process you spawned.** `renderer_process` is set only when
+  this process started the renderer, which also governs the `Shutdown` on
+  `Drop` and the tray's `Exit`. A blanket kill takes an overlay set the
+  user still wants off their screen.
+- **A client is not a supervisor, and the restart half must not travel with
+  the start half.** The window starts the renderer once at launch if
+  nothing else has; the tray owns it from then on. When the window also
+  gained a restart path they fought and neither could win. The window's
+  `reconnect_renderer` reconnects and never spawns, and carries no storm
+  guard — a storm guard stops a crash loop, and this is not the process
+  that would be looping.
+- **Bringing a renderer up and noticing a crash are two different states,
+  and only the second costs an attempt.** `App::starting` is an
+  `Option<Instant>`; while set, `finish_starting` retries the pipe and the
+  config push and nothing counts against the guard. `START_TIMEOUT` (10s)
+  ends the grace period.
+- **Never discard a send error.** Both fire-and-forget pushes used
+  `let _ = self.send(..)`, so a command that never left the process looked
+  exactly like one that was obeyed. `finish_starting` retries the config
+  push until it lands; `toggle_running` logs both halves.
+- **The storm guard's clock is a parameter.** `should_restart(now)` takes an
+  `Instant` so a test can drive a whole crash history in microseconds, and
+  `forget_expired` is split out so forgetting is a statement about the
+  list. The tray owns the guard; a renderer with no tray is not restarted.
+- **Say what actually happened.** Writing the profile and telling the
+  renderer can fail separately, so `persist_current` reports "Saved, but
+  the overlays were not updated" rather than a confident "Saved."
+- Neither the tray nor the window has a `ProbeManager` or
+  `OverlayManager`, or a tokio runtime. Anything the renderer needs travels
+  over the pipe — **including the animated border preview**, which used to
+  be a direct call and is now `set_border_preview`, sent only when it
+  changes, and cleared by `release_border_preview` on close.
+
+### Windows
+- **Any thread in ANY of our processes that creates a window must pump that
+  thread's messages.** A tray icon is a window too. Windows delivers a
+  window message only to a thread that pumps its queue, so a thread that
+  sleeps receives *nothing* and the symptom is a window that looks perfect
+  and is completely dead. `tray-icon` documents this ("an event loop must be
+  running on the thread") and spawns no pump on Windows, so the caller
+  must; `pump_messages()` is ours. **This shipped twice, once per process**
+  — so grep for `windows_subsystem = "windows"` before assuming a new
+  process is exempt. A rule that names one caller is a rule the next caller
+  will not find.
+- **The repaint cap and the liveness cap are different decisions.**
+  `MESSAGE_POLL_INTERVAL` (16ms) is independent of `REPAINT_INTERVAL`
+  (100ms); tying them together would mean a slow repaint is also an
+  unresponsive process. The wait is `min(deadline, cap)` via `wait_before`,
+  and a pipe command resets the deadline. Only a user can confirm Windows
+  stops calling the process hung.
+- **Letting the default handler run can be worse than ignoring the
+  message.** `DefWindowProcW` on `WM_CLOSE` *destroys* the window and the
+  loop rebuilds it, so Task Manager's "End task" concludes its graceful
+  close worked and never escalates. `overlay_wnd_proc` handles `WM_CLOSE |
+  WM_QUERYENDSESSION` by setting a flag and returning `0` without calling
+  the default, and the loop checks `quit_requested()` right after
+  `pump_messages`. The flag is a static because a window procedure cannot
+  stop the loop that called it. Any `WM_*` we do not handle must be checked
+  against this: the default is not a safe place to land.
 
 ## Overlay rendering
 - Overlays are not egui child viewports. Each is a native `WS_EX_LAYERED` popup
