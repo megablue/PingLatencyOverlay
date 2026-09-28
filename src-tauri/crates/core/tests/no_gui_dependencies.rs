@@ -43,6 +43,11 @@ const NO_EVENT_LOOP: &[&str] = &[
 /// is a Win32 shell object with no GPU context and no event loop, so the tray
 /// process is allowed one and is little else. The renderer is not: it has no
 /// tray, because the tray is what starts and watches it.
+///
+/// This list does two jobs. Above it is the extra deny-list for the core
+/// package; below it is the set `foreign_tray_crates` searches a tree for, so
+/// one constant answers both "may this package hold a notification-area icon"
+/// and "did some other package quietly keep one".
 const TRAY_ONLY: &[&str] = &["tray-icon", "muda"];
 
 /// Every package that must never reach a GPU context or an event loop, with
@@ -63,6 +68,15 @@ const GUI_FREE_PACKAGES: &[(&str, &[&str])] = &[
     ("ping-latency-overlay-core", TRAY_ONLY),
     // The tray: no GPU context, no event loop, but a notification-area icon.
     ("ping-latency-overlay-tray", &[]),
+];
+
+/// Every package in the workspace. Naming them all is what makes a
+/// workspace-wide rule checkable, the same way naming the tray above is what
+/// covers a package the core-only rule would never see.
+const WORKSPACE_PACKAGES: &[&str] = &[
+    "ping-latency-overlay",
+    "ping-latency-overlay-core",
+    "ping-latency-overlay-tray",
 ];
 
 /// The package name from one `cargo tree --prefix none` line, which is
@@ -157,5 +171,79 @@ fn gui_free_crates_report_a_clean_tree() {
              genuinely needed here, the split has lost its reason to exist and \
              the architecture needs revisiting rather than the deny-list."
         );
+    }
+}
+
+/// The notification-area crates a package is forbidden to carry, sorted and
+/// deduplicated: the crates in `tree` that belong to the tray and nowhere else.
+fn foreign_tray_crates(tree: &str) -> Vec<&str> {
+    let mut found: Vec<&str> = tree
+        .lines()
+        .map(package_name)
+        .filter(|name| TRAY_ONLY.contains(name))
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+/// A notification-area icon belongs to the tray crate and to nothing else.
+///
+/// This exists because of how the dead dependency got there. The application
+/// shell depended on `tray-icon` for a release after the split moved the icon
+/// into its own crate, with nothing in `src/` referencing it and its manifest
+/// comment still saying the shell owned the tray icon. Nothing failed: a comment
+/// claiming a dependency is not evidence of one, and an unused dependency is
+/// invisible to the rule above, because the shell is *allowed* a GUI stack.
+///
+/// So this is stated positively — only the tray may hold one — rather than as
+/// another deny-list entry. A deny-list only fires on the package it names, and
+/// this one has to fire on the package that left it behind.
+#[test]
+fn only_the_tray_crate_carries_a_notification_area_icon() {
+    for package in WORKSPACE_PACKAGES {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let output = Command::new(&cargo)
+            .args(["tree", "-p", package, "--prefix", "none"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo tree must be runnable to check the dependency invariant");
+
+        assert!(
+            output.status.success(),
+            "cargo tree failed for {package}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let tree = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !tree.trim().is_empty(),
+            "cargo tree produced no output for {package}, so this test would \
+             pass on a graph it could not read"
+        );
+
+        let found = foreign_tray_crates(&tree);
+        if *package == "ping-latency-overlay-tray" {
+            // The one package meant to have it, which is also what keeps the
+            // rule above honest: a check that forbids nothing passes just as
+            // quietly as one that is broken. `TRAY_ONLY` names the alternative
+            // backends too and the tray does not link all of them, so the
+            // positive claim is about the one crate it actually uses.
+            assert!(
+                found.contains(&"tray-icon"),
+                "the tray crate is the only one meant to carry a notification-area \
+                 icon, so this test is looking at the wrong tree if it finds none \
+                 (found {found:?})"
+            );
+        } else {
+            assert!(
+                found.is_empty(),
+                "{package} depends on {found:?}, but the tray icon and its menu \
+                 belong to ping-latency-overlay-tray. The shell and the renderer \
+                 must not link a notification-area icon: dead weight in binaries \
+                 that never show one, and a manifest comment claiming otherwise \
+                 is not evidence of a dependency."
+            );
+        }
     }
 }

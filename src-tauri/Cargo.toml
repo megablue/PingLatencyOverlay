@@ -2,9 +2,10 @@
 members = ["crates/core", "crates/tray"]
 # Required, not decoration. A manifest that is both a workspace root and a
 # package makes plain `cargo test` operate on THAT PACKAGE ALONE, so without
-# this line the 59 tests in `core` are silently skipped and the command still
-# exits 0. It reported "35 passed" against a 94-test suite. Listing the root
-# explicitly makes the ordinary command cover the whole workspace.
+# this line most of the suite is silently skipped and the command still exits 0.
+# At the time of the split it reported "35 passed" against a 94-test suite. Those
+# numbers are history and will drift; what matters is that all three members are
+# listed, so the ordinary command covers the whole workspace.
 default-members = [".", "crates/core", "crates/tray"]
 
 [package]
@@ -62,28 +63,26 @@ path = "src/main.rs"
 [build-dependencies]
 winresource = "0.1.17"
 
-# This package is the application shell: the tray icon and the one egui
-# configuration window. It is the only thing that may depend on a GUI stack.
+# This package is the application shell: the one egui configuration window and
+# whatever it needs to talk to the other two processes. It is the only thing
+# that may depend on a GUI stack.
 #
 # Probing, the graph renderer and the layered overlay windows live in
 # `crates/core`, which has no GUI dependency at all, so a renderer process can
-# be built from it later without a GPU context. See that crate's manifest for
-# the rule and for the test that enforces it.
+# be built from it without a GPU context. The tray icon and its menu live in
+# `crates/tray`, which is also GUI-free apart from `tray-icon` itself. See
+# those manifests for the rules and for the tests that enforce them.
 #
 # What is left here is only what the shell itself touches:
 #   eframe / image    the configuration window, its window icon and the About
 #                     page's logo
-#   tray-icon         the system tray icon and its menu
-#   tokio             the runtime the probe manager is driven on
 #   windows-sys       `ShellExecuteW`, to hand a URL to the user's browser
 #   log               shell diagnostics
 #   env_logger        `run()` initialises the logger once at startup
 [dependencies]
 ping-latency-overlay-core = { path = "crates/core" }
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
-tray-icon = "0.25.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 # `ShellExecuteW` is how Windows hands a URL to the user's browser. eframe's
 # NATIVE runner ignores `egui::OutputCommand::OpenUrl` (only its web runner
 # acts on it), so the app has to open the URL itself. Pinned to a version

@@ -2616,8 +2616,6 @@ dependencies = [
  "image",
  "log",
  "ping-latency-overlay-core",
- "tokio",
- "tray-icon",
  "windows-sys 0.61.2",
  "winresource",
 ]
