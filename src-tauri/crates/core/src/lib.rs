@@ -36,3 +36,9 @@ pub mod overlay;
 
 // The long-lived probe tasks and their bounded sample buffers.
 pub mod probes;
+
+// The wire between this process and the configuration window: the pipe name,
+// the message shapes and the line framing. It lives here rather than in the
+// shell because both ends are built from this crate, so the two cannot
+// disagree about the format without a compile error.
+pub mod transport;

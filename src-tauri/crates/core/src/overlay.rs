@@ -40,6 +40,21 @@ mod win {
         pub bottom: i32,
     }
 
+    /// One entry of a thread's message queue.
+    ///
+    /// Declared here, with the rest of the Win32 surface, rather than taken
+    /// from `windows-sys`: this crate must never gain that dependency, and the
+    /// field order below is the one `PeekMessageW` writes into.
+    #[repr(C)]
+    pub struct MSG {
+        pub hwnd: HWND,
+        pub message: UINT,
+        pub wParam: WPARAM,
+        pub lParam: LPARAM,
+        pub time: DWORD,
+        pub pt: POINT,
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct POINT {
@@ -146,6 +161,15 @@ mod win {
         pub fn GetDpiForSystem() -> u32;
         pub fn SetProcessDpiAwarenessContext(value: HANDLE) -> BOOL;
         pub fn ValidateRect(hwnd: HWND, rect: *const RECT) -> BOOL;
+        pub fn PeekMessageW(
+            lpmsg: *mut MSG,
+            hwnd: HWND,
+            wmsgfiltermMin: UINT,
+            wmsgfiltermMax: UINT,
+            wremoveflag: UINT,
+        ) -> BOOL;
+        pub fn TranslateMessage(lpmsg: *const MSG) -> BOOL;
+        pub fn DispatchMessageW(lpmsg: *const MSG) -> LRESULT;
     }
 
     #[link(name = "gdi32")]
@@ -179,11 +203,11 @@ mod win {
 #[cfg(windows)]
 use win::{
     CreateCompatibleDC, CreateDIBSection, CreateWindowExW, DefWindowProcW, DeleteDC, DeleteObject,
-    DestroyWindow, GetDC, GetDpiForSystem, GetModuleHandleW, GetMonitorInfoW, GetStockObject,
-    MonitorFromPoint, RegisterClassW, ReleaseDC, SelectObject, SetProcessDpiAwarenessContext,
-    SetWindowPos, ShowWindow, UnregisterClassW, UpdateLayeredWindow, UpdateWindow, ValidateRect,
-    BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, POINT,
-    RECT, SIZE, UINT, WNDCLASSW, WPARAM,
+    DestroyWindow, DispatchMessageW, GetDC, GetDpiForSystem, GetModuleHandleW, GetMonitorInfoW,
+    GetStockObject, MonitorFromPoint, PeekMessageW, RegisterClassW, ReleaseDC, SelectObject,
+    SetProcessDpiAwarenessContext, SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW,
+    UpdateLayeredWindow, UpdateWindow, ValidateRect, BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ,
+    HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, MSG, POINT, RECT, SIZE, UINT, WNDCLASSW, WPARAM,
 };
 
 #[cfg(windows)]
@@ -212,6 +236,9 @@ const SWP_SHOWWINDOW: u32 = 0x0040;
 const ULW_ALPHA: u32 = 0x0000_0002;
 #[cfg(windows)]
 const BI_RGB: u32 = 0;
+/// Tells `PeekMessageW` to take the message out of the queue.
+#[cfg(windows)]
+const PM_REMOVE: u32 = 0x0001;
 #[cfg(windows)]
 const DIB_RGB_COLORS: u32 = 0;
 #[cfg(windows)]
@@ -250,6 +277,36 @@ pub fn enable_dpi_awareness() {
     }
 }
 
+/// Drain this thread's Windows message queue.
+///
+/// The overlay windows are ordinary Win32 windows, so Windows posts messages to
+/// the thread that owns them: the cursor changes when the pointer moves, hover
+/// tracking ticks, and the window is asked to repaint itself. A thread that
+/// blocks without pumping leaves all of those queued and unanswered, and after a
+/// few seconds Windows decides the window is hung — which is what the user sees
+/// as a spinning cursor and a "Not responding" process.
+///
+/// Nothing pumps these messages in this process. The graph used to be drawn from
+/// the application process, where eframe's event loop was pumping the queue all
+/// day, so the same blocking draw loop never tripped the watchdog. Now that the
+/// renderer owns the windows it has to service them itself.
+///
+/// This only peeks, so it never blocks: a thread waiting for work calls it
+/// between waits rather than instead of them. It is not a substitute for a real
+/// message loop, and deliberately not one — the windows are click-through and
+/// this process has no input to receive.
+pub fn pump_messages() {
+    #[cfg(windows)]
+    unsafe {
+        let mut message: MSG = zeroed();
+        // PM_NOREMOVE would report the same message forever, so take each one
+        // out of the queue as it is handled.
+        while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
 // Fake samples live only in the overlay renderer; they are retained as visual
 // history after the reveal and are never inserted into SampleStore.
 struct PrefillState {

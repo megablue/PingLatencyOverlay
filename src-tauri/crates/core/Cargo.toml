@@ -12,6 +12,16 @@ rust-version = "1.88"
 name = "ping_latency_overlay_core"
 crate-type = ["rlib"]
 
+# The renderer process lives in this crate rather than in a package of its own,
+# for two reasons. It needs nothing that the library does not already depend on,
+# so a new manifest would only restate this dependency list. And `cargo tree`
+# reports a package's dependencies across every target, so the bin target is
+# covered by `tests/no_gui_dependencies.rs` for free: the renderer cannot grow a
+# GUI dependency without failing the same test that guards the library.
+[[bin]]
+name = "ping-latency-overlay-renderer"
+path = "src/bin/renderer.rs"
+
 # This crate is what the renderer process will be built from, and the whole
 # reason it exists separately is that the renderer must never be able to
 # create a GPU context or open a window. That is only true as long as nothing
@@ -29,7 +39,10 @@ crate-type = ["rlib"]
 #
 # The list itself, and why each entry is here:
 #   serde / serde_json  config, profile and preference storage
-#   tokio               the probe tasks; also the future named-pipe transport
+#   tokio               the probe tasks, and the named-pipe server the
+#                       configuration window talks to over. `net` and
+#                       `io-util` are for the pipe; `time` for the probe
+#                       cadence and the server's reconnect backoff.
 #   ping-rs             ICMP echo, via Win32 IcmpSendEcho2 (no Administrator)
 #   dirs                locating the config directory
 #   log                 overlay window diagnostics
@@ -37,7 +50,13 @@ crate-type = ["rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "net",
+    "io-util",
+] }
 ping-rs = "0.1"
 dirs = "5"
 log = "0.4"

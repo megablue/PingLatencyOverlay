@@ -23,6 +23,9 @@ ManifestDPIAwareness PerMonitorV2
 !ifndef APP_LICENSE
   !error "APP_LICENSE must be supplied with /DAPP_LICENSE=<absolute path>"
 !endif
+!ifndef APP_RENDERER_EXE
+  !error "APP_RENDERER_EXE must be supplied with /DAPP_RENDERER_EXE=<absolute path>"
+!endif
 
 !define PRODUCTNAME "PingLatencyOverlay"
 !define PUBLISHER "megablue"
@@ -76,6 +79,14 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 Section "Install"
   SetOutPath "$INSTDIR"
   File "${APP_EXE}"
+  ; The renderer is a second executable, not a plugin: the shell starts it and
+  ; talks to it over a named pipe. It MUST be installed into the same directory
+  ; as the shell, because that is how the shell finds it - it looks for a
+  ; sibling of its own executable. Installing it anywhere else produces an app
+  ; that starts cleanly and shows no overlays, with nothing at runtime to say
+  ; why. Only the shell gets a Start Menu shortcut, because only the shell is
+  ; what a user launches.
+  File "${APP_RENDERER_EXE}"
   File /oname=LICENSE "${APP_LICENSE}"
 
   CreateDirectory "$SMPROGRAMS"
@@ -94,6 +105,7 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\ping-latency-overlay-renderer.exe"
   Delete "$INSTDIR\ping-latency-overlay.exe"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"

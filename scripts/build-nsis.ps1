@@ -7,6 +7,11 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $project = Join-Path $root "src-tauri"
 $exe = Join-Path $project "target\release\ping-latency-overlay.exe"
+# The renderer is a sibling executable: the shell starts it and talks to it over a
+# named pipe, and it finds it by looking next to its own binary. The installer
+# must therefore place the two together, so both paths are resolved here and
+# both are checked before packaging rather than after.
+$renderer = Join-Path $project "target\release\ping-latency-overlay-renderer.exe"
 $icon = Join-Path $project "icons\icon.ico"
 $license = Join-Path $root "LICENSE"
 $outDir = Join-Path $project "target\release\bundle\nsis"
@@ -14,6 +19,9 @@ $script = Join-Path $root "packaging\nsis\installer.nsi"
 
 if (-not (Test-Path $exe)) {
     throw "Release executable not found: $exe (run cargo build --release first)"
+}
+if (-not (Test-Path $renderer)) {
+    throw "Renderer executable not found: $renderer. The shell cannot draw anything without it, and it is found by looking next to the shell's own binary."
 }
 if (-not (Test-Path $license)) {
     throw "License file not found: $license"
@@ -76,6 +84,7 @@ $makensisPath = if ($makensis.Source) { $makensis.Source } else { $makensis.Full
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $arguments = @(
     "/DAPP_EXE=$exe",
+    "/DAPP_RENDERER_EXE=$renderer",
     "/DAPP_ICON=$icon",
     "/DAPP_LICENSE=$license",
     "/DOUT_FILE=$outFile",

@@ -3,10 +3,27 @@
 ## Startup
 - Launches into the system tray with no window shown.
 - Tray menu: Start/Pause, Config, Exit.
+- The app runs as two processes. The shell holds the tray icon and the Config
+  window; the renderer draws the overlay windows and runs the probes. Starting
+  the app starts the renderer; if one is already running the new shell attaches
+  to it instead of starting a second.
+- Only one shell runs at a time, enforced with a named mutex. A second launch
+  does nothing; it is not an error.
+- If the renderer exits on its own, the shell restarts it, up to five times in a
+  minute. After that it stops trying and says so in the status bar, because a
+  crash loop is worse than a stopped app: it burns a core and buries the one
+  message that would explain it.
 
 ## Interfaces
 - Config window: create and manage overlays.
 - Overlay windows: one OS window per configured overlay.
+- The shell and the renderer talk over a named pipe. The shell sends
+  configuration, pause and resume, which overlay's preview border is showing,
+  and shutdown; the renderer needs to say nothing back. If the renderer cannot
+  be reached the shell says so rather than failing quietly, including the case
+  where a profile was written to disk but the overlays were not updated.
+- The renderer is found next to the shell's own executable, so the two programs
+  must be installed into the same directory.
 
 ## Overlay window
 - Frameless, transparent background, always on top.
@@ -248,7 +265,16 @@
 - The window is 860x660, resizable between 720x480 and 1400x8192, which keeps
   room for the rail, the list pane and a usable detail pane at the same time.
 
-## Packaging
+The renderer keeps its layered windows responsive: it services the Windows
+messages those windows post (cursor changes, hover tracking, repaints) on
+every pass of its loop, at least sixteen times a second, so Windows never
+decides the window is hung. This is a separate limit from how often it
+redraws, because a slow redraw must not also mean an unresponsive process.
+The renderer waits for a client to connect whenever it has no shell attached,
+and it sits idle rather than busy — closing and reopening the Config window
+attaches to the same renderer instead of starting another.
+
+
 - Target architectures: x64 and ARM64.
 - Installer: native NSIS (`-setup.exe`), one per architecture.
 - The installer runs four pages: welcome, destination folder, install, and
@@ -256,9 +282,14 @@
 - The finish page carries two ticked checkboxes: **Launch PingLatencyOverlay**
   and **Create a desktop shortcut**. A silent install (`/S`) never shows the
   finish page, so it creates the desktop shortcut to match the default.
-- The application is a standalone Rust executable and does not require WebView2.
+- The application ships two executables and does not require WebView2:
+  `ping-latency-overlay.exe` (tray and Config window) and
+  `ping-latency-overlay-renderer.exe` (overlay windows and probes). They are
+  installed into the same directory, because the shell finds the renderer next
+  to itself. Only the shell gets a Start Menu shortcut, since only the shell is
+  what a user launches.
 - The GPLv3 text ships as `LICENSE` in the install directory beside the
-  executable. It is installed unconditionally, not as an option, and the
+  executables. It is installed unconditionally, not as an option, and the
   uninstaller removes it.
 - The build version is `MAJOR.MINOR.<git-commit-count>`, taken from Git at
   packaging time, and is the version shown in the Config window. If Git metadata
