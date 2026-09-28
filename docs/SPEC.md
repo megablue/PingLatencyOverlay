@@ -3,9 +3,13 @@
 ## Startup
 - Launches into the system tray with no window shown. The tray is the program
   the user runs; the Config window and the renderer are started on demand.
-- Tray menu: Config, Pause/Resume, Close tray (keep overlays running), Exit.
+- Tray menu: Config, Pause/Resume, Close tray, keep overlays running, Exit.
   The two exit items are deliberately different: closing the tray leaves the
-  overlays running, and Exit stops the whole app.
+  overlays running, and Exit stops the whole app. Pause and Resume read
+  "Pause (no renderer)" and "Resume (no renderer)" while no renderer is
+  attached, so the item always says what it will do.
+- **Left-click** on the tray icon brings the Config window up, or focuses it if
+  it is already open. The menu is on **right-click**.
 - The app runs as three processes. The tray holds the tray icon and supervises.
   The Config window is started when it is asked for and **exits when it is
   closed**, so its window and graphics context exist only while you are looking
@@ -67,7 +71,8 @@
   - The overlay window's long axis is sized `window(s) x scale` (e.g. 60 s at 2x
     = 120 px).
   - The graph fills the window's actual size, so the effective pixels-per-tick is
-    `viewport / windowSeconds` (see the DPI note in `AGENTS.md`).
+    `viewport / windowSeconds`. The window is sized in logical pixels, so under
+    Windows DPI and text scaling that is not the same as `scale`.
   - Optional smooth rendering scrolls the timestamped graph between probe
     samples. It is enabled by default at 60 FPS for new overlays and legacy
     configs without an explicit preference; the per-overlay smooth FPS controls
@@ -140,9 +145,9 @@
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
   be stored. Preferences live under a single `ui` object, currently
-  `ui.railCollapsed` and `ui.showVersionInTitle`. Only that object is ever
-  rewritten: the active profile pointer and any key a future version adds
-  survive a preferences write, and a file that is missing, unparseable or holds
+  `ui.railCollapsed` and `ui.showVersionInTitle`; writing preferences rewrites
+  that object and nothing else, so the active profile pointer and any key a
+  future version adds survive. A file that is missing, unparseable or holds
   unrelated keys simply yields the defaults. `ui.showVersionInTitle` is off by
   default, because the window title is already long and the About page is where
   the version belongs.
@@ -174,8 +179,10 @@
 - If `config.json` is missing, a legacy `~/.PingLatencyOverlay/config.json` is
   migrated first. The legacy directory is removed only when `config.json` was
   its only entry; other files and subdirectories are preserved.
-- The Config status bar reports successful migration, retained legacy data,
-  migration failure, profile import, added profile names and profile fallback.
+- The Config status bar reports whatever happened at startup: a migration, a
+  migration that could not be done, a profile that was imported, profile names
+  that were added to older files, and a stored active profile that no longer
+  resolves.
 
 ## Config window layout
 - The Config window has three panes and a status bar.
@@ -234,8 +241,8 @@
   and the licence. Nothing on it can be edited, and it carries no Save/Discard
   footer because it stages nothing. No line on it is smaller than the rest of
   the window's body text. The repository line is the only clickable one: it
-  hands its address to Windows, which routes it to the user's default handler
-  for `https`, and the full address is in the hover tooltip. The copyright
+  opens the address in the user's default browser, and the full address is in the
+  hover tooltip. The copyright
   carries no year, so it cannot go stale between releases. The licence is named
   in words and not linked, because the licence text is not bundled with the app.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
@@ -271,34 +278,19 @@
   so a selection looks the same wherever it appears.
 - The list pane's header, its rows and its footer are all one width, and that
   width is one column centred in the pane, so both of the pane's boundaries get
-  the same margin. The scroll bar's width is reserved whether or not one is
-  showing, which is the slack the centring divides. Nothing in the pane can
-  therefore be wider or narrower than its neighbour, and the rows do not shift
-  sideways when a list outgrows the pane.
+  the same margin. Nothing in the pane can be wider or narrower than its
+  neighbour, and the rows do not shift sideways when a list outgrows the pane.
 - The two pane boundaries are drawn the same way: a hairline centred in the gap
   between the panes, then the gap itself. The list pane is spaced identically on
-  the rail side and the detail side, measured from the rail's rows to the column
-  and from the column to the detail pane's content. (Hairline to nearest content
-  is the wrong measure and reads unevenly, because the rail and the detail pane
-  sit flush to their pane edges while the column is inset.)
-- Each pane claims the width `config_ui` allocated for it. A pane that draws
-  itself as a positioned child is invisible to the layout that allocated it, so
-  without that claim the next pane is laid out on top of it.
+  the rail side and the detail side.
 - Switching pages is always allowed, because the Overlays draft stays in memory.
   Switching *profile* is refused while there are unsaved edits.
 - The window is 860x660, resizable between 720x480 and 1400x8192, which keeps
   room for the rail, the list pane and a usable detail pane at the same time.
+  `AGENTS.md` records the layout traps behind these proportions; every one of
+  them first shipped as a visible misalignment.
 
-The renderer keeps its layered windows responsive: it services the Windows
-messages those windows post (cursor changes, hover tracking, repaints) on
-every pass of its loop, at least sixteen times a second, so Windows never
-decides the window is hung. This is a separate limit from how often it
-redraws, because a slow redraw must not also mean an unresponsive process.
-The renderer waits for a client to connect whenever it has no shell attached,
-and it sits idle rather than busy — closing and reopening the Config window
-attaches to the same renderer instead of starting another.
-
-
+## Installer and build
 - Target architectures: x64 and ARM64.
 - Installer: native NSIS (`-setup.exe`), one per architecture.
 - The installer runs four pages: welcome, destination folder, install, and
@@ -306,22 +298,24 @@ attaches to the same renderer instead of starting another.
 - The finish page carries two ticked checkboxes: **Launch PingLatencyOverlay**
   and **Create a desktop shortcut**. A silent install (`/S`) never shows the
   finish page, so it creates the desktop shortcut to match the default.
+- The default install folder is `%LOCALAPPDATA%\Programs\PingLatencyOverlay`,
+  per user, with no elevation prompt.
 - The application ships three executables and does not require WebView2:
   `plo-tray.exe` (the tray), `plo-config.exe` (the Config window) and
-  `plo-renderer.exe` (the overlay
-  windows and the probes). They are installed into the same directory, because
-  each finds the others next to itself. Only the tray gets a Start Menu or
-  desktop shortcut, since only the tray is what a user launches, and the
-  installer's "Launch" checkbox launches the tray too.
+  `plo-renderer.exe` (the overlay windows and the probes). They are installed
+  into the same directory, because each finds the others next to itself. Only
+  the tray gets a Start Menu or desktop shortcut, since only the tray is what a
+  user launches, and the installer's "Launch" checkbox launches the tray too.
+- The installer stops any running copy of the app before writing the new files,
+  including the names used before the three executables were renamed, and
+  removes the previous installation first. An upgrade over a running app
+  therefore replaces the binaries instead of quietly leaving the old copy. It
+  never touches your settings.
 - The GPLv3 text ships as `LICENSE` in the install directory beside the
   executables. It is installed unconditionally, not as an option, and the
   uninstaller removes it.
 - The build version is `MAJOR.MINOR.(commits since countBase)` — the count
   since a base recorded in `src-tauri/Cargo.toml`, not the raw commit count, so
-  each new minor restarts at `.1`. It is taken from Git at packaging time, and
-  is the version shown in the Config window. If Git metadata is unavailable, or
-  the count has not passed the base yet, the version in
-  `src-tauri/Cargo.toml` is used as it stands. Run the packaging step *after*
-  committing, or the installer reports the previous commit's number. The app's
-  reported version and the installer's file name are computed from the same
-  place, so they cannot drift apart.
+  each new minor restarts at `.1`. It is the version the Config window reports
+  and the version the installer is named after, and both are derived from that
+  one recorded base, so they cannot disagree.
