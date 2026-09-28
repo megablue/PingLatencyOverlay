@@ -24,7 +24,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use ping_latency_overlay_core::config::{self, smooth_frame_interval, Config};
-use ping_latency_overlay_core::overlay::{enable_dpi_awareness, pump_messages, OverlayManager};
+use ping_latency_overlay_core::overlay::{
+    enable_dpi_awareness, pump_messages, quit_requested, OverlayManager,
+};
 use ping_latency_overlay_core::probes::ProbeManager;
 use ping_latency_overlay_core::transport::{serve, Message, Role, SingleInstance};
 
@@ -87,10 +89,19 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (tx, rx) = mpsc::channel();
     runtime.spawn(async move {
         // Nothing is listening on stderr in a windowed build, so a failure here
-        // is silent by design. The shell notices instead: its next send fails
-        // and it restarts this process, and the storm guard surfaces a renderer
-        // that will not stay up.
-        let _ = serve(tx).await;
+        // would be silent. It is logged, because a renderer whose pipe never
+        // opened is a renderer nobody can reach: it runs, it draws nothing, and
+        // from the outside it is indistinguishable from a healthy one. `create`
+        // with `first_pipe_instance` fails outright if anything still holds the
+        // name, which is exactly the state a force-killed predecessor can leave
+        // behind, so this line is what separates "the renderer is up" from "the
+        // renderer is up and reachable".
+        if let Err(error) = serve(tx).await {
+            ping_latency_overlay_core::diagnostics::log_line(
+                "renderer",
+                &format!("the pipe could not be served at all: {error}"),
+            );
+        }
     });
 
     // The shell pushes the same configuration again as soon as it connects, so
@@ -115,6 +126,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         // post to it, and a thread that never pumps them is one Windows will
         // eventually report as unresponsive.
         pump_messages();
+        // Checked here, immediately after the pump, because that is the only
+        // place a request can arrive: Task Manager's "End task" and a logoff
+        // both arrive as `WM_CLOSE`, and the pump above is what dispatches it.
+        // The flag is set by the window procedure because a window procedure
+        // cannot stop the loop that called it — it runs inside `pump_messages`.
+        if quit_requested() {
+            ping_latency_overlay_core::diagnostics::log_line(
+                "renderer",
+                "asked to close; shutting down",
+            );
+            break;
+        }
         let now = Instant::now();
         if now >= next_repaint {
             overlays.apply(
@@ -170,6 +193,9 @@ fn apply(message: Message, state: &mut State, probes: &mut ProbeManager) -> bool
             state.border_preview = overlay_id;
         }
         Message::Shutdown => return false,
+        // Nothing to do, and deliberately so: the tray uses this to tell a live
+        // renderer from a dead one, so anything it changed would be a bug.
+        Message::Ping => {}
     }
     true
 }

@@ -1,4 +1,4 @@
-//! Everything the renderer needs, and nothing it does not.
+﻿//! Everything the renderer needs, and nothing it does not.
 //!
 //! This crate holds latency probing, the software graph renderer, the runtime
 //! border effect, and the native layered windows the graph is drawn into. It
@@ -41,4 +41,17 @@ pub mod probes;
 // the message shapes and the line framing. It lives here rather than in the
 // shell because both ends are built from this crate, so the two cannot
 // disagree about the format without a compile error.
+pub mod diagnostics;
 pub mod transport;
+
+/// The bundled artwork, as the PNG bytes it is stored as.
+///
+/// The tray and the configuration window each want this icon and neither may
+/// depend on the other, so the single `include_bytes!` lives here and both read
+/// it from this function. Decoding is deliberately left to the caller: the
+/// tray wants RGBA for `tray-icon` and the window wants an `egui::IconData`, so
+/// the two decode differently, and pulling in an image decoder here would put
+/// one in the renderer process for a file it never draws.
+pub fn icon_png() -> &'static [u8] {
+    include_bytes!("../../../icons/icon.png")
+}

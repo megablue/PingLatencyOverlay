@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui::{
     self, Align, Color32, ComboBox, Context, Frame, Grid, Layout, RichText, Ui, ViewportBuilder,
@@ -10,10 +9,11 @@ use eframe::{App, CreationContext, NativeOptions};
 
 // Probing, rendering and the layered overlay windows live in the core crate so
 // that a renderer process can be built from them without a GUI stack. Only
-// `tray` is local; `ui` is this module. The shell talks to the renderer over
-// the named pipe rather than touching either of those types directly, which is
-// the whole point: nothing here can draw a graph any more.
-use crate::tray::{self, TrayAction, TrayState};
+// This process is the configuration window and nothing else. The tray lives in
+// its own process now, so there is no tray code here at all: menu choices
+// arrive as pipe messages, and this window talks to the renderer over the
+// named pipe rather than touching either of those types directly, which is the
+// whole point — nothing in this binary can draw a graph.
 use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig,
 };
@@ -269,14 +269,33 @@ fn open_url_in_browser(url: &str) -> bool {
     result as isize > 32
 }
 
+/// Decode the bundled artwork for this window's title bar, taskbar and About
+/// page.
+///
+/// The bytes come from `core::icon_png()`, the single `include_bytes!` in the
+/// build, so the tray and this window share one copy of the artwork and one
+/// place that names it. This used to be `tray::app_icon`, which was the reason
+/// the window could not be split out of the tray's process: the helper
+/// returned an `egui` type, so anything wanting the icon inherited eframe.
+pub fn app_icon() -> eframe::egui::IconData {
+    let image = image::load_from_memory(ping_latency_overlay_core::icon_png())
+        .expect("bundled icon must be valid")
+        .to_rgba8();
+    let width = image.width();
+    let height = image.height();
+    eframe::egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 /// Decodes the bundled app icon into a texture for the About page.
 ///
-/// Reuses `tray::app_icon`, which already decodes `icons/icon.png` for the
-/// tray and the window, so there is one copy of the artwork in the build and
-/// one place that reads it. `IconData` is already raw RGBA in row order, which
-/// is exactly what `ColorImage::from_rgba_unmultiplied` wants.
+/// `IconData` is already raw RGBA in row order, which is exactly what
+/// `ColorImage::from_rgba_unmultiplied` wants.
 fn about_logo_texture(ctx: &Context) -> egui::TextureHandle {
-    let icon = tray::app_icon();
+    let icon = app_icon();
     let size = [icon.width as usize, icon.height as usize];
     let image = egui::ColorImage::from_rgba_unmultiplied(size, &icon.rgba);
     ctx.load_texture("about_logo", image, egui::TextureOptions::LINEAR)
@@ -594,9 +613,17 @@ fn position_cell_uv(index: usize) -> egui::Rect {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShutdownState {
+    /// The window is open and nothing has been asked of it.
     Running,
-    HideRequested,
-    CloseRequested,
+    /// The three-way prompt is up because closing would lose a draft.
+    ConfirmClose,
+    /// The user has answered, and the close we asked for must now get through.
+    ///
+    /// A separate state because the frame that intercepts the close and the
+    /// frame that lets it through cannot be the same one: cancelling and
+    /// closing in the same frame cancels, since eframe only looks for
+    /// `CancelClose` and never sees the `Close` behind it.
+    ExitConfirmed,
 }
 
 /// Inline editor or confirmation shown in the Profiles page detail pane.
@@ -689,20 +716,16 @@ pub struct PingApp {
     /// a different situation from "not started yet" and has to be reported
     /// differently, because a save that reaches disk but never reaches the
     /// overlays is not really a save.
-    renderer: Option<Client>,
-    /// The renderer process, but only when this shell started it.
     ///
-    /// A renderer somebody else launched is left alone on exit, so the shell
-    /// never kills a process it did not spawn.
-    renderer_process: Option<Child>,
-    /// Restarts this shell has attempted, so one that will not stay up is not
-    /// relaunched forever.
-    restarts: RestartGuard,
+    /// There is deliberately no renderer process handle and no restart guard
+    /// here. This window is a client: it starts the renderer once at launch if
+    /// nothing else has, and the tray supervises it from then on. See
+    /// `reconnect_renderer`.
+    renderer: Option<Client>,
     /// The border preview the renderer was last told about, so it is only sent
     /// when it actually changes. Sending it per frame would be a pipe write per
     /// frame for no reason.
     border_preview: Option<String>,
-    tray: TrayState,
     position_picker: PositionPicker,
     shutdown_state: ShutdownState,
     /// The app icon, decoded once and shown above the About page's text.
@@ -729,14 +752,31 @@ impl PingApp {
         // animating the moment the window opened, which read as the app doing
         // something nobody asked for. The selection is view-only: staged edits
         // live in `config.overlays`, so emptying pane 3 cannot lose any.
-        let show_config = std::env::args_os().any(|arg| arg == "--show-config");
+        // This process is the window, and it is only ever started because
+        // somebody asked for a window, so it starts visible. It used to start
+        // hidden behind a `--show-config` flag, which was right when the tray
+        // lived in this process and revealed it from its menu — and became a
+        // window nobody could reach once the tray moved out. The flag is still
+        // accepted below so the documented development command does not
+        // become an error, but it no longer hides anything.
+        let show_config = true;
+        let _show_config_flag = std::env::args_os().any(|arg| arg == "--show-config");
 
-        let tray = tray::create()?;
+        // This process is the one thing that can bring the tray up with it: a
+        // user who double-clicks this executable should end up with a working
+        // app, not a window and no tray. The renderer follows the same rule one
+        // level down, and the renderer itself never starts either of them.
+        // The tray is deliberately NOT tracked as a child to clean up: it is the
+        // app, and it should outlive a window. Closing the window leaves it
+        // running, which is the intended shape rather than a leak.
+        if let Some(failure) = start_or_attach_tray() {
+            log_line("config", &failure);
+        }
         // A renderer that is already running is somebody else's, and attaching
         // to it is the whole point of the pipe being the rendezvous. Only when
         // there is nothing listening does this shell start one, and only a
         // process it started is ever stopped by it.
-        let (renderer, renderer_process, failure) = start_or_attach_renderer();
+        let (renderer, _renderer_process, failure) = start_or_attach_renderer();
         // Whatever the notices said at startup survives a renderer that would
         // not start, because both are things the user needs to see.
         let status = match failure {
@@ -778,12 +818,10 @@ impl PingApp {
             dirty: false,
             confirm_delete: None,
             renderer,
-            renderer_process,
-            restarts: RestartGuard::new(),
+
             // The renderer starts with no border preview, so `None` here is
             // accurate rather than merely unknown and needs no first send.
             border_preview: None,
-            tray,
             position_picker,
             shutdown_state: ShutdownState::Running,
             about_logo: about_logo_texture(&cc.egui_ctx),
@@ -872,71 +910,119 @@ impl PingApp {
         id.to_string()
     }
 
-    fn set_config_visible(&mut self, ctx: &Context, visible: bool) {
-        if self.config_visible == visible {
+    /// The window is only in this process while it is open, so "close" means
+    /// exit rather than hide. What still matters is that the border preview is
+    /// handed over as the window goes: the renderer's copy of it is a `Some`
+    /// for as long as the window is on screen, and a process that exits
+    /// without clearing it would leave the overlay's border animating with
+    /// nothing on screen to explain it.
+    fn release_border_preview(&mut self, ctx: &Context) {
+        if self.border_preview.is_none() {
             return;
         }
-        self.config_visible = visible;
-        // A selected overlay's RGB border belongs to the Config interaction.
-        // Reconcile immediately so closing the window starts the normal fade
-        // instead of leaving the border selected indefinitely.
-        self.sync_border_preview();
+        self.border_preview = None;
+        let _ = self.try_send(&Message::SetBorderPreview { overlay_id: None });
         ctx.request_repaint();
     }
 
+    /// Closing the window ends this process, so the window is not a window
+    /// that hides.
+    ///
+    /// That is the whole point of the split: a hidden-but-alive Config window
+    /// still holds the GL context, so "hide on close" would buy the memory
+    /// back nothing at all. The tray survives, because it is a different
+    /// process now.
+    ///
+    /// Every close is intercepted and cancelled first, and the close is only
+    /// re-issued from a later frame once this process has decided. With a
+    /// draft outstanding the decision is the user's, so the prompt goes up
+    /// instead.
     fn handle_root_close(&mut self, ctx: &Context) {
-        let close_requested = ctx.input(|input| input.viewport().close_requested());
-        if close_requested && self.shutdown_state == ShutdownState::Running {
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::CancelClose);
-            self.set_config_visible(ctx, false);
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::Visible(false),
-            );
+        if !ctx.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        match self.shutdown_state {
+            ShutdownState::Running => {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::CancelClose,
+                );
+                // The window is going away, so the border preview must not
+                // outlive it. This is the one case where a close does not need
+                // asking about first, so it is done here rather than on the way
+                // out: a prompt that hangs around with no border behind it
+                // would be answering a question about nothing.
+                self.release_border_preview(ctx);
+                if self.has_pending_edits() {
+                    self.shutdown_state = ShutdownState::ConfirmClose;
+                } else {
+                    self.shutdown_state = ShutdownState::ExitConfirmed;
+                }
+            }
+            ShutdownState::ConfirmClose => {
+                // A second click on the title bar while the panel is up must
+                // not stack a second panel, so this one is swallowed too. The
+                // buttons on the panel are how the user answers it.
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::CancelClose,
+                );
+            }
+            ShutdownState::ExitConfirmed => {
+                // The close we already asked for is on its way. Cancelling it
+                // here would trap the user in a window they cannot close.
+            }
         }
     }
 
-    fn process_tray_events(&mut self, ctx: &Context) {
-        if self.shutdown_state != ShutdownState::Running {
+    /// The three-way prompt: keep the changes, throw them away, or stay.
+    ///
+    /// Save is the only branch that can fail, and a failure keeps the window
+    /// open with the reason in the status bar, because the alternative is
+    /// closing on a save that did not happen. Discard never fails the same
+    /// way: it is asking to forget the draft, so a profile that will not
+    /// reload is not a reason to keep the window open.
+    fn show_close_prompt(&mut self, ctx: &Context) {
+        let mut save = false;
+        let mut discard = false;
+        let mut stay = false;
+
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .title_bar(false)
+            .show(ctx, |ui| {
+                ui.label("This profile has changes that have not been saved.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save and close").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Discard and close").clicked() {
+                        discard = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        stay = true;
+                    }
+                });
+            });
+
+        if stay {
+            self.shutdown_state = ShutdownState::Running;
             return;
         }
-        for action in self.tray.poll() {
-            match action {
-                TrayAction::ToggleRunning => {
-                    self.toggle_running();
-                }
-                TrayAction::Config => {
-                    self.set_config_visible(ctx, true);
-                    ctx.send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::Visible(true),
-                    );
-                    ctx.send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::Minimized(false),
-                    );
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
-                }
-                TrayAction::Exit => {
-                    self.config_visible = false;
-                    // Ask the renderer to stop before this process goes away, so
-                    // the overlays do not outlive the tray on screen. It also
-                    // exits on its own when the pipe closes, but that is a
-                    // fallback, not the plan.
-                    self.send(Message::Shutdown);
-                    // eframe applies viewport commands after the current frame.
-                    // Defer Close until a later logic-only pass so a visible
-                    // Config window is hidden before the viewport is destroyed.
-                    self.shutdown_state = ShutdownState::HideRequested;
-                    ctx.send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::Visible(false),
-                    );
-                    ctx.request_repaint();
-                    return;
-                }
-            }
+        if discard {
+            self.discard_edits();
+            self.shutdown_state = ShutdownState::ExitConfirmed;
+            return;
         }
+        if save && self.save_edits() {
+            // Only now, with the write confirmed, does the window leave.
+            self.shutdown_state = ShutdownState::ExitConfirmed;
+        }
+        // A save that failed leaves the state alone, so the panel stays up
+        // and the status bar says why.
     }
 
     /// Tell the renderer which overlay's border should animate, when it changes.
@@ -961,37 +1047,34 @@ impl PingApp {
         });
     }
 
-    /// Bring the renderer back if it died, unless the guard has given up.
+    /// Reconnect to the renderer, but never start one.
     ///
-    /// Only a process this shell started is polled and restarted. A renderer
-    /// somebody else launched is left alone, because the tray-less case
-    /// belongs to a later release and guessing wrong here would kill an
-    /// overlay set the user still wants on screen.
-    fn supervise_renderer(&mut self) {
-        let Some(child) = &mut self.renderer_process else {
-            return;
-        };
-        if !matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        self.renderer = None;
-        self.renderer_process = None;
-        if !self.restarts.should_restart(Instant::now()) {
-            self.status = format!(
-                "The renderer keeps exiting. Giving up after {RESTART_LIMIT} attempts in {} seconds.",
-                RESTART_WINDOW.as_secs()
-            );
+    /// This process is a **client, not a supervisor**. It starts the renderer
+    /// once at launch if nothing else has, and from that moment the tray owns
+    /// that process's life. When this used to restart a renderer that had died,
+    /// the two processes competed for it: the tray's Exit would stop the
+    /// renderer and this window would bring it straight back, so neither could
+    /// ever win. It also carries no storm guard, because a storm guard exists
+    /// to stop a *crash loop*, and this is not the process that would be
+    /// crash-looping — the tray is, and it has its own.
+    ///
+    /// Reconnecting rather than doing nothing is worth it for one reason: a
+    /// renderer the tray revived becomes usable again, and a window that cannot
+    /// save is a window that lies to you. In the meantime the save path reports
+    /// the truth — a profile written while no renderer is listening says so
+    /// rather than claiming the overlays were updated.
+    fn reconnect_renderer(&mut self) {
+        if self.renderer.as_ref().is_some_and(Client::is_connected) {
             return;
         }
-        let (client, process, failure) = start_or_attach_renderer();
-        self.renderer = client;
-        self.renderer_process = process;
-        match failure {
-            Some(message) => self.status = message,
-            None => {
-                self.status = "Restarted the renderer.".to_string();
+        match ping_latency_overlay_core::transport::Client::connect() {
+            Ok(client) => {
+                self.renderer = Some(client);
+                // The renderer we just found is somebody else's, and it was
+                // started with no knowledge of this profile.
                 self.push_config();
             }
+            Err(_) => self.renderer = None,
         }
     }
 
@@ -1106,12 +1189,20 @@ impl PingApp {
     ///
     /// The profile draft and the preferences draft are independent: the Global
     /// page stages its own copy, so one Save can carry both.
-    fn save_edits(&mut self) {
+    /// Write both drafts that have something to write.
+    ///
+    /// Returns whether everything that needed writing was written, which is
+    /// what the close prompt gates on: a save that reports success but failed
+    /// to reach disk must not let the window close, or the draft is gone with
+    /// nothing to show for it. "There was nothing to save" counts as success,
+    /// so a Save on a clean window exits normally.
+    fn save_edits(&mut self) -> bool {
         let profile_saved = self.persist_current();
         let prefs_saved = self.save_prefs();
         if profile_saved || prefs_saved {
             self.status = "Saved.".to_string();
         }
+        profile_saved && prefs_saved
     }
 
     /// Store the preferences draft, leaving the active profile pointer alone.
@@ -1352,13 +1443,12 @@ impl PingApp {
 
     fn toggle_running(&mut self) {
         self.running = !self.running;
-        // The renderer owns the probes, so pausing is a command. It also keeps
-        // `running` honest in the shell, which is the mirror the tray and the
-        // pane 2 button read.
+        // The renderer owns the probes, so pausing is a command. `running` is
+        // the window's mirror of it, which is what pane 2's Pause all button
+        // reads back.
         self.send(Message::SetPaused {
             paused: !self.running,
         });
-        self.tray.set_running(self.running);
     }
 
     /// Pane 2 of the Overlays page: the profile switcher, the overlay list and
@@ -3143,143 +3233,32 @@ fn deselect_strip_rect(
     Some(strip.intersect(viewport))
 }
 
-/// How the shell finds the renderer executable.
+/// The renderer's executable, and how to start it if it is not already there.
 ///
-/// A sibling of the shell's own executable, so the same code works in the
-/// install directory and under `cargo run`, where both land in the same
-/// `target` directory. Panicking is deliberate: a build that produced one
-/// without the other cannot work, and "the overlays silently never appear" is a
-/// far worse way to find that out.
-fn renderer_exe_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().expect("the shell knows its own path");
-    path.pop();
-    path.push(RENDERER_EXE);
-    path
-}
-
-/// Attach to a running renderer, or start one.
-///
-/// The pipe is the rendezvous, so a successful connect means somebody already
-/// runs a renderer and this shell attaches to it rather than starting a second
-/// one. Only a renderer this call started is returned as a `Child`, so the
-/// caller can tell "mine" from "theirs" and only ever stop its own.
-///
-/// Returns the connection, the process when this call started one, and a
-/// message when something went wrong. The message is `None` on the good paths
-/// so a caller that has its own thing to say is not made to append to a
-/// default.
-fn start_or_attach_renderer() -> (Option<Client>, Option<Child>, Option<String>) {
-    if let Ok(client) = Client::connect() {
-        return (Some(client), None, None);
-    }
-    let path = renderer_exe_path();
-    let child = match Command::new(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            return (
-                None,
-                None,
-                Some(format!(
-                    "Could not start the renderer ({}): {error}",
-                    path.display()
-                )),
-            )
-        }
-    };
-    // The renderer creates the pipe after it has parsed its arguments and taken
-    // its mutex, so a spawn that succeeded is not yet a pipe that answers. A
-    // bounded wait at startup beats an error message the user cannot act on.
-    for _ in 0..RENDERER_ATTACH_ATTEMPTS {
-        if let Ok(client) = Client::connect() {
-            return (Some(client), Some(child), None);
-        }
-        std::thread::sleep(RENDERER_ATTACH_INTERVAL);
-    }
-    (
-        None,
-        Some(child),
-        Some(format!(
-            "The renderer started but never answered on the pipe ({}).",
-            path.display()
-        )),
-    )
-}
-
-/// How long to keep retrying the pipe after spawning a renderer.
-const RENDERER_ATTACH_ATTEMPTS: u32 = 30;
-const RENDERER_ATTACH_INTERVAL: Duration = Duration::from_millis(100);
-/// The renderer's executable name, next to the shell's own.
-const RENDERER_EXE: &str = "ping-latency-overlay-renderer.exe";
-/// Restarts allowed inside [`RESTART_WINDOW`] before the shell gives up.
-const RESTART_LIMIT: usize = 5;
-const RESTART_WINDOW: Duration = Duration::from_secs(60);
-
-/// Bounded restarts, so a renderer that will not stay up is not relaunched
-/// forever.
-///
-/// A crash loop is worse than a stopped app: it burns a core, and it buries the
-/// one message that would explain what went wrong under a stream of identical
-/// failures. The guard is a plain struct with the clock passed in rather than
-/// read, so a test can drive a whole restart history in microseconds instead of
-/// waiting a minute for a real one.
-struct RestartGuard {
-    /// When the recent attempts happened, oldest first.
-    recent: Vec<Instant>,
-}
-
-impl RestartGuard {
-    fn new() -> Self {
-        Self { recent: Vec::new() }
-    }
-
-    /// Record an attempt at `now` and say whether it is allowed.
-    ///
-    /// Attempts older than the window are forgotten first, so a renderer that
-    /// fails once an hour restarts forever while one that fails in a tight loop
-    /// is caught after `RESTART_LIMIT`.
-    fn should_restart(&mut self, now: Instant) -> bool {
-        self.forget_expired(now);
-        if self.recent.len() >= RESTART_LIMIT {
-            return false;
-        }
-        self.recent.push(now);
-        true
-    }
-
-    /// Drop the attempts that have fallen out of the window.
-    ///
-    /// Split out from `should_restart` so a test can hold the window itself
-    /// rather than only the decision: "an old attempt is forgotten" is a
-    /// statement about the list, and a test that cannot see the list cannot
-    /// tell the forgetting apart from the limit never having been hit.
-    fn forget_expired(&mut self, now: Instant) {
-        self.recent
-            .retain(|at| now.duration_since(*at) < RESTART_WINDOW);
-    }
-}
+/// Both live in `core::transport` rather than here, because the tray process
+/// has to do exactly the same thing and two copies of "only ever stop a process
+/// you started" is one copy too many.
+use ping_latency_overlay_core::diagnostics::log_line;
+use ping_latency_overlay_core::transport::{start_or_attach_renderer, start_or_attach_tray};
 
 impl App for PingApp {
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        let was_shutting_down = self.shutdown_state != ShutdownState::Running;
-        self.process_tray_events(ctx);
-
-        if self.shutdown_state != ShutdownState::Running {
-            if was_shutting_down && self.shutdown_state == ShutdownState::HideRequested {
-                self.shutdown_state = ShutdownState::CloseRequested;
-                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
-                // Close is delivered as a viewport event, so request the
-                // following logic-only pass to observe it.
-                ctx.request_repaint();
-            }
+        if self.shutdown_state == ShutdownState::ExitConfirmed {
+            // Issued from a frame that did not also cancel, so this one gets
+            // through and the process ends. If it somehow does not, the next
+            // pass sends it again rather than leaving the window unclosable.
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+            return;
+        }
+        if self.shutdown_state == ShutdownState::ConfirmClose {
+            // The prompt is up. Keep the window alive and its buttons
+            // responsive, but stop the per-frame work: nothing behind the
+            // panel is going to change.
+            ctx.request_repaint();
             return;
         }
 
-        self.supervise_renderer();
+        self.reconnect_renderer();
         self.sync_border_preview();
         self.sync_profiles();
         self.sync_window_title(ctx);
@@ -3293,10 +3272,21 @@ impl App for PingApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_root_close(ui.ctx());
-        if self.shutdown_state != ShutdownState::Running {
+        if self.shutdown_state == ShutdownState::ExitConfirmed {
+            // The close is on its way; drawing anything now would be a frame
+            // of the window nobody is going to see.
             return;
         }
+        // The window itself is still drawn behind the prompt, so the user can
+        // see what they are about to lose. The prompt goes up afterwards, on
+        // top, as its own little window rather than as a child of the panes --
+        // a centred child is a `scope_builder`, which is the shape that made
+        // the detail footer report more than its box and slide into the
+        // status bar.
         self.config_ui(ui);
+        if self.shutdown_state == ShutdownState::ConfirmClose {
+            self.show_close_prompt(ui.ctx());
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -3306,15 +3296,17 @@ impl App for PingApp {
 
 impl Drop for PingApp {
     fn drop(&mut self) {
-        // Only a process this shell started is stopped, and only by message
-        // rather than by killing it, so the renderer can finish its last
-        // repaint and tear the overlay windows down cleanly. A renderer
-        // somebody else launched is left running: that is the tray-less case,
-        // and a blanket kill here would take an overlay set the user still
-        // wants off their screen.
-        if self.renderer_process.is_some() {
-            let _ = self.try_send(&Message::Shutdown);
-        }
+        // The renderer is NOT stopped here, even when this process started it.
+        //
+        // It used to be, on the reasoning that only a process you started is
+        // yours to stop. That reasoning was about *killing* somebody else's
+        // renderer, and it does not apply to the ordinary case: launching the
+        // window starts the renderer, so closing the window sent it a Shutdown
+        // and took the overlays off the screen with it. The renderer belongs to
+        // the tray now, and the tray-less case deliberately wants it to survive.
+        // Only the tray's Exit stops it, and "close the window" no longer means
+        // "close the app".
+        let _ = &self.renderer;
     }
 }
 
@@ -3964,7 +3956,7 @@ pub fn run() {
             .with_max_inner_size(egui::vec2(WINDOW_MAX_WIDTH, WINDOW_MAX_HEIGHT))
             .with_resizable(true)
             .with_visible(false)
-            .with_icon(tray::app_icon()),
+            .with_icon(app_icon()),
         ..Default::default()
     };
 
@@ -3984,71 +3976,18 @@ mod tests {
         list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_count_label,
         overlay_name_width, overlay_row_contents, page_has_detail_footer, page_has_list_pane,
         pending_edits, profile_name_width, profile_row_contents, profile_row_label, rail_width,
-        renderer_exe_path, requested_url, row_inner, selected_overlay_for_border,
-        sync_profile_cache, toggled_selection, ui_text_size, window_title, AboutKind, Frame, Page,
-        ProfileSnapshot, RestartGuard, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
-        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
-        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
-        OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
-        RAIL_ROW_HEIGHT, RAIL_WIDTH, RENDERER_EXE, RESTART_LIMIT, ROW_MARGIN, SCROLL_BAR_RESERVE,
-        SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        requested_url, row_inner, selected_overlay_for_border, sync_profile_cache,
+        toggled_selection, ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot,
+        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
+        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
+        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES,
+        PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
+        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
+        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{Anchor, ConfigNotice, ProfileEntry};
     use std::collections::HashMap;
-    use std::time::{Duration, Instant};
-
-    /// A crash loop is stopped, and a rare failure is not.
-    ///
-    /// The whole point of the guard is the difference between "fails constantly"
-    /// and "fails occasionally", so both halves are driven here rather than only
-    /// the limit: a test that only checks the refusal cannot tell a working window
-    /// from a window that has swallowed every attempt. The clock is passed in, so
-    /// a minute of history runs in microseconds.
-    #[test]
-    fn a_crash_loop_is_stopped_and_a_rare_failure_is_not() {
-        let start = Instant::now();
-
-        // A tight loop: every attempt inside the window, so the limit is what
-        // stops it.
-        let mut tight = RestartGuard::new();
-        for attempt in 1..=RESTART_LIMIT {
-            assert!(
-                tight.should_restart(start + Duration::from_millis(attempt as u64 * 10)),
-                "attempt {attempt} of {RESTART_LIMIT} inside the window should have been allowed"
-            );
-        }
-        assert!(
-            !tight.should_restart(start + Duration::from_millis(1_000)),
-            "a sixth failure inside the window should be refused, or a renderer that \
-             will not stay up is relaunched forever"
-        );
-
-        // An hourly failure never reaches the limit, because every attempt is
-        // forgotten before the next one arrives.
-        let mut rare = RestartGuard::new();
-        for hour in 1..=(RESTART_LIMIT * 2) {
-            assert!(
-                rare.should_restart(start + Duration::from_secs(hour as u64 * 3_600)),
-                "failure number {hour}, one every three hours, should always be restarted"
-            );
-        }
-
-        // The two are genuinely different objects, not the same one misread.
-        assert!(
-            tight.recent.len() >= RESTART_LIMIT,
-            "a refused attempt must still be remembered, or the guard never trips"
-        );
-        // One hour past the final attempt, so every recorded time is strictly
-        // older than the window. An attempt at exactly `now` is age zero and is
-        // still inside it, which is the boundary the guard is entitled to.
-        rare.forget_expired(start + Duration::from_secs(3_600 * (RESTART_LIMIT * 2 + 1) as u64));
-        assert_eq!(
-            rare.recent.len(),
-            0,
-            "every attempt more than a window old should have been forgotten"
-        );
-    }
 
     /// The installer and the app must report the same version.
     ///
@@ -4103,10 +4042,12 @@ mod tests {
     /// constant, which is documentation wearing a test's clothes.
     #[test]
     fn the_renderer_is_a_sibling_exe() {
-        let path = renderer_exe_path();
+        let path = ping_latency_overlay_core::transport::sibling_exe(
+            ping_latency_overlay_core::transport::RENDERER_EXE,
+        );
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
-            Some(RENDERER_EXE),
+            Some(ping_latency_overlay_core::transport::RENDERER_EXE),
             "the shell must spawn the renderer by this exact name, not a guess"
         );
         let shell = std::env::current_exe().expect("the shell is running from somewhere");

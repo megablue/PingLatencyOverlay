@@ -1,29 +1,53 @@
 # PingLatencyOverlay — Spec
 
 ## Startup
-- Launches into the system tray with no window shown.
-- Tray menu: Start/Pause, Config, Exit.
-- The app runs as two processes. The shell holds the tray icon and the Config
-  window; the renderer draws the overlay windows and runs the probes. Starting
-  the app starts the renderer; if one is already running the new shell attaches
+- Launches into the system tray with no window shown. The tray is the program
+  the user runs; the Config window and the renderer are started on demand.
+- Tray menu: Config, Pause/Resume, Close tray (keep overlays running), Exit.
+  The two exit items are deliberately different: closing the tray leaves the
+  overlays running, and Exit stops the whole app.
+- The app runs as three processes. The tray holds the tray icon and supervises.
+  The Config window is started when it is asked for and **exits when it is
+  closed**, so its window and graphics context exist only while you are looking
+  at them. The renderer draws the overlay windows and runs the probes, with no
+  graphics stack of any kind.
+- What you launch brings the rest up with it, so any one of them gets you a
+  working app. Launching the tray starts a missing renderer but does **not**
+  open the window — the window opens when you ask for it from the tray's menu.
+  Launching the window starts a missing tray and renderer. The renderer never
+  starts anything, because it is the thing being started.
+- Closing the Config window leaves the tray running. That is intended: the tray
+  is the app, and a window should not take it down with it. To stop everything,
+  use the tray's **Exit**.
+- If something goes wrong, `pinglatencyoverlay.log` is written beside your
+  config, and a failure that stops the tray from starting at all also puts up a
+  message box, because the tray is the one part of this app with no window of
+  its own.
+- Starting the app starts the renderer. If one is already running — because you
+  closed the tray, or launched the Config window directly — the caller attaches
   to it instead of starting a second.
-- Only one shell runs at a time, enforced with a named mutex. A second launch
-  does nothing; it is not an error.
-- If the renderer exits on its own, the shell restarts it, up to five times in a
-  minute. After that it stops trying and says so in the status bar, because a
-  crash loop is worse than a stopped app: it burns a core and buries the one
-  message that would explain it.
+- Each of the three runs at most once, enforced with its own named mutex. A
+  second launch of the same one does nothing; it is not an error. Opening the
+  Config window when it is already open focuses it rather than starting a rival.
+- Closing the Config window asks first if there are unsaved changes, offering
+  Save, Discard, or Cancel. It only closes if the answer succeeded: a save that
+  could not be written leaves the window open and says why, because closing on a
+  save that did not happen loses work silently.
+- If the renderer exits on its own, the tray restarts it, up to five times in a
+  minute. After that it stops trying and says so, because a crash loop is worse
+  than a stopped app: it burns a core and buries the one message that would
+  explain it. A renderer running with no tray is not restarted at all.
 
 ## Interfaces
 - Config window: create and manage overlays.
 - Overlay windows: one OS window per configured overlay.
-- The shell and the renderer talk over a named pipe. The shell sends
+- Tray, Config window and renderer talk over a named pipe. The first two send
   configuration, pause and resume, which overlay's preview border is showing,
   and shutdown; the renderer needs to say nothing back. If the renderer cannot
-  be reached the shell says so rather than failing quietly, including the case
+  be reached the sender says so rather than failing quietly, including the case
   where a profile was written to disk but the overlays were not updated.
-- The renderer is found next to the shell's own executable, so the two programs
-  must be installed into the same directory.
+- The renderer is found next to the caller's own executable, so all three
+  programs must be installed into the same directory.
 
 ## Overlay window
 - Frameless, transparent background, always on top.
@@ -282,12 +306,13 @@ attaches to the same renderer instead of starting another.
 - The finish page carries two ticked checkboxes: **Launch PingLatencyOverlay**
   and **Create a desktop shortcut**. A silent install (`/S`) never shows the
   finish page, so it creates the desktop shortcut to match the default.
-- The application ships two executables and does not require WebView2:
-  `ping-latency-overlay.exe` (tray and Config window) and
-  `ping-latency-overlay-renderer.exe` (overlay windows and probes). They are
-  installed into the same directory, because the shell finds the renderer next
-  to itself. Only the shell gets a Start Menu shortcut, since only the shell is
-  what a user launches.
+- The application ships three executables and does not require WebView2:
+  `ping-latency-overlay-tray.exe` (the tray), `ping-latency-overlay-config.exe`
+  (the Config window) and `ping-latency-overlay-renderer.exe` (the overlay
+  windows and the probes). They are installed into the same directory, because
+  each finds the others next to itself. Only the tray gets a Start Menu or
+  desktop shortcut, since only the tray is what a user launches, and the
+  installer's "Launch" checkbox launches the tray too.
 - The GPLv3 text ships as `LICENSE` in the install directory beside the
   executables. It is installed unconditionally, not as an option, and the
   uninstaller removes it.

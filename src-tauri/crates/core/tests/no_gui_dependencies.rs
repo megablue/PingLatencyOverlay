@@ -19,10 +19,10 @@
 
 use std::process::Command;
 
-/// Crates whose presence anywhere in this crate's graph would mean the
-/// renderer process can initialise a GPU context, run an event loop, or own a
-/// system tray. All three are things the renderer must never do.
-const FORBIDDEN: &[&str] = &[
+/// Crates whose presence anywhere in a GUI-free package's graph would mean
+/// that process can initialise a GPU context or run an event loop. That is the
+/// property being protected: none of these three processes may own one.
+const NO_EVENT_LOOP: &[&str] = &[
     // The egui/eframe stack, including the renderers and platform bindings
     // that come with it.
     "eframe",
@@ -36,10 +36,33 @@ const FORBIDDEN: &[&str] = &[
     "accesskit_winit",
     // A GPU rasteriser, which is the thing being avoided.
     "wgpu",
-    // The tray. A renderer process has no tray; the shell owns it.
-    "tray-icon",
     "orbtop",
-    "muda",
+];
+
+/// Crates that put an icon in the notification area. A notification-area icon
+/// is a Win32 shell object with no GPU context and no event loop, so the tray
+/// process is allowed one and is little else. The renderer is not: it has no
+/// tray, because the tray is what starts and watches it.
+const TRAY_ONLY: &[&str] = &["tray-icon", "muda"];
+
+/// Every package that must never reach a GPU context or an event loop, with
+/// the extra crates that are forbidden in it beyond [`NO_EVENT_LOOP`].
+///
+/// `cargo tree` reports a package's dependencies across **every** target, so
+/// this covers the renderer's binary as well as the library, and naming the
+/// tray package is what covers the tray — a separate package, so a check that
+/// only named the core one would not see it at all.
+///
+/// The second element exists because "no GUI stack" is too blunt a rule to
+/// apply to the tray: `tray-icon` IS the tray. Applying the renderer's rule to
+/// it would have forced the choice between dropping the tray and deleting the
+/// test, and the first is the bug and the second is the loss of the check. The
+/// thing actually worth protecting is narrower and is stated here instead.
+const GUI_FREE_PACKAGES: &[(&str, &[&str])] = &[
+    // The renderer: no GPU context, no event loop, and no tray.
+    ("ping-latency-overlay-core", TRAY_ONLY),
+    // The tray: no GPU context, no event loop, but a notification-area icon.
+    ("ping-latency-overlay-tray", &[]),
 ];
 
 /// The package name from one `cargo tree --prefix none` line, which is
@@ -49,7 +72,12 @@ fn package_name(line: &str) -> &str {
 }
 
 fn is_forbidden(name: &str) -> bool {
-    FORBIDDEN.contains(&name)
+    NO_EVENT_LOOP.contains(&name)
+}
+
+/// Whether `name` is forbidden in a package with the given extra deny-list.
+fn forbidden_in(name: &str, extra: &[&str]) -> bool {
+    is_forbidden(name) || extra.contains(&name)
 }
 
 /// The matcher itself, pinned.
@@ -81,53 +109,53 @@ fn a_gui_crate_in_the_tree_is_recognised() {
 
 /// The invariant itself.
 #[test]
-fn core_cannot_reach_a_gui_stack() {
-    // Use the cargo that is running this test, so a toolchain mismatch cannot
-    // make the check describe a different graph than the one that was built.
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let output = Command::new(&cargo)
-        .args([
-            "tree",
-            "-p",
-            "ping-latency-overlay-core",
-            // One package per line with no tree indentation, so the parse
-            // above does not have to understand tree drawing.
-            "--prefix",
-            "none",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("cargo tree must be runnable to check the dependency invariant");
+fn gui_free_crates_report_a_clean_tree() {
+    for (package, extra) in GUI_FREE_PACKAGES {
+        // Use the cargo that is running this test, so a toolchain mismatch
+        // cannot make the check describe a different graph than the one that
+        // was built.
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let output = Command::new(&cargo)
+            .args([
+                "tree", "-p", package,
+                // One package per line with no tree indentation, so the parse
+                // above does not have to understand tree drawing.
+                "--prefix", "none",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo tree must be runnable to check the dependency invariant");
 
-    assert!(
-        output.status.success(),
-        "cargo tree failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        assert!(
+            output.status.success(),
+            "cargo tree failed for {package}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let tree = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !tree.trim().is_empty(),
-        "cargo tree produced no output, so this test would pass on a graph it \
-         could not read"
-    );
+        let tree = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !tree.trim().is_empty(),
+            "cargo tree produced no output for {package}, so this test would \
+             pass on a graph it could not read"
+        );
 
-    let found: Vec<&str> = tree
-        .lines()
-        .map(package_name)
-        .filter(|name| !name.is_empty() && is_forbidden(name))
-        .collect();
-    let mut found = found;
-    found.sort_unstable();
-    found.dedup();
+        let found: Vec<&str> = tree
+            .lines()
+            .map(package_name)
+            .filter(|name| !name.is_empty() && forbidden_in(name, extra))
+            .collect();
+        let mut found = found;
+        found.sort_unstable();
+        found.dedup();
 
-    assert!(
-        found.is_empty(),
-        "ping-latency-overlay-core must not depend on a GUI stack, but its \
-         dependency tree contains {found:?}.\n\
-         The renderer process is built from this crate precisely so that it can \
-         never create a GPU context or run an event loop. If a GUI crate is \
-         genuinely needed here, the split has lost its reason to exist and the \
-         architecture needs revisiting rather than the deny-list."
-    );
+        assert!(
+            found.is_empty(),
+            "{package} must not depend on a GUI stack, but its dependency tree \
+             contains {found:?}.\n\
+             These processes are built without one precisely so that they can \
+             never create a GPU context or run an event loop. If a GUI crate is \
+             genuinely needed here, the split has lost its reason to exist and \
+             the architecture needs revisiting rather than the deny-list."
+        );
+    }
 }

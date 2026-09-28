@@ -5,8 +5,14 @@ ManifestDPIAwareness PerMonitorV2
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
-!ifndef APP_EXE
-  !error "APP_EXE must be supplied with /DAPP_EXE=<absolute path>"
+; Three executables, all siblings in one directory. The tray is the app a user
+; launches; the Config window is spawned on demand and exits when closed; the
+; renderer draws the overlays. Each is looked up beside the others.
+!ifndef APP_TRAY_EXE
+  !error "APP_TRAY_EXE must be supplied with /DAPP_TRAY_EXE=<absolute path>"
+!endif
+!ifndef APP_CONFIG_EXE
+  !error "APP_CONFIG_EXE must be supplied with /DAPP_CONFIG_EXE=<absolute path>"
 !endif
 !ifndef APP_ICON
   !error "APP_ICON must be supplied with /DAPP_ICON=<absolute path>"
@@ -78,19 +84,22 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File "${APP_EXE}"
-  ; The renderer is a second executable, not a plugin: the shell starts it and
-  ; talks to it over a named pipe. It MUST be installed into the same directory
-  ; as the shell, because that is how the shell finds it - it looks for a
-  ; sibling of its own executable. Installing it anywhere else produces an app
-  ; that starts cleanly and shows no overlays, with nothing at runtime to say
-  ; why. Only the shell gets a Start Menu shortcut, because only the shell is
-  ; what a user launches.
+  ; Three executables, and all three MUST land in the same directory: each finds
+  ; the others by looking for a sibling of its own binary. Putting any of them
+  ; anywhere else produces an app that starts cleanly and shows nothing, with
+  ; nothing at runtime to say why.
+  ;
+  ; The tray is the one a user launches, so it is the only one that gets a
+  ; Start Menu or desktop shortcut. The Config window is spawned by the tray
+  ; when it is asked for, and exits again when it is closed, so a shortcut to
+  ; it would be a second way to start the same window.
+  File "${APP_TRAY_EXE}"
+  File "${APP_CONFIG_EXE}"
   File "${APP_RENDERER_EXE}"
   File /oname=LICENSE "${APP_LICENSE}"
 
   CreateDirectory "$SMPROGRAMS"
-  CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay.exe"
+  CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay-tray.exe"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
@@ -106,7 +115,8 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\ping-latency-overlay-renderer.exe"
-  Delete "$INSTDIR\ping-latency-overlay.exe"
+  Delete "$INSTDIR\ping-latency-overlay-config.exe"
+  Delete "$INSTDIR\ping-latency-overlay-tray.exe"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
   Delete "$DESKTOP\${PRODUCTNAME}.lnk"
@@ -115,12 +125,16 @@ Section "Uninstall"
 SectionEnd
 
 Function LaunchApplication
-  Exec '"$INSTDIR\ping-latency-overlay.exe"'
+  ; The tray, not the Config window: launching the window directly starts the
+  ; tray and renderer as a side effect, and the tray is the process that is
+  ; meant to be the app. Launching it here would work but would leave the user
+  ; with a window and no tray, which is not the state they installed.
+  Exec '"$INSTDIR\ping-latency-overlay-tray.exe"'
 FunctionEnd
 
 ; Called by MUI from the finish page when the shortcut checkbox is ticked.
 Function CreateDesktopShortcut
-  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay.exe"
+  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay-tray.exe"
 FunctionEnd
 
 ; A silent install never shows the finish page, so the checkbox is never read

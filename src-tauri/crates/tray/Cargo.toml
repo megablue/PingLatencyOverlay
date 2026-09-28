@@ -1,0 +1,18 @@
+[package]
+name = "ping-latency-overlay-tray"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "ping_latency_overlay_tray"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ping-latency-overlay-tray"
+path = "src/main.rs"
+
+[dependencies]
+ping-latency-overlay-core = { path = "../core" }
+tray-icon = "0.25.1"
+image = "0.25"

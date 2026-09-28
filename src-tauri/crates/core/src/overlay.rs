@@ -3,6 +3,7 @@ use std::error::Error;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::border::{border_frame_interval, BorderAnimator};
@@ -253,6 +254,30 @@ const WM_ERASEBKGND: u32 = 0x0014;
 const WM_MOUSEACTIVATE: u32 = 0x0021;
 #[cfg(windows)]
 const WM_NCHITTEST: u32 = 0x0084;
+
+/// A window that is asked to close, and a session that is being shut down.
+///
+/// Both mean the same thing to us: this process is finished.
+const WM_CLOSE: u32 = 0x0010;
+const WM_QUERYENDSESSION: u32 = 0x0011;
+
+/// Set by the window procedure when Windows asks this process to close.
+///
+/// A static is the right shape rather than a convenience: the overlay windows
+/// belong to the renderer's one loop thread, so the flag is written and read on
+/// the same thread and needs no locking and no channel. The window procedure
+/// cannot stop the loop by returning — it is called from inside the pump, which
+/// the loop owns — so all it can do is record the request, and the loop looks.
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether Windows has asked this process to close.
+///
+/// Checked once per pass of the renderer's loop. The loop is the only thing
+/// that can act on it, because the loop is what has to finish: stop probing,
+/// drop the overlays, release the mutex, exit.
+pub fn quit_requested() -> bool {
+    QUIT_REQUESTED.load(Ordering::Relaxed)
+}
 #[cfg(windows)]
 const HTTRANSPARENT: isize = -1;
 #[cfg(windows)]
@@ -279,6 +304,14 @@ pub fn enable_dpi_awareness() {
 
 /// Drain this thread's Windows message queue.
 ///
+/// **Any thread in any of our processes that creates a window must call this.**
+/// It started here, in the renderer, and it was left out of the tray, which is
+/// where the same mistake was made twice: the tray icon is a window too, and
+/// Windows only delivers a window message to a thread that pumps its queue, so
+/// a tray that sleeps instead of pumping looks completely fine — the icon is on
+/// screen — and is completely dead. tray-icon says as much at the top of its own
+/// documentation: "an event loop must be running on the thread."
+///
 /// The overlay windows are ordinary Win32 windows, so Windows posts messages to
 /// the thread that owns them: the cursor changes when the pointer moves, hover
 /// tracking ticks, and the window is asked to repaint itself. A thread that
@@ -286,15 +319,10 @@ pub fn enable_dpi_awareness() {
 /// few seconds Windows decides the window is hung — which is what the user sees
 /// as a spinning cursor and a "Not responding" process.
 ///
-/// Nothing pumps these messages in this process. The graph used to be drawn from
-/// the application process, where eframe's event loop was pumping the queue all
-/// day, so the same blocking draw loop never tripped the watchdog. Now that the
-/// renderer owns the windows it has to service them itself.
-///
 /// This only peeks, so it never blocks: a thread waiting for work calls it
 /// between waits rather than instead of them. It is not a substitute for a real
 /// message loop, and deliberately not one — the windows are click-through and
-/// this process has no input to receive.
+/// the tray is an icon, so none of these processes has input to receive.
 pub fn pump_messages() {
     #[cfg(windows)]
     unsafe {
@@ -307,7 +335,6 @@ pub fn pump_messages() {
         }
     }
 }
-// Fake samples live only in the overlay renderer; they are retained as visual
 // history after the reveal and are never inserted into SampleStore.
 struct PrefillState {
     started_at: Instant,
@@ -911,6 +938,24 @@ unsafe extern "system" fn overlay_wnd_proc(
         WM_ERASEBKGND => 1,
         WM_PAINT => {
             ValidateRect(hwnd, ptr::null());
+            0
+        }
+        // Windows is asking this process to close. Record it and return 0
+        // WITHOUT calling DefWindowProcW, and that is the whole point.
+        //
+        // `DefWindowProc` on WM_CLOSE destroys the window, and the renderer's
+        // loop would then see a missing handle on its next pass and rebuild it.
+        // "End task" in Task Manager would close the windows, wait, find the
+        // process alive with brand new windows, and conclude that its graceful
+        // close had worked — so it would never escalate to a kill and the
+        // process would simply never end. Letting the default handler run is
+        // therefore worse than ignoring the message: it also defeats the very
+        // escalation the user reached for.
+        //
+        // A quit the user asked for somewhere else — the tray's Exit, a logoff —
+        // arrives the same way and gets the same answer, from one place.
+        WM_CLOSE | WM_QUERYENDSESSION => {
+            QUIT_REQUESTED.store(true, Ordering::Relaxed);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

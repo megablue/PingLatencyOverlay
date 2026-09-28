@@ -1,14 +1,19 @@
-[workspace]
-members = ["crates/core"]
+﻿[workspace]
+members = ["crates/core", "crates/tray"]
 # Required, not decoration. A manifest that is both a workspace root and a
 # package makes plain `cargo test` operate on THAT PACKAGE ALONE, so without
 # this line the 59 tests in `core` are silently skipped and the command still
 # exits 0. It reported "35 passed" against a 94-test suite. Listing the root
 # explicitly makes the ordinary command cover the whole workspace.
-default-members = [".", "crates/core"]
+default-members = [".", "crates/core", "crates/tray"]
 
 [package]
 name = "ping-latency-overlay"
+# `cargo run` with two binaries in the workspace is ambiguous, and it is
+# ambiguous precisely where a developer starts the app. The window is the one
+# that was run before the split, and it starts whatever it needs, so it keeps
+# the default. The tray and the renderer are named explicitly when wanted.
+default-run = "ping-latency-overlay-config"
 # The build version is MAJOR.MINOR.(commits since countBase below), not this
 # patch number. Raise the minor here when the minor changes; the patch is
 # derived from Git and the two readers of this file both read countBase from
@@ -33,6 +38,19 @@ countBase = 76
 [lib]
 name = "ping_latency_overlay_lib"
 crate-type = ["rlib"]
+
+# The binary is the configuration window, and it is named for what it is. It
+# used to be `ping-latency-overlay.exe` and it was the tray as well, back when
+# the tray icon and the window shared a process and the process therefore
+# carried eframe whether or not the window was open. They are separate
+# processes now, so the name says which one this is: the tray is
+# `ping-latency-overlay-tray.exe`, and the renderer is
+# `ping-latency-overlay-renderer.exe`. A user who finds this executable and
+# runs it gets the window, which by itself starts the tray and the renderer if
+# they are not already up.
+[[bin]]
+name = "ping-latency-overlay-config"
+path = "src/main.rs"
 
 [build-dependencies]
 winresource = "0.1.17"

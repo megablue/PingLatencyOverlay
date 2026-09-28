@@ -11,26 +11,24 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $project = Join-Path $root "src-tauri"
-$exe = Join-Path $project "target\release\ping-latency-overlay.exe"
-# The renderer is a sibling executable: the shell starts it and talks to it over a
-# named pipe, and it finds it by looking next to its own binary. The installer
-# must therefore place the two together, so both paths are resolved here and
-# both are checked before packaging rather than after.
+# Three executables, all in the same directory, because each finds the others
+# by looking beside its own binary. The tray is the one a user launches and the
+# only one that gets a Start Menu shortcut; the window is spawned by the tray
+# on demand, and the renderer by whichever of the two is asked to start first.
+$tray = Join-Path $project "target\release\ping-latency-overlay-tray.exe"
+$config = Join-Path $project "target\release\ping-latency-overlay-config.exe"
 $renderer = Join-Path $project "target\release\ping-latency-overlay-renderer.exe"
 $icon = Join-Path $project "icons\icon.ico"
 $license = Join-Path $root "LICENSE"
 $outDir = Join-Path $project "target\release\bundle\nsis"
 $script = Join-Path $root "packaging\nsis\installer.nsi"
 
-if (-not (Test-Path $exe)) {
-    throw "Release executable not found: $exe (run cargo build --release first)"
-}
-if (-not (Test-Path $renderer)) {
-    throw "Renderer executable not found: $renderer. The shell cannot draw anything without it, and it is found by looking next to the shell's own binary."
-}
-if (-not (Test-Path $license)) {
-    throw "License file not found: $license"
-}
+# The `-VersionOnly` exit and the executable guards both live BELOW, after the
+# version has actually been computed. An early exit would report an empty
+# string, which is worse than no answer because a caller cannot tell it apart
+# from a real version, and a guard before the exit would make the version
+# unreadable exactly when someone is trying to find out what it is -- the test
+# suite asks on a clean tree, before anything has been built.
 
 $cargoToml = Get-Content (Join-Path $project "Cargo.toml") -Raw
 $versionMatch = [regex]::Match(
@@ -86,6 +84,21 @@ if ($VersionOnly) {
     exit 0
 }
 
+# After the exit above, and for the reason given at the top: asking what this
+# script would name the installer must not require that anything was built.
+foreach ($required in @(
+    @{ Path = $tray; What = "Tray executable. This is the app a user launches; it cannot start without it." },
+    @{ Path = $config; What = "Config window executable. The tray spawns it on demand, and finds it next to itself." },
+    @{ Path = $renderer; What = "Renderer executable. Nothing can draw an overlay without it, and it is found next to the others." }
+)) {
+    if (-not (Test-Path $required.Path)) {
+        throw "$($required.What)`nNot found: $($required.Path)`n(run cargo build --release first)"
+    }
+}
+if (-not (Test-Path $license)) {
+    throw "License file not found: $license"
+}
+
 $versionNumbers = @(
     $version.Split(".") | ForEach-Object { [int]$_ }
 )
@@ -109,7 +122,8 @@ $makensisPath = if ($makensis.Source) { $makensis.Source } else { $makensis.Full
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $arguments = @(
-    "/DAPP_EXE=$exe",
+    "/DAPP_TRAY_EXE=$tray",
+    "/DAPP_CONFIG_EXE=$config",
     "/DAPP_RENDERER_EXE=$renderer",
     "/DAPP_ICON=$icon",
     "/DAPP_LICENSE=$license",
