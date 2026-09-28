@@ -103,9 +103,25 @@ Section "Install"
   ; with nothing to explain it.
   SetDetailsPrint both
   DetailPrint "Stopping any running PingLatencyOverlay processes..."
+  ; The current names first, then the ones from before the rename. Both sets are
+  ; needed: a developer may be running this build, and a user upgrading from any
+  ; earlier release is running those. A file cannot be deleted while its process
+  ; holds it open, so an old name left running would make the uninstall below
+  ; fail silently and the install quietly leave the previous copy in place.
+  ; `taskkill` is a Windows builtin, so this needs no NSIS plugin.
+  ; The exit code is deliberately ignored: "no such process" is the normal
+  ; answer on a first install and is not a failure.
+  ExecWait 'taskkill /F /IM plo-tray.exe /T' $0
+  ExecWait 'taskkill /F /IM plo-config.exe /T' $0
+  ExecWait 'taskkill /F /IM plo-renderer.exe /T' $0
   ExecWait 'taskkill /F /IM ping-latency-overlay-tray.exe /T' $0
   ExecWait 'taskkill /F /IM ping-latency-overlay-config.exe /T' $0
   ExecWait 'taskkill /F /IM ping-latency-overlay-renderer.exe /T' $0
+  ; The single executable the app shipped as before the three-process split. Only
+  ; a user upgrading across that boundary still has one, and the older
+  ; uninstaller in the next step knows how to delete it, but only if it is not
+  ; still running.
+  ExecWait 'taskkill /F /IM ping-latency-overlay.exe /T' $0
 
   ; And now the previous installation, if there was one. This is here and not in
   ; .onInit because .onInit runs BEFORE the directory page, so $INSTDIR is not
@@ -134,7 +150,7 @@ Section "Install"
   File /oname=LICENSE "${APP_LICENSE}"
 
   CreateDirectory "$SMPROGRAMS"
-  CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay-tray.exe"
+  CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\plo-tray.exe"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
@@ -149,9 +165,9 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
-  Delete "$INSTDIR\ping-latency-overlay-renderer.exe"
-  Delete "$INSTDIR\ping-latency-overlay-config.exe"
-  Delete "$INSTDIR\ping-latency-overlay-tray.exe"
+  Delete "$INSTDIR\plo-renderer.exe"
+  Delete "$INSTDIR\plo-config.exe"
+  Delete "$INSTDIR\plo-tray.exe"
   Delete "$INSTDIR\Uninstall.exe"
   Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
   Delete "$DESKTOP\${PRODUCTNAME}.lnk"
@@ -164,12 +180,12 @@ Function LaunchApplication
   ; tray and renderer as a side effect, and the tray is the process that is
   ; meant to be the app. Launching it here would work but would leave the user
   ; with a window and no tray, which is not the state they installed.
-  Exec '"$INSTDIR\ping-latency-overlay-tray.exe"'
+  Exec '"$INSTDIR\plo-tray.exe"'
 FunctionEnd
 
 ; Called by MUI from the finish page when the shortcut checkbox is ticked.
 Function CreateDesktopShortcut
-  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\ping-latency-overlay-tray.exe"
+  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\plo-tray.exe"
 FunctionEnd
 
 ; A silent install never shows the finish page, so the checkbox is never read

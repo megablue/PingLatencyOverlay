@@ -307,8 +307,8 @@ attaches to the same renderer instead of starting another.
   and **Create a desktop shortcut**. A silent install (`/S`) never shows the
   finish page, so it creates the desktop shortcut to match the default.
 - The application ships three executables and does not require WebView2:
-  `ping-latency-overlay-tray.exe` (the tray), `ping-latency-overlay-config.exe`
-  (the Config window) and `ping-latency-overlay-renderer.exe` (the overlay
+  `plo-tray.exe` (the tray), `plo-config.exe` (the Config window) and
+  `plo-renderer.exe` (the overlay
   windows and the probes). They are installed into the same directory, because
   each finds the others next to itself. Only the tray gets a Start Menu or
   desktop shortcut, since only the tray is what a user launches, and the

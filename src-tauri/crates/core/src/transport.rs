@@ -348,14 +348,27 @@ impl Drop for Client {
 // --------------------------------------------- finding and starting siblings
 
 /// The renderer executable, found next to whichever process is starting it.
-pub const RENDERER_EXE: &str = "ping-latency-overlay-renderer.exe";
+pub const RENDERER_EXE: &str = "plo-renderer.exe";
 
-/// The configuration window executable, likewise.
 /// The tray: the program a user launches, and the only one that stays resident.
-pub const TRAY_EXE: &str = "ping-latency-overlay-tray.exe";
+pub const TRAY_EXE: &str = "plo-tray.exe";
 
 /// The Config window, started on demand and exited when it is closed.
-pub const CONFIG_EXE: &str = "ping-latency-overlay-config.exe";
+pub const CONFIG_EXE: &str = "plo-config.exe";
+
+/// The three names above, for the installer and for a test that has to stop
+/// running copies of this build.
+///
+/// The old, long names are here too and must stay: the installer kills them
+/// before it removes a previous installation, because a user upgrading from
+/// before the rename is running those, and a file cannot be deleted while its
+/// process holds it open. Dropping these would make every upgrade from an older
+/// build leave a running process behind that the new install cannot overwrite.
+pub const LEGACY_EXE_NAMES: [&str; 3] = [
+    "ping-latency-overlay-tray.exe",
+    "ping-latency-overlay-config.exe",
+    "ping-latency-overlay-renderer.exe",
+];
 
 /// How long to keep retrying the pipe after a spawn that has not answered.
 ///

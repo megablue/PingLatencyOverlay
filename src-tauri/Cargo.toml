@@ -13,7 +13,7 @@ name = "ping-latency-overlay"
 # ambiguous precisely where a developer starts the app. The window is the one
 # that was run before the split, and it starts whatever it needs, so it keeps
 # the default. The tray and the renderer are named explicitly when wanted.
-default-run = "ping-latency-overlay-config"
+default-run = "plo-config"
 # The build version is MAJOR.MINOR.(commits since countBase below), not this
 # patch number. Raise the minor here when the minor changes; the patch is
 # derived from Git and the two readers of this file both read countBase from
@@ -43,13 +43,20 @@ crate-type = ["rlib"]
 # used to be `ping-latency-overlay.exe` and it was the tray as well, back when
 # the tray icon and the window shared a process and the process therefore
 # carried eframe whether or not the window was open. They are separate
-# processes now, so the name says which one this is: the tray is
-# `ping-latency-overlay-tray.exe`, and the renderer is
-# `ping-latency-overlay-renderer.exe`. A user who finds this executable and
+# processes now, so the name says which one this is: the tray is `plo-tray.exe`
+# and the renderer is `plo-renderer.exe`. A user who finds this executable and
 # runs it gets the window, which by itself starts the tray and the renderer if
 # they are not already up.
+#
+# The three are short on purpose. They sit side by side in the install folder
+# and next to each other in Task Manager, and a name long enough to need
+# abbreviating is a name that is hard to tell apart from the next one at a
+# glance -- which is exactly the sort of thing this app's whole design is
+# trying to avoid. The product name, the installer's file name, the Start Menu
+# folder and the window title are all still PingLatencyOverlay; only the
+# executables are terse.
 [[bin]]
-name = "ping-latency-overlay-config"
+name = "plo-config"
 path = "src/main.rs"
 
 [build-dependencies]

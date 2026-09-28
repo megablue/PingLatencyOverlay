@@ -9,8 +9,20 @@ name = "ping_latency_overlay_tray"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ping-latency-overlay-tray"
+# The crate keeps a descriptive name; the executable does not. See the note on
+# the window's `[[bin]]` about why the three are terse.
+name = "plo-tray"
 path = "src/main.rs"
+
+# A bisection tool, deliberately not shipped. It creates a tray icon and
+# nothing else -- no pipe, no renderer, no supervision, no window -- so that
+# "the tray menu does not open" can be answered without any of the app around
+# it. Cargo would auto-discover it from `src/bin/tray_probe.rs`; naming it
+# explicitly means the name is deliberate and greppable, and the comment above
+# is somewhere a reader will actually find.
+[[bin]]
+name = "plo-tray-probe"
+path = "src/bin/tray_probe.rs"
 
 [dependencies]
 ping-latency-overlay-core = { path = "../core" }

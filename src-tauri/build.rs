@@ -19,7 +19,7 @@ fn main() {
             )
             .set("ProductName", "PingLatencyOverlay")
             .set("InternalName", "ping-latency-overlay")
-            .set("OriginalFilename", "ping-latency-overlay.exe")
+            .set("OriginalFilename", "plo-config.exe")
             .compile()
             .expect("failed to embed Windows resources");
     }

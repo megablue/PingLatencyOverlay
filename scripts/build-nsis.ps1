@@ -15,9 +15,9 @@ $project = Join-Path $root "src-tauri"
 # by looking beside its own binary. The tray is the one a user launches and the
 # only one that gets a Start Menu shortcut; the window is spawned by the tray
 # on demand, and the renderer by whichever of the two is asked to start first.
-$tray = Join-Path $project "target\release\ping-latency-overlay-tray.exe"
-$config = Join-Path $project "target\release\ping-latency-overlay-config.exe"
-$renderer = Join-Path $project "target\release\ping-latency-overlay-renderer.exe"
+$tray = Join-Path $project "target\release\plo-tray.exe"
+$config = Join-Path $project "target\release\plo-config.exe"
+$renderer = Join-Path $project "target\release\plo-renderer.exe"
 $icon = Join-Path $project "icons\icon.ico"
 $license = Join-Path $root "LICENSE"
 $outDir = Join-Path $project "target\release\bundle\nsis"

@@ -1,9 +1,9 @@
 //! The configuration window, and only the configuration window.
 //!
 //! Everything that draws a latency graph lives in the `ping_latency_overlay_core`
-//! crate instead, and runs in a separate `ping-latency-overlay-renderer`
-//! process that this one starts or attaches to over a named pipe. The tray
-//! lives in a third process, `ping-latency-overlay-tray`, which has no eframe at
+//! crate instead, and runs in a separate `plo-renderer` process that this one
+//! starts or attaches to over a named pipe. The tray
+//! lives in a third process, `plo-tray`, which has no eframe at
 //! all. This crate is the only place in the project allowed to depend on
 //! eframe, and it is deliberately short-lived: a window that creates an OpenGL
 //! context costs tens of megabytes of driver memory for as long as it exists, so

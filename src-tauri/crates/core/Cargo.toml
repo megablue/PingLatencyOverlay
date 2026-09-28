@@ -19,7 +19,7 @@ crate-type = ["rlib"]
 # covered by `tests/no_gui_dependencies.rs` for free: the renderer cannot grow a
 # GUI dependency without failing the same test that guards the library.
 [[bin]]
-name = "ping-latency-overlay-renderer"
+name = "plo-renderer"
 path = "src/bin/renderer.rs"
 
 # This crate is what the renderer process will be built from, and the whole
