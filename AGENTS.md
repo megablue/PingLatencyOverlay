@@ -26,6 +26,9 @@ product behavior.
       drawing.
 - `scripts/gen-icons.mjs` — generates native artwork with no dependencies.
 - `packaging/nsis/` and `scripts/build-nsis.ps1` — native installer packaging.
+- `docs/GAME.md` — design document for the game module, which is **not
+  built**. Nothing described there exists in the code. Read it before
+  planning anything that draws something other than a latency graph.
 - The pre-egui Tauri/React implementation remains available on `main`.
 
 ## Commands
