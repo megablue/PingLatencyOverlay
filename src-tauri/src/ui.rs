@@ -4050,6 +4050,50 @@ mod tests {
         );
     }
 
+    /// The installer and the app must report the same version.
+    ///
+    /// `build.rs` computes what the About page shows and
+    /// `scripts/build-nsis.ps1` computes what the installer is *named*. They
+    /// are two implementations of one rule, in two languages, reading one
+    /// `Cargo.toml` — and an app that reports `0.2.3` inside a file called
+    /// `0.1.77-setup.exe` is exactly the sort of drift nobody notices until a
+    /// user files a bug about it. So this asks the script, rather than
+    /// re-deriving the rule a third time here.
+    ///
+    /// Comparing against `env!("APP_BUILD_VERSION")` is the whole point: that
+    /// is the value compiled into the binary, so this catches a script that
+    /// has drifted from the build as well as a rule that changed on one side.
+    #[test]
+    fn the_installer_and_the_app_agree_on_the_version() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("scripts")
+            .join("build-nsis.ps1");
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .args(["-VersionOnly"])
+            .output()
+            .expect("powershell is available on a Windows build");
+        assert!(
+            output.status.success(),
+            "the packaging script could not report its version: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let scripted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Compared against the raw compiled value rather than `app_version()`,
+        // which only prefixes a `v` for display. The claim is the same one the
+        // About page makes, just without the decoration, so nothing is
+        // normalised away and a real difference cannot hide in formatting.
+        assert_eq!(
+            scripted,
+            env!("APP_BUILD_VERSION"),
+            "the installer would be named with {scripted} while the app reports {}",
+            app_version()
+        );
+    }
+
     /// The shell looks for the renderer next to itself.
     ///
     /// The path decides whether the renderer is ever found at all, and nothing

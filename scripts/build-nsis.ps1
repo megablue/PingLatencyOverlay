@@ -1,6 +1,11 @@
 param(
     [ValidateSet("x64", "arm64")]
-    [string]$Arch = "x64"
+    [string]$Arch = "x64",
+    # Print the version this script would name the installer and stop. The
+    # test suite uses it to check that this script and `build.rs` agree, since
+    # the app reporting one version while its installer is named another is
+    # exactly the drift nobody would otherwise notice.
+    [switch]$VersionOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,7 +62,28 @@ if ($null -ne $commitCount) {
     if ($baseParts.Count -lt 2) {
         throw "Package version must contain major and minor components: $baseVersion"
     }
-    $version = "$($baseParts[0]).$($baseParts[1]).$commitCount"
+    # The patch is the number of commits since `countBase`, not the raw commit
+    # count, so a new minor restarts at .1. Read from the same Cargo.toml line
+    # `build.rs` reads so the installer name and the version the app reports
+    # come out of one fact rather than two implementations agreeing by luck.
+    $baseMatch = [regex]::Match($cargoToml, '(?m)^\s*countBase\s*=\s*(\d+)')
+    if (-not $baseMatch.Success) {
+        throw "Could not read countBase from src-tauri/Cargo.toml"
+    }
+    $countBase = [uint32]$baseMatch.Groups[1].Value
+    if ($commitCount -le $countBase) {
+        # No Git history, a shallow clone, or the commit that moved the minor:
+        # the plain base version is the honest answer, and it is what
+        # build.rs falls back to as well.
+        $version = $baseVersion
+    } else {
+        $version = "$($baseParts[0]).$($baseParts[1]).$($commitCount - $countBase)"
+    }
+}
+
+if ($VersionOnly) {
+    Write-Output $version
+    exit 0
 }
 
 $versionNumbers = @(

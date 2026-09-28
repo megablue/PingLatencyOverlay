@@ -25,6 +25,14 @@ fn main() {
     }
 }
 
+/// The version the app reports: `MAJOR.MINOR.(commits since countBase)`.
+///
+/// `countBase` is read from the same `Cargo.toml` line the packaging script
+/// reads, so the number in the About page and the number in the installer's
+/// filename come out of one fact rather than two implementations agreeing by
+/// luck. When the count is at or below the base — no Git, a shallow clone, or
+/// the bump commit itself — the plain base version is used, which is what a
+/// developer building from a tarball should see.
 fn build_version() -> String {
     if let Ok(version) = std::env::var("PING_LATENCY_BUILD_VERSION") {
         let version = version.trim();
@@ -33,19 +41,37 @@ fn build_version() -> String {
         }
     }
 
-    let base_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
-    let Some(commit_count) = git_commit_count() else {
+    let base_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.2.0".into());
+    let Some(patch) = git_commit_count().and_then(|count| count.checked_sub(count_base())) else {
         return base_version;
     };
+    if patch == 0 {
+        return base_version;
+    }
 
     let mut parts = base_version.split('.');
     let major = parts.next().unwrap_or("0");
-    let minor = parts.next().unwrap_or("1");
-    if commit_count == 0 {
-        base_version
-    } else {
-        format!("{major}.{minor}.{commit_count}")
-    }
+    let minor = parts.next().unwrap_or("0");
+    format!("{major}.{minor}.{patch}")
+}
+
+/// The commit count that the patch number restarts from.
+///
+/// Read out of `Cargo.toml` rather than hardcoded, because
+/// `scripts/build-nsis.ps1` has to subtract exactly the same number and a
+/// constant in each file is a constant that eventually drifts.
+fn count_base() -> u32 {
+    // SAFETY: `CARGO_MANIFEST_DIR` is set by cargo for every build script.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return 0;
+    };
+    text.lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("countBase")?;
+            rest.trim_start().strip_prefix('=')?.trim().parse().ok()
+        })
+        .unwrap_or(0)
 }
 
 fn git_commit_count() -> Option<u32> {

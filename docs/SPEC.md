@@ -291,7 +291,12 @@ attaches to the same renderer instead of starting another.
 - The GPLv3 text ships as `LICENSE` in the install directory beside the
   executables. It is installed unconditionally, not as an option, and the
   uninstaller removes it.
-- The build version is `MAJOR.MINOR.<git-commit-count>`, taken from Git at
-  packaging time, and is the version shown in the Config window. If Git metadata
-  is unavailable, the version in `src-tauri/Cargo.toml` is used. Run the packaging
-  step *after* committing, or the installer reports the previous commit's count.
+- The build version is `MAJOR.MINOR.(commits since countBase)` — the count
+  since a base recorded in `src-tauri/Cargo.toml`, not the raw commit count, so
+  each new minor restarts at `.1`. It is taken from Git at packaging time, and
+  is the version shown in the Config window. If Git metadata is unavailable, or
+  the count has not passed the base yet, the version in
+  `src-tauri/Cargo.toml` is used as it stands. Run the packaging step *after*
+  committing, or the installer reports the previous commit's number. The app's
+  reported version and the installer's file name are computed from the same
+  place, so they cannot drift apart.

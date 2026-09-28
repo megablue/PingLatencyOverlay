@@ -9,13 +9,26 @@ default-members = [".", "crates/core"]
 
 [package]
 name = "ping-latency-overlay"
-version = "0.1.0"
+# The build version is MAJOR.MINOR.(commits since countBase below), not this
+# patch number. Raise the minor here when the minor changes; the patch is
+# derived from Git and the two readers of this file both read countBase from
+# here too, so the app and the installer cannot disagree about the number.
+version = "0.2.0"
 description = "Windows overlay showing live network latency"
 authors = ["megablue"]
 license = "GPL-3.0-only"
 repository = "https://github.com/megablue/PingLatencyOverlay"
 edition = "2021"
 rust-version = "1.88"
+
+# The single source of truth for where the patch number starts. `build.rs`
+# (which sets the version the app shows) and `scripts/build-nsis.ps1` (which
+# names the installer) both subtract this from the Git commit count, so a
+# disagreement between the app and its own filename is not expressible. It
+# was 76 when the minor moved from 1 to 2: the split into two processes
+# rewrote how the app starts, so it gets a new minor, and the count restarts.
+[package.metadata.build]
+countBase = 76
 
 [lib]
 name = "ping_latency_overlay_lib"

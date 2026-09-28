@@ -64,8 +64,18 @@ Installer (run from the repository root):
   (this session uses `%LOCALAPPDATA%\Temp\opencode\plo-commit-msg.txt`) and run
   `git commit -F <path>`; a PowerShell here-string gets its terminator mangled
   by the shell tool.
-- **Bundle after committing.** The version is `MAJOR.MINOR.<git-commit-count>`,
-  so bundling first yields the previous version.
+- **Bundle after committing.** The version is
+  `MAJOR.MINOR.(commits since countBase)`, not the raw commit count, so a new
+  minor restarts at `.1`. `countBase` is in `[package.metadata.build]` in
+  `src-tauri/Cargo.toml` and **both** readers take it from there — `build.rs`
+  (which sets what the app reports) and `scripts/build-nsis.ps1` (which names
+  the installer) — so a constant in each file cannot drift from the other.
+  Raise the minor and the base together, in the same commit.
+  `the_installer_and_the_app_agree_on_the_version` runs the script and
+  compares it with the version compiled into the binary, because an app that
+  says `0.2.3` inside `0.1.77-setup.exe` is the kind of drift nobody notices
+  until a user reports it. So **bundle after committing**; bundling first
+  yields the previous commit's number.
 - **Do not commit before the user has looked at it.** Hand visual changes over
   as a build and wait for confirmation.
 
