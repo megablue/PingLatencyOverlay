@@ -8,14 +8,23 @@ use std::time::{Duration, Instant};
 
 use crate::border::{border_frame_interval, BorderAnimator};
 use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig};
+#[cfg(windows)]
+use crate::monitors::MonitorInfo;
 use crate::probes::SampleStore;
 use crate::render::{
     cosmetic_prefill_samples, render_graph_into_with_border, render_prefill_into, SamplePoint,
 };
 
+/// The Win32 surface this crate needs, declared here rather than taken from a
+/// binding crate.
+///
+/// `pub(crate)` so `monitors` can share it: the display enumeration and the
+/// layered-window code both need `RECT`, `BOOL` and `GetMonitorInfoW`, and a
+/// second `#[repr(C)] RECT` in a sibling module is exactly the kind of thing
+/// that drifts.
 #[cfg(windows)]
 #[allow(non_snake_case, clippy::upper_case_acronyms)]
-mod win {
+pub(crate) mod win {
     use core::ffi::c_void;
 
     pub type BOOL = i32;
@@ -25,6 +34,7 @@ mod win {
     pub type HDC = HANDLE;
     pub type HGDIOBJ = HANDLE;
     pub type HINSTANCE = HANDLE;
+    pub type HMONITOR = HANDLE;
     pub type HWND = HANDLE;
     pub type HMENU = HANDLE;
     pub type LPARAM = isize;
@@ -70,13 +80,24 @@ mod win {
         pub cy: i32,
     }
 
+    /// `MONITORINFO` with `szDevice` appended, so the display's own name can be
+    /// read. Passing the larger struct to `GetMonitorInfoW` is correct and
+    /// documented: `cbSize` is how the callee knows what it was handed.
     #[repr(C)]
-    pub struct MONITORINFO {
+    pub struct MONITORINFOEXW {
         pub cbSize: DWORD,
         pub rcMonitor: RECT,
         pub rcWork: RECT,
         pub dwFlags: DWORD,
+        /// `CCHDEVICENAMEW`: 32 `WCHAR`s, null terminated.
+        pub szDevice: [u16; 32],
     }
+
+    /// The callback `EnumDisplayMonitors` calls once per display. The third
+    /// parameter is the intersection of the monitor with the caller's `HDC`
+    /// rect, which is null when the whole virtual desktop was asked for.
+    pub type MONITORENUMPROC =
+        Option<unsafe extern "system" fn(HMONITOR, HDC, *mut RECT, LPARAM) -> BOOL>;
 
     #[repr(C)]
     pub struct WNDCLASSW {
@@ -157,9 +178,24 @@ mod win {
         ) -> BOOL;
         pub fn ShowWindow(hwnd: HWND, ncmdshow: i32) -> BOOL;
         pub fn UpdateWindow(hwnd: HWND) -> BOOL;
-        pub fn GetMonitorInfoW(hmonitor: HANDLE, monitorinfo: *mut MONITORINFO) -> BOOL;
-        pub fn MonitorFromPoint(point: POINT, dwflags: DWORD) -> HANDLE;
-        pub fn GetDpiForSystem() -> u32;
+        pub fn GetMonitorInfoW(hmonitor: HANDLE, monitorinfo: *mut MONITORINFOEXW) -> BOOL;
+        /// The export name is `EnumDisplayMonitors`, with no `W`.
+        ///
+        /// The header calls this `EnumDisplayMonitorsW` and the SDK's
+        /// `user32.lib` has no such member — `dumpbin /LINKERMEMBER` lists
+        /// `EnumDisplayDevicesW`, `EnumDisplaySettingsW` and every other
+        /// wide/narrow pair separately, and one bare `EnumDisplayMonitors`
+        /// beside them. There is no A/W split to make here anyway: the
+        /// function takes no string argument. So this links to the name that is
+        /// actually there, and a `W` on the declaration would be a link error
+        /// rather than a wrong answer.
+        #[link_name = "EnumDisplayMonitors"]
+        pub fn EnumDisplayMonitorsW(
+            hmonitor: HANDLE,
+            hdc: HDC,
+            lpenumfunc: MONITORENUMPROC,
+            dwdata: LPARAM,
+        ) -> BOOL;
         pub fn SetProcessDpiAwarenessContext(value: HANDLE) -> BOOL;
         pub fn ValidateRect(hwnd: HWND, rect: *const RECT) -> BOOL;
         pub fn PeekMessageW(
@@ -204,11 +240,11 @@ mod win {
 #[cfg(windows)]
 use win::{
     CreateCompatibleDC, CreateDIBSection, CreateWindowExW, DefWindowProcW, DeleteDC, DeleteObject,
-    DestroyWindow, DispatchMessageW, GetDC, GetDpiForSystem, GetModuleHandleW, GetMonitorInfoW,
-    GetStockObject, MonitorFromPoint, PeekMessageW, RegisterClassW, ReleaseDC, SelectObject,
-    SetProcessDpiAwarenessContext, SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW,
-    UpdateLayeredWindow, UpdateWindow, ValidateRect, BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ,
-    HINSTANCE, HWND, LPARAM, LRESULT, MONITORINFO, MSG, POINT, RECT, SIZE, UINT, WNDCLASSW, WPARAM,
+    DestroyWindow, DispatchMessageW, GetDC, GetModuleHandleW, GetStockObject, PeekMessageW,
+    RegisterClassW, ReleaseDC, SelectObject, SetProcessDpiAwarenessContext, SetWindowPos,
+    ShowWindow, TranslateMessage, UnregisterClassW, UpdateLayeredWindow, UpdateWindow,
+    ValidateRect, BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MSG,
+    POINT, RECT, SIZE, UINT, WNDCLASSW, WPARAM,
 };
 
 #[cfg(windows)]
@@ -283,13 +319,15 @@ const HTTRANSPARENT: isize = -1;
 #[cfg(windows)]
 const MA_NOACTIVATE: isize = 3;
 #[cfg(windows)]
-const MONITOR_DEFAULTTOPRIMARY: u32 = 1;
-#[cfg(windows)]
 const AC_SRC_OVER: u8 = 0x00;
 #[cfg(windows)]
 const AC_SRC_ALPHA: u8 = 0x01;
 #[cfg(windows)]
 const SW_SHOWNOACTIVATE: i32 = 4;
+/// Hides the window without destroying it, which is what a missing monitor
+/// calls for: the overlay has to come back where it was when the monitor does.
+#[cfg(windows)]
+const SW_HIDE: i32 = 0;
 #[cfg(windows)]
 const MAX_RENDER_DIMENSION: f64 = 2048.0;
 
@@ -377,6 +415,15 @@ struct OverlayWindow {
     sample_generation: u64,
     size: (i32, i32),
     position: (i32, i32),
+    /// Set when the display this overlay is pinned to is not attached, so the
+    /// window is off screen but kept.
+    ///
+    /// Kept rather than destroyed so the graph comes back at exactly the size
+    /// and position the user chose when the monitor returns. The field exists
+    /// because `ShowWindow(hwnd, SW_HIDE)` is not the only way a window ends up
+    /// invisible, and the two repaint intervals and the topmost reassert have to
+    /// all skip it rather than each guess.
+    hidden: bool,
     dirty: bool,
     last_rendered: Instant,
     surface: LayeredSurface,
@@ -601,8 +648,40 @@ impl OverlayManager {
             }
         }
 
-        let dpi = dpi_scale();
+        // Enumerated once per pass rather than per overlay: the answer is the
+        // same for every overlay on screen, and `EnumDisplayMonitors` is a
+        // round trip into the window manager.
+        let connected = crate::monitors::enumerate();
         for overlay in config.overlays.iter().filter(|overlay| overlay.enabled) {
+            let selected = selected_id == Some(overlay.id.as_str());
+            let Some(monitor) =
+                crate::monitors::resolve(overlay.monitor_device.as_deref(), &connected)
+            else {
+                // Pinned to a display that is not attached right now.
+                //
+                // The window is hidden rather than destroyed, and it is only
+                // hidden if it already exists: a monitor that is missing is not
+                // a reason to create a window nobody can see, and creating it
+                // would cost a layered surface and a DIB for the whole time the
+                // panel is unplugged.
+                //
+                // A hidden window is also excluded from the repaint intervals
+                // below and from the topmost reassert. Leaving a frozen prefill
+                // in those lists would have the renderer spin at display rate
+                // for a graph that is not on screen, and `SetWindowPos` carries
+                // `SWP_SHOWWINDOW`, so reasserting would quietly unhide it.
+                if let Some(window) = self.windows.get_mut(&overlay.id) {
+                    if !window.hidden {
+                        window.hidden = true;
+                        unsafe {
+                            ShowWindow(window.hwnd, SW_HIDE);
+                        }
+                    }
+                }
+                continue;
+            };
+            let (size, position) = layout_for(overlay, monitor);
+
             let (sample_generation, samples_changed, sample_buffer) = {
                 let store = samples.lock().unwrap();
                 let generation = store
@@ -624,8 +703,6 @@ impl OverlayManager {
                 };
                 (generation, changed, buffer)
             };
-            let (size, position) = layout_for(overlay, dpi);
-            let selected = selected_id == Some(overlay.id.as_str());
 
             if !self.windows.contains_key(&overlay.id) {
                 match self.create_window(overlay, size, position, selected) {
@@ -642,6 +719,18 @@ impl OverlayManager {
             let Some(window) = self.windows.get_mut(&overlay.id) else {
                 continue;
             };
+            if window.hidden {
+                // The monitor came back. Show it and force a redraw: a window
+                // that was hidden while a display change also moved it may hold
+                // a surface sized for the old one, and `changed` is computed
+                // from `size`/`position` rather than from visibility, so
+                // nothing else here would ask for a frame.
+                window.hidden = false;
+                window.dirty = true;
+                unsafe {
+                    ShowWindow(window.hwnd, SW_SHOWNOACTIVATE);
+                }
+            }
             let config_changed = window.config != *overlay;
             let border_selection_changed = window.border_selected != selected;
             window.border_selected = selected;
@@ -719,15 +808,26 @@ impl OverlayManager {
 
         if self.last_topmost.elapsed() >= Duration::from_secs(1) {
             for window in self.windows.values() {
-                reassert_topmost(window.hwnd);
+                // Hidden windows are skipped, and they have to be: this passes
+                // `SWP_SHOWWINDOW`, so reasserting a hidden overlay's z-order
+                // would put the graph back on screen and undo the pin.
+                if !window.hidden {
+                    reassert_topmost(window.hwnd);
+                }
             }
             self.last_topmost = Instant::now();
         }
     }
 
+    /// How fast the renderer must redraw for the startup prefill.
+    ///
+    /// A hidden window's prefill is frozen where it stood, so it is left out
+    /// here for the same reason it is skipped above: including it would ask for
+    /// display-rate redraws of a graph nobody can see.
     pub fn prefill_repaint_interval(&self) -> Option<Duration> {
         self.windows
             .values()
+            .filter(|window| !window.hidden)
             .filter_map(|window| {
                 let prefill = window.prefill.as_ref()?;
                 if prefill.completed_rendered {
@@ -741,6 +841,7 @@ impl OverlayManager {
     pub fn border_repaint_interval(&self) -> Option<Duration> {
         self.windows
             .values()
+            .filter(|window| !window.hidden)
             .any(|window| window.border.needs_animation())
             .then(border_frame_interval)
     }
@@ -798,6 +899,9 @@ impl OverlayManager {
             history_dirty: true,
             border: BorderAnimator::new(),
             border_selected: selected,
+            // A window is only ever created for an overlay whose monitor
+            // resolved this pass, so it starts visible.
+            hidden: false,
             pixels: Vec::new(),
             sample_generation: 0,
             size,
@@ -978,16 +1082,6 @@ fn reassert_topmost(hwnd: HWND) {
 }
 
 #[cfg(windows)]
-fn dpi_scale() -> f32 {
-    let dpi = unsafe { GetDpiForSystem() };
-    if dpi == 0 {
-        1.0
-    } else {
-        dpi as f32 / 96.0
-    }
-}
-
-#[cfg(windows)]
 fn position_for_anchor(
     anchor: Anchor,
     work: RECT,
@@ -1024,8 +1118,16 @@ fn position_for_anchor(
     }
 }
 
+/// Size and place an overlay against one display.
+///
+/// Takes the display rather than a DPI number and a work area, because those
+/// two are one decision: reading the scale from anywhere but the monitor the
+/// graph is going on is how a 150% secondary panel ends up with a graph sized
+/// for the primary. The caller has already resolved the display, so an
+/// unreachable monitor never reaches here.
 #[cfg(windows)]
-fn layout_for(config: &OverlayConfig, dpi_scale: f32) -> ((i32, i32), (i32, i32)) {
+fn layout_for(config: &OverlayConfig, monitor: &MonitorInfo) -> ((i32, i32), (i32, i32)) {
+    let dpi_scale = monitor.scale();
     let long_logical =
         (config.window_seconds.max(1) as f64 * config.scale.max(1) as f64).clamp(1.0, 8192.0);
     let short_logical = (config.graph_height_px.max(10) as f64).clamp(1.0, 8192.0);
@@ -1043,7 +1145,15 @@ fn layout_for(config: &OverlayConfig, dpi_scale: f32) -> ((i32, i32), (i32, i32)
     let size = (long_px.max(1), short_px.max(1));
     let horizontal_margin = (config.horizontal_margin_px as f64 * dpi_scale as f64).round() as i64;
     let vertical_margin = (config.vertical_margin_px as f64 * dpi_scale as f64).round() as i64;
-    let work = primary_work_area();
+    // The portable `Rect` crosses into the Win32 shape here rather than
+    // carrying it around: the overlay maths has always spoken `RECT` and
+    // `position_for_anchor` is left exactly as it was.
+    let work = RECT {
+        left: monitor.work.left,
+        top: monitor.work.top,
+        right: monitor.work.right,
+        bottom: monitor.work.bottom,
+    };
     let width = size.0 as i64;
     let height = size.1 as i64;
     let (x, y) = position_for_anchor(
@@ -1061,25 +1171,6 @@ fn layout_for(config: &OverlayConfig, dpi_scale: f32) -> ((i32, i32), (i32, i32)
             y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
         ),
     )
-}
-
-#[cfg(windows)]
-fn primary_work_area() -> RECT {
-    unsafe {
-        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info: MONITORINFO = zeroed();
-        info.cbSize = size_of::<MONITORINFO>() as u32;
-        if !monitor.is_null() && GetMonitorInfoW(monitor, &mut info) != 0 {
-            info.rcWork
-        } else {
-            RECT {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            }
-        }
-    }
 }
 
 #[cfg(windows)]

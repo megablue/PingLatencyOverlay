@@ -50,6 +50,11 @@ value is one more thing that can be wrong.
     - `src/render.rs` — software graph rendering into premultiplied RGBA.
     - `src/border.rs` — runtime border-effect state and software RGB border
       drawing.
+    - `src/monitors.rs` — display enumeration and the rule that picks a
+      display. The two are separate on purpose: `enumerate` is the only Win32
+      in it, and `resolve`/`placement` are pure functions over a list, so the
+      multi-monitor behaviour is testable on the one-monitor machine most of
+      this is written on.
     - `src/transport.rs` — the pipe: wire format, client, server and the
       single-instance mutexes. Both ends compile from this module, so the two
       processes cannot disagree about the protocol.
@@ -497,6 +502,33 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   at zero; positive values are composited by Windows.
 - **The graph uses the actual physical window dimensions.** Do not assume
   `windowSeconds * scale` is the drawable size under Windows DPI/text scaling.
+- **A monitor is a device name, and a missing one hides the overlay.**
+  `MonitorInfo` is a plain struct with no Win32 in it and `resolve` is pure,
+  because the interesting states — a panel left of the primary, one at 150%
+  next to one at 100%, a pinned display that is unplugged — are exactly the
+  ones a one-monitor developer cannot produce. `GetDpiForSystem` is the
+  *primary* monitor's DPI whatever the caller does, so `layout_for` takes a
+  `&MonitorInfo` rather than an `f32`: a DPI number and a work area that can
+  disagree are how a 150% panel ends up laid out at 100%.
+- **A hidden overlay has to be excluded from three things that do not look like
+  rendering.** `prefill_repaint_interval`, `border_repaint_interval` and the
+  once-a-second `reassert_topmost` all read `self.windows`, and all three would
+  otherwise work on a window that is not on screen: the first two spin the
+  renderer at display rate for a frozen prefill, and the third passes
+  `SWP_SHOWWINDOW`, which quietly puts the graph back. `OverlayWindow::hidden`
+  exists so that is one flag and not three separate guesses.
+- **The picker's list is not allowed to disagree with the profile.** A pinned
+  display that is unplugged is still an entry, and still the selected one, so a
+  hidden overlay has a visible reason to be hidden. An egui `ComboBox` whose
+  entries do not contain the selected value falls back to its first row, so
+  dropping the entry would report a *different* monitor as chosen and a save
+  would re-pin it.
+- **`EnumDisplayMonitorsW` is exported under the name `EnumDisplayMonitors`.**
+  The header says `W`, the SDK's `user32.lib` has no such member (verified with
+  `dumpbin /LINKERMEMBER`, which lists every other A/W pair separately), and
+  there is no A/W split to make anyway — the call takes no string. It is
+  declared with `#[link_name]`; spelling it `W` is a link error, not a wrong
+  answer.
 - Sample buffers are bounded and overlay HWNDs are reused by stable ID. Do not
   allocate one renderer or surface per overlay.
 - `ProbeManager::apply_config` must not restart all tasks for a style-only Save.
