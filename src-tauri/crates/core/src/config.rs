@@ -152,6 +152,15 @@ pub struct OverlayConfig {
     /// Background opacity, 0 (transparent) to 100 (opaque).
     #[serde(default = "default_bg_opacity")]
     pub bg_opacity: u32,
+    /// The display this overlay belongs to, as a Win32 device name
+    /// (`\\.\DISPLAY2`), or `None` to follow the primary monitor.
+    ///
+    /// `None` is every profile written before this field existed, and it is
+    /// also what a hand-edited empty string becomes in `normalize`, because a
+    /// name that matches no attached monitor hides the overlay with nothing on
+    /// screen to say why.
+    #[serde(default)]
+    pub monitor_device: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -223,6 +232,7 @@ impl OverlayConfig {
             legacy_margin_px: None,
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
+            monitor_device: None,
         }
     }
 }
@@ -386,6 +396,14 @@ impl Config {
                 o.orientation = 0;
             }
             o.bg_opacity = o.bg_opacity.min(100);
+            // A blank name is not a monitor. Left alone it would name a display
+            // that does not exist and the overlay would stay hidden with no
+            // way to tell from the screen that it had been asked for.
+            o.monitor_device = o
+                .monitor_device
+                .take()
+                .map(|device| device.trim().to_string())
+                .filter(|device| !device.is_empty());
         }
     }
 }
@@ -1679,6 +1697,76 @@ mod tests {
         assert!(legacy_path.is_file());
         assert!(!new.join(CONFIG_FILE).exists());
         assert_eq!(fs::read_dir(&new).expect("read new directory").count(), 0);
+    }
+
+    /// A blank monitor name is not a monitor, and must not be one.
+    ///
+    /// `monitor_device` names a display to pin to, and a name that matches no
+    /// attached display hides the overlay. A hand-edited `"monitorDevice": ""`
+    /// or a stray space would therefore hide a graph with nothing on screen to
+    /// say which setting did it, and it would keep doing so on every load
+    /// because the empty name survives a round trip. `normalize` is the only
+    /// place that can turn it back into "follow the primary", so it is the
+    /// place this has to be enforced.
+    #[test]
+    fn normalize_turns_a_blank_monitor_name_back_into_following_the_primary() {
+        for blank in ["", "   ", "\t"] {
+            let mut config = Config {
+                overlays: vec![OverlayConfig {
+                    monitor_device: Some(blank.to_string()),
+                    ..OverlayConfig::new()
+                }],
+                ..Config::default()
+            };
+            config.normalize();
+            assert_eq!(
+                config.overlays[0].monitor_device, None,
+                "{blank:?} survived as a display name"
+            );
+        }
+    }
+
+    /// A real display name is left alone, including its case and its spelling.
+    ///
+    /// The counterpart to the test above: a "be tidy with whitespace" fix that
+    /// also rewrote a genuine name would silently move a user's overlay.
+    #[test]
+    fn normalize_keeps_a_real_monitor_name() {
+        let mut config = Config {
+            overlays: vec![OverlayConfig {
+                monitor_device: Some("\\\\.\\DISPLAY2".to_string()),
+                ..OverlayConfig::new()
+            }],
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(
+            config.overlays[0].monitor_device.as_deref(),
+            Some("\\\\.\\DISPLAY2")
+        );
+    }
+
+    /// An overlay written before monitors were selectable has no field at all.
+    ///
+    /// `None` is the default rather than a required field, so a profile file
+    /// from any earlier version loads, and "no field" and "an explicit null" are
+    /// the same thing to the renderer.
+    #[test]
+    fn a_profile_without_a_monitor_field_loads_and_follows_the_primary() {
+        let json = r#"{
+            "profileName": "Desk",
+            "overlays": [
+                {
+                    "id": "one",
+                    "name": "Gateway",
+                    "host": "192.168.1.1",
+                    "probe": {"protocol": "icmp", "host": "192.168.1.1"}
+                }
+            ]
+        }"#;
+        let config: Config = serde_json::from_str(json).expect("a profile without a monitor field");
+        assert_eq!(config.overlays[0].monitor_device, None);
+        assert_eq!(OverlayConfig::new().monitor_device, None);
     }
 
     #[test]

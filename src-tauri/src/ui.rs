@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Color32, ComboBox, Context, Frame, Grid, Layout, RichText, Ui, ViewportBuilder,
@@ -17,6 +17,7 @@ use eframe::{App, CreationContext, NativeOptions};
 use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig,
 };
+use ping_latency_overlay_core::monitors::{self, MonitorInfo};
 use ping_latency_overlay_core::transport::{Client, Message};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
@@ -434,6 +435,13 @@ fn explorer_dark_visuals() -> egui::Visuals {
     visuals
 }
 
+/// How often the attached-display list is re-read.
+///
+/// Long enough to keep `EnumDisplayMonitors` off the frame path, short enough
+/// that plugging a monitor in while the window is open still puts it in the
+/// list.
+const MONITOR_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 const POSITION_PICKER_SIZE: f32 = 220.0;
 const POSITION_PICKER_DISPLAY_SIZE: f32 = 180.0;
 const POSITION_PICKER_PADDING: f32 = 4.0;
@@ -444,6 +452,119 @@ struct PositionPicker {
     default_texture: egui::TextureHandle,
     hover_texture: egui::TextureHandle,
     selected_texture: egui::TextureHandle,
+}
+
+/// One entry in the monitor picker.
+///
+/// `device` is what gets stored: `None` means "follow the primary monitor",
+/// which is the default and is therefore a real choice rather than the absence
+/// of one. A pinned device that is not attached also gets an entry, because the
+/// alternative is an overlay that is hidden with nothing on screen to say so.
+struct MonitorChoice {
+    device: Option<String>,
+    label: String,
+    hint: String,
+}
+
+impl MonitorChoice {
+    fn is(&self, device: Option<&str>) -> bool {
+        match (&self.device, device) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => mine.eq_ignore_ascii_case(theirs),
+            _ => false,
+        }
+    }
+}
+
+/// The primary-monitor entry, which is also what "follow the primary" reads as.
+fn primary_choice() -> MonitorChoice {
+    MonitorChoice {
+        device: None,
+        label: "Primary monitor (follow automatically)".to_string(),
+        hint: "The overlay moves to whichever monitor Windows is calling primary. \
+               This is what an overlay created before monitor selection existed does."
+            .to_string(),
+    }
+}
+
+/// How one attached display is named in the picker.
+///
+/// The device name alone is not checkable by eye, and the picker's whole job is
+/// letting a user confirm the monitor they meant — especially after a port
+/// change, where the name survives and the panel does not. So the label carries
+/// the resolution, the scaling and where it sits relative to the primary, and
+/// the name comes last where it is least likely to be read as the whole story.
+fn monitor_label(monitor: &MonitorInfo, primary: Option<&MonitorInfo>) -> String {
+    let resolution = format!("{} × {}", monitor.bounds.width(), monitor.bounds.height());
+    let scaling = format!("{}%", monitors::scale_percent(monitor));
+    let where_it_is = primary
+        .filter(|primary| !std::ptr::eq(*primary, monitor))
+        .map_or_else(String::new, |primary| {
+            format!(" · {}", monitors::placement(monitor, primary))
+        });
+    format!("{resolution} ({scaling}){where_it_is} · {}", monitor.device)
+}
+
+/// Every entry the picker offers, in the order it offers them.
+///
+/// The primary monitor is not in this list as a device: "follow the primary" is
+/// the entry for it, and offering both would be two ways of saying one thing
+/// where one of them stops working when the primary changes.
+///
+/// A pinned device that is not attached is included, and first, so a hidden
+/// overlay is visibly a hidden overlay. Dropping it would make the picker
+/// silently disagree with what the profile says — a list that does not contain
+/// the selected value has no way to show it, so the combobox would fall back to
+/// its first row and read as though the user had chosen something else.
+fn monitor_choices(monitors: &[MonitorInfo], selected: Option<&str>) -> Vec<MonitorChoice> {
+    let primary = monitors::primary(monitors);
+    let mut choices: Vec<MonitorChoice> = Vec::new();
+    let selected_device = selected.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(device) = selected_device {
+        if !monitors
+            .iter()
+            .any(|monitor| monitor.device.eq_ignore_ascii_case(device))
+        {
+            choices.push(MonitorChoice {
+                device: Some(device.to_string()),
+                label: format!("{device} — not connected"),
+                hint: "This overlay is hidden while that display is not attached. \
+                       It comes back where you left it when the display returns."
+                    .to_string(),
+            });
+        }
+    }
+    choices.push(primary_choice());
+    for monitor in monitors {
+        if monitor.primary {
+            continue;
+        }
+        choices.push(MonitorChoice {
+            device: Some(monitor.device.clone()),
+            label: monitor_label(monitor, primary),
+            hint: format!(
+                "Pins this overlay to {}. The scale and size are read from that \
+                 display, not from the primary one.",
+                monitor.device
+            ),
+        });
+    }
+    choices
+}
+
+/// The text the closed combobox shows, which is the selected entry's label.
+///
+/// Falls back to the first entry when the selected value is in none of them,
+/// so the control can never show a blank or a value the user cannot find when
+/// they open it.
+fn monitor_choice_label(monitors: &[MonitorInfo], selected: Option<&str>) -> String {
+    let choices = monitor_choices(monitors, selected);
+    choices
+        .iter()
+        .find(|choice| choice.is(selected))
+        .or_else(|| choices.first())
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| "Primary monitor (follow automatically)".to_string())
 }
 
 impl PositionPicker {
@@ -727,6 +848,15 @@ pub struct PingApp {
     /// frame for no reason.
     border_preview: Option<String>,
     position_picker: PositionPicker,
+    /// The displays attached right now, and when they were last read.
+    ///
+    /// Cached because `EnumDisplayMonitors` is a round trip into the window
+    /// manager and this runs every pass. A display can be plugged in or pulled
+    /// out at any time without telling us, so this is re-read on a clock rather
+    /// than on a save — the picks list has to be able to add a new monitor the
+    /// user has not configured anything for yet.
+    monitors: Vec<MonitorInfo>,
+    monitors_read_at: Option<Instant>,
     shutdown_state: ShutdownState,
     /// The app icon, decoded once and shown above the About page's text.
     about_logo: egui::TextureHandle,
@@ -823,6 +953,10 @@ impl PingApp {
             // accurate rather than merely unknown and needs no first send.
             border_preview: None,
             position_picker,
+            monitors: Vec::new(),
+            // `None` so the first `sync_monitors` reads, rather than showing an
+            // empty monitor list until the clock comes round.
+            monitors_read_at: None,
             shutdown_state: ShutdownState::Running,
             about_logo: about_logo_texture(&cc.egui_ctx),
         };
@@ -1280,6 +1414,23 @@ impl PingApp {
         let profiles = &mut self.profiles;
         let counts = &mut self.profile_overlay_counts;
         sync_profile_cache(last_page, page, profiles, counts, read_profile_snapshot);
+    }
+
+    /// Keep the list of attached displays fresh.
+    ///
+    /// A display change is not something the app hears about, and the Overlays
+    /// page is the only place the list is drawn, so this is on a clock rather
+    /// than on a save. Two seconds is a compromise: short enough that plugging
+    /// a monitor in puts it in the list while the window is still open, long
+    /// enough that the enumeration is not on the frame path.
+    fn sync_monitors(&mut self) {
+        let now = Instant::now();
+        sync_monitor_list(
+            &mut self.monitors,
+            &mut self.monitors_read_at,
+            now,
+            monitors::enumerate,
+        );
     }
 
     /// Make another profile the active one and remember the choice.
@@ -2365,6 +2516,7 @@ impl PingApp {
                     &mut self.config.overlays[index],
                     &mut changed,
                     &self.position_picker,
+                    &self.monitors,
                 );
                 if changed {
                     self.dirty = true;
@@ -3101,6 +3253,28 @@ fn sync_profile_cache(
     true
 }
 
+/// The body of `sync_monitors`, with the enumeration passed in.
+///
+/// Same shape and the same reason as `sync_profile_cache`: a test that only
+/// checked the due/not-due predicate would pass with the read deleted, which is
+/// the failure the profile counts shipped. Returns whether a read happened.
+fn sync_monitor_list(
+    monitors: &mut Vec<MonitorInfo>,
+    read_at: &mut Option<Instant>,
+    now: Instant,
+    read: impl FnOnce() -> Vec<MonitorInfo>,
+) -> bool {
+    let due = read_at.is_none_or(|at| now.duration_since(at) >= MONITOR_REFRESH_INTERVAL);
+    if !due {
+        return false;
+    }
+    *monitors = read();
+    // Set after the read, so a slow enumeration is not counted as having
+    // happened before it did.
+    *read_at = Some(now);
+    true
+}
+
 /// How the detail pane words an overlay count, or nothing when it is unknown.
 ///
 /// A count that has not been read is not the same as a profile with no overlays,
@@ -3261,6 +3435,7 @@ impl App for PingApp {
         self.reconnect_renderer();
         self.sync_border_preview();
         self.sync_profiles();
+        self.sync_monitors();
         self.sync_window_title(ctx);
         // The renderer owns every animation now: smooth rendering, the
         // cosmetic prefill and the startup border all repaint themselves at
@@ -3315,6 +3490,7 @@ fn edit_overlay(
     overlay: &mut OverlayConfig,
     changed: &mut bool,
     position_picker: &PositionPicker,
+    attached: &[MonitorInfo],
 ) {
     section(ui, "General", |ui| {
         Grid::new("general-grid")
@@ -3403,6 +3579,26 @@ fn edit_overlay(
                 overlay.position = anchor;
                 *changed = true;
             }
+        }
+        let mut chosen = overlay.monitor_device.clone();
+        ComboBox::from_id_salt("monitor-device")
+            .selected_text(monitor_choice_label(attached, chosen.as_deref()))
+            .show_ui(ui, |ui| {
+                for choice in monitor_choices(attached, chosen.as_deref()) {
+                    let picked = choice.is(chosen.as_deref());
+                    if ui
+                        .selectable_label(picked, choice.label)
+                        .on_hover_text(choice.hint)
+                        .clicked()
+                        && !picked
+                    {
+                        chosen = choice.device;
+                    }
+                }
+            });
+        if chosen != overlay.monitor_device {
+            overlay.monitor_device = chosen;
+            *changed = true;
         }
         Grid::new("position-offsets-grid")
             .num_columns(2)
@@ -3973,21 +4169,56 @@ mod tests {
     use super::{
         about_page_lines, app_version, can_switch_profile, config_notice_status,
         config_notices_status, deselect_strip_rect, draw_pane_divider, empty_editor,
-        list_pane_column, list_pane_row_height, list_pane_row_width_for, overlay_count_label,
-        overlay_name_width, overlay_row_contents, page_has_detail_footer, page_has_list_pane,
-        pending_edits, profile_name_width, profile_row_contents, profile_row_label, rail_width,
-        requested_url, row_inner, selected_overlay_for_border, sync_profile_cache,
-        toggled_selection, ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot,
-        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
-        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
-        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, OVERLAY_ROW_HEIGHT, PAGES,
-        PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
-        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
-        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        list_pane_column, list_pane_row_height, list_pane_row_width_for, monitor_choice_label,
+        monitor_choices, overlay_count_label, overlay_name_width, overlay_row_contents,
+        page_has_detail_footer, page_has_list_pane, pending_edits, profile_name_width,
+        profile_row_contents, profile_row_label, rail_width, requested_url, row_inner,
+        selected_overlay_for_border, sync_monitor_list, sync_profile_cache, toggled_selection,
+        ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot, ABOUT_ICON_DOT_RADIUS,
+        ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
+        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
+        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
+        PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH,
+        ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND,
+        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{Anchor, ConfigNotice, ProfileEntry};
+    use ping_latency_overlay_core::monitors::{self, MonitorInfo};
     use std::collections::HashMap;
+    use std::time::Instant;
+
+    /// A display with no appbar, so `bounds` and `work` agree and a test about
+    /// the picker is not also a test of taskbar geometry.
+    fn panel(device: &str, x: i32, y: i32, width: i32, height: i32, dpi: u32) -> MonitorInfo {
+        let rect = monitors::Rect {
+            left: x,
+            top: y,
+            right: x + width,
+            bottom: y + height,
+        };
+        MonitorInfo {
+            device: device.to_string(),
+            bounds: rect,
+            work: rect,
+            dpi,
+            primary: false,
+        }
+    }
+
+    fn primary_panel(
+        device: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        dpi: u32,
+    ) -> MonitorInfo {
+        MonitorInfo {
+            primary: true,
+            ..panel(device, x, y, width, height, dpi)
+        }
+    }
 
     /// The installer and the app must report the same version.
     ///
@@ -4295,6 +4526,144 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The attached-display list is read once and then only on a clock, and the
+    /// read has to actually happen rather than merely be due.
+    ///
+    /// A display can be plugged in while the window is open and nothing tells
+    /// us, so this cannot be tied to a save or to arriving on a page. The first
+    /// pass reads unconditionally — `monitors_read_at` starts as `None` — because
+    /// a list that is empty until the clock comes round would show the picker
+    /// with no monitors in it on the first frame, and the user would be looking
+    /// at a combobox that claims there is nothing to choose.
+    #[test]
+    fn the_monitor_list_is_read_once_and_then_on_the_clock() {
+        let start = Instant::now();
+        let mut list: Vec<MonitorInfo> = Vec::new();
+        let mut read_at = None;
+
+        let first = sync_monitor_list(&mut list, &mut read_at, start, || {
+            vec![panel("\\\\.\\DISPLAY1", 0, 0, 1920, 1080, 96)]
+        });
+        assert!(first, "the first pass did not read the display list");
+        assert_eq!(list.len(), 1, "the read list was not published");
+        assert_eq!(
+            read_at,
+            Some(start),
+            "the read time was not recorded, so the next pass would read again"
+        );
+
+        // Just inside the interval: no read, and the previous list is kept.
+        let soon = start + MONITOR_REFRESH_INTERVAL / 2;
+        let again = sync_monitor_list(&mut list, &mut read_at, soon, Vec::new);
+        assert!(!again, "the display list was re-read before its interval");
+        assert_eq!(list.len(), 1, "a skipped read dropped the cached list");
+
+        // Past the interval: read, and a newly attached display is published.
+        let later = start + MONITOR_REFRESH_INTERVAL;
+        let due = sync_monitor_list(&mut list, &mut read_at, later, || {
+            vec![
+                panel("\\\\.\\DISPLAY1", 0, 0, 1920, 1080, 96),
+                panel("\\\\.\\DISPLAY2", 1920, 0, 2560, 1440, 144),
+            ]
+        });
+        assert!(due, "a monitor plugged in did not reach the list");
+        assert_eq!(
+            list.len(),
+            2,
+            "the newly attached display was not published to the picker"
+        );
+    }
+
+    /// A pinned display that is not attached stays in the picker, and stays
+    /// selected.
+    ///
+    /// This is the whole mitigation for hiding an overlay whose monitor is
+    /// missing. A combobox whose entry list does not contain the selected value
+    /// falls back to its first row, so dropping the entry would not just hide
+    /// the state — it would report a *different* monitor as chosen, and the user
+    /// saving from there would silently re-pin the overlay. The entry is first so
+    /// it is visible without scrolling.
+    #[test]
+    fn a_disconnected_pin_is_still_listed_and_still_selected() {
+        let attached = [panel("\\\\.\\DISPLAY1", 0, 0, 1920, 1080, 96)];
+        let choices = monitor_choices(&attached, Some("\\\\.\\DISPLAY2"));
+
+        assert_eq!(choices[0].device.as_deref(), Some("\\\\.\\DISPLAY2"));
+        assert!(
+            choices[0].label.contains("not connected"),
+            "the disconnected display is not labelled as such: {}",
+            choices[0].label
+        );
+        assert!(choices[0].is(Some("\\\\.\\DISPLAY2")));
+        assert!(
+            monitor_choice_label(&attached, Some("\\\\.\\DISPLAY2")).contains("not connected"),
+            "the closed combobox does not show that the pinned display is gone"
+        );
+
+        // And the shape this must not become: a list without the pinned entry,
+        // where the combobox has to fall back to the primary row.
+        let without = monitor_choices(&attached, None);
+        assert!(
+            !without
+                .iter()
+                .any(|choice| choice.device.as_deref() == Some("\\\\.\\DISPLAY2")),
+            "the disconnected pin was dropped from the list"
+        );
+    }
+
+    /// The list names displays in a way a user can check, and offers exactly one
+    /// way to be on the primary monitor.
+    ///
+    /// Two entries for the primary — a device and a "follow" — would be two
+    /// spellings of one choice where one of them quietly stops working when
+    /// Windows changes which display is primary.
+    #[test]
+    fn the_picker_names_each_display_and_offers_the_primary_once() {
+        let desk = vec![
+            primary_panel("\\\\.\\DISPLAY1", 0, 0, 1920, 1080, 96),
+            panel("\\\\.\\DISPLAY2", 1920, 0, 2560, 1440, 144),
+        ];
+        let choices = monitor_choices(&desk, None);
+
+        assert_eq!(
+            choices.len(),
+            2,
+            "expected one primary entry and one display"
+        );
+        assert_eq!(
+            choices[0].device, None,
+            "the first entry does not follow the primary"
+        );
+        assert!(
+            choices[1].label.contains("2560 × 1440"),
+            "the display is not named by its resolution: {}",
+            choices[1].label
+        );
+        assert!(
+            choices[1].label.contains("150%"),
+            "the display is not named by its scaling: {}",
+            choices[1].label
+        );
+        assert!(
+            choices[1].label.contains("right of the primary"),
+            "the display does not say where it sits: {}",
+            choices[1].label
+        );
+        assert!(
+            choices[1].label.contains("\\\\.\\DISPLAY2"),
+            "the device name is missing from the label: {}",
+            choices[1].label
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter(|choice| choice.device.is_none())
+                .count(),
+            1,
+            "the primary monitor is offered more than once"
+        );
     }
 
     /// Leaving the Profiles page and coming back is arriving again.

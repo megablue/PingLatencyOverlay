@@ -37,6 +37,13 @@ pub mod overlay;
 // The long-lived probe tasks and their bounded sample buffers.
 pub mod probes;
 
+// Which displays are attached, and which one an overlay belongs on. Enumeration
+// is Win32, but the rule that picks a display is a pure function over a list, so
+// the multi-monitor behaviour is testable on a machine with one monitor — which
+// is the only kind of machine most of this is developed on. Both the renderer
+// and the configuration window call in here; neither sends the other anything.
+pub mod monitors;
+
 // The wire between this process and the configuration window: the pipe name,
 // the message shapes and the line framing. It lives here rather than in the
 // shell because both ends are built from this crate, so the two cannot

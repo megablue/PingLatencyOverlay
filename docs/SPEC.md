@@ -113,6 +113,25 @@
 - Position: one of 9 anchors within the monitor's **work area** (which excludes
   the taskbar / other appbars), so bottom and right overlays aren't hidden behind
   the taskbar.
+- Monitor: which display the overlay belongs to, as a **monitor** row in the
+  Position section. The choices are "Primary monitor (follow automatically)" and
+  one entry per other attached display, labelled with its resolution, its
+  scaling and where it sits relative to the primary (`left of the primary`).
+  The default follows the primary, so an overlay created before this existed
+  behaves the same as it always did and moves with whichever display Windows
+  treats as primary.
+- **An overlay pinned to a display that is not attached is hidden, not moved.**
+  The pin is kept, the overlay comes back where it was when that display
+  returns, and the entry stays in the list marked "not connected" so a graph
+  that is off screen has a visible reason to be.
+- A display's scaling is read **from that display**, so the same overlay is
+  sized and margined in physical pixels for the panel it is on. Overlays on
+  differently-scaled monitors do not match in physical size, and that is
+  correct: matching in physical size is what a wrong number looks like.
+- The anchor, the margins and the monitor pin are the whole position. An
+  overlay on a secondary display is positioned against that display's work area,
+  including when its coordinates in the Windows desktop are negative (a display
+  left of or above the primary).
 - Position offsets are signed screen-axis values in logical pixels:
   `horizontalMarginPx` and `verticalMarginPx`, both defaulting to 0. Edge-facing
   axes measure inward from the work-area edge; centered axes measure from the
