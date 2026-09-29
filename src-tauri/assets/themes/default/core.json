@@ -1,0 +1,27 @@
+{
+  "name": "Default Light",
+  "colors": {
+    "background": "#f3f3f3",
+    "surface": "#ffffff",
+    "surfaceAlt": "#eaeaea",
+    "surfaceHover": "#dcdcdc",
+    "inputBackground": "#ffffff",
+    "border": "#c6c6c6",
+    "text": "#1a1a1a",
+    "textSecondary": "#5c5c5c",
+    "accent": "#0067b8",
+    "accentStrong": "#8fb8d8",
+    "selection": "#cfe4f5",
+    "scrollbar": "#c2ddf0",
+    "scrollbarHover": "#9dc4e0",
+    "danger": "#c42b1c",
+    "dangerStrong": "#f5b7ae"
+  },
+  "assets": {
+    "positionPicker": {
+      "default": null,
+      "hover": null,
+      "selected": null
+    }
+  }
+}

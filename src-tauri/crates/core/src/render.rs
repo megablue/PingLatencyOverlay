@@ -99,7 +99,7 @@ fn render_graph_into_internal(
     // The background belongs to the physical window, not the rotated graph.
     // At zero opacity the pixmap remains completely transparent.
     if config.bg_opacity > 0 {
-        let [r, g, b] = parse_color(&config.bg_color, [0, 0, 0]);
+        let [r, g, b] = parse_hex_color(&config.bg_color, [0, 0, 0]);
         let alpha = ((config.bg_opacity.min(100) as f32 / 100.0) * 255.0).round() as u8;
         let mut paint = Paint::default();
         paint.set_color_rgba8(r, g, b, alpha);
@@ -145,7 +145,7 @@ fn render_graph_into_internal(
     };
 
     let mut timeout_paint = Paint::default();
-    let [r, g, b] = parse_color(&config.timeout_color, [239, 68, 68]);
+    let [r, g, b] = parse_hex_color(&config.timeout_color, [239, 68, 68]);
     timeout_paint.set_color_rgba8(r, g, b, 255);
     let mut timeout_builder = PathBuilder::new();
     for (index, sample) in samples.iter().enumerate() {
@@ -185,10 +185,10 @@ fn render_graph_into_internal(
     }
 
     let mut real_line_paint = Paint::default();
-    let [r, g, b] = parse_color(line_color, [74, 222, 128]);
+    let [r, g, b] = parse_hex_color(line_color, [74, 222, 128]);
     real_line_paint.set_color_rgba8(r, g, b, 255);
     let mut prefill_line_paint = Paint::default();
-    let [r, g, b] = parse_color(&config.prefill_line_color, [100, 116, 139]);
+    let [r, g, b] = parse_hex_color(&config.prefill_line_color, [100, 116, 139]);
     prefill_line_paint.set_color_rgba8(r, g, b, 255);
     let stroke = Stroke {
         width: 1.5,
@@ -425,7 +425,18 @@ fn transform_point(
     (cos * x + sin * y + center_x, -sin * x + cos * y + center_y)
 }
 
-fn parse_color(value: &str, fallback: [u8; 3]) -> [u8; 3] {
+/// Read a `#RRGGBB` colour, or fall back.
+///
+/// The single colour parser for the whole app. It used to exist twice, once in
+/// this module and once in the configuration window, differing only in what
+/// they fell back to, and a theme file is a third caller. Three copies of a
+/// parser that all have to agree is a bug waiting for the day one of them is
+/// edited.
+///
+/// Three-digit shorthand is deliberately not accepted: the config files have
+/// always documented `#RRGGBB`, and silently accepting `#fff` would make a
+/// typo look like a colour rather than like the mistake it is.
+pub fn parse_hex_color(value: &str, fallback: [u8; 3]) -> [u8; 3] {
     let value = value.trim().trim_start_matches('#');
     if value.len() != 6 {
         return fallback;

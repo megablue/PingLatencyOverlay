@@ -26,6 +26,9 @@ value is one more thing that can be wrong.
     and the only thing in the project allowed to depend on eframe.
   - `src/ui.rs` — the egui configuration editor. It was "tray-mode" when the
     tray shared this process; it is now its own process that exits on close.
+  - `src/theme.rs` — the Config window's colours, loaded from a file rather
+    than compiled in. In the shell, not in `core`: the renderer never reads a
+    theme, and `core` is "only what the renderer needs".
   - `crates/tray/` — the `ping-latency-overlay-tray` crate, the tray icon, the
     menu and the bundled artwork. The resident process, and it has no eframe.
     It is the only crate allowed to depend on `tray-icon`.
@@ -256,6 +259,76 @@ in `docs/SPEC.md` under *Config window layout*. This is the wiring behind it.
 - `show_status_bar` takes `&self` and is paint-only, so unlike the rest of the
   window layout no test can hold its shape. That is a known gap, not an
   oversight.
+
+## The Config window's theme
+Behavior — what a theme may set, and where the files live — is in
+`docs/SPEC.md`. What is here is the shape and the traps.
+- **A theme is the window's palette and nothing else.** The overlay graph draws
+  with the per-overlay `lineColor` / `bgColor` / `prefillLineColor` the user
+  already chose, and a theme that could override those would be fighting a
+  setting that already exists. The tray menu is a native `HMENU` that Windows
+  paints, and the tray icon and About logo are brand artwork. So `theme.rs` is
+  15 colours and the Config window's own pixels.
+- **`Visuals::light()` and `Visuals::dark()` are not one palette with the ends
+  swapped.** Much of egui's widget drawing — checkbox ticks, scrollbar grips,
+  selection handles, shaded non-interactive text — is derived from that base and
+  not from the fields being set. Repainting the fifteen colours onto the wrong
+  base gives a light background sitting on dark internals, which is the classic
+  half-themed window. `theme::visuals_for` switches the base *and then* applies
+  the palette, and `the_mode_really_switches_the_egui_base` holds it.
+- **A theme change has to reach egui's WIDGETS, and `set_visuals` alone does
+  not do that.** egui keeps two styles, `Options::dark_style` and
+  `Options::light_style`, and `Context::set_visuals` is literally
+  `style_mut_of(self.theme(), ..)`: it writes into *whichever theme egui
+  currently considers active*, and `self.theme()` comes from egui's own
+  `theme_preference`, which defaults to `System` and is re-read from the OS on
+  every pass. So one `set_visuals` fills one of two slots without choosing
+  which, and when egui later switches slots the widgets read a slot the app
+  never wrote. The window was briefly right, then the buttons and popups came
+  back as egui's stock defaults: white text on white. `theme::apply` therefore
+  fills **both** slots and then calls `set_theme`, so egui's detection has
+  nothing left to decide. `a_theme_change_reaches_the_widgets_after_egui_switches_slots`
+  drives `apply` and reads a real widget's fill; against the old one-liner it
+  reports `#3C3C3C` where the light theme wanted `#C2DDF0`.
+- **The painted half and the widget half use different mechanisms, which is why
+  the failure looked partial.** Painted things read the thread-local palette
+  (`UI_*()`), which `set_palette` updates immediately; widgets read egui
+  `Visuals`. A theme bug can therefore be invisible in half the window, and a
+  single screenshot of the background proves nothing. Check a *button*.
+- **A test that reads a colour this app painted cannot see this class of bug.**
+  Every assertion on the mode changing, or on `set_visuals` having been called,
+  passed while the window was visibly broken.
+- **The fifteen `UI_*` names are functions reading a thread-local palette, not
+  constants.** There are 119 uses across `ui.rs`, most of them in free
+  functions with no route to a `&PingApp`, so threading a `&Palette` through
+  every one would bury the change under a refactor. The trade is real: the
+  palette is global state, so a test needing a particular palette has to set it
+  and a second UI thread would not see this one. The egui UI is single-threaded
+  and the palette does not change within a frame.
+- **"Immutable" means repaired, not overwritten.** The built-in theme's files are
+  embedded with `include_str!` and written to disk only when the copy there is
+  missing or unparseable. A file that parses is honoured, so editing one is a
+  real thing to do. Always overwriting would destroy an edit without saying so,
+  and a theme you cannot experiment with is not worth having on disk.
+- **A missing colour inherits the built-in for the mode being loaded**, which
+  is why `ColorsFile` holds `Option<String>` rather than `#[serde(default)]`
+  values: a `Default` impl cannot know the mode, so a partial *light* theme
+  would get dark values for the keys it left out.
+- **An asset name is a path, and the file saying so is user-writable.** Every
+  name goes through `safe_asset_name`, which keeps only a bare file name; the
+  worst case for anything else is a missing picture and a built-in fallback,
+  rather than a theme reading a path out of the config directory.
+- **A theme can be unreadable and still load perfectly**, so `contrast_report`
+  runs on the way in and the built-ins are held to WCAG AA in a test. This is the
+  "fails as a confident wrong thing" shape: no parse error, no gap in the UI,
+  just a window nobody can read. It caught its own test fixture, which had
+  asserted that an unreadable edit produced no notices.
+- **The mode is re-read on a clock, not on a notification.** `System` is the
+  default, Windows changes its app theme with no message this process gets, and
+  the registry read is cheap, so `sync_theme` looks every pass the way
+  `sync_monitors` does. The comparison is on the *mode* and not on the theme,
+  because the mode is the only thing that can change without the user touching
+  anything — a theme file edited on disk is picked up at the next launch.
 
 ## egui layout traps
 Every trap below shipped once. Each test named here fails on the old behaviour.

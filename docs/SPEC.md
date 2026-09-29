@@ -203,6 +203,52 @@
   that were added to older files, and a stored active profile that no longer
   resolves.
 
+## Themes
+The configuration window is themed. Its colours come from a file rather than
+from the program, so a theme can be written, shared and edited without a build.
+
+- A theme is one directory under `<config dir>/themes/`. It holds up to two
+  files: **`core.json` is required** and is the light appearance;
+  **`core-dark.json` is optional** and is the dark appearance of the same theme.
+  A theme with only `core.json` is a light theme.
+- The app ships a theme called **`default`**, in those two files. It is written
+  to `<config dir>/themes/default/` on first run. A file there that cannot be
+  read is replaced with the shipped copy; a file that *can* be read is left
+  alone, so editing it works and your edits are not thrown away on the next
+  launch.
+- Any other directory under `themes/` is a user theme. It uses the same two-file
+  layout. Choosing between themes is not in this release; the directory is
+  already read this way so that it is not a breaking change later.
+- A theme sets **colours only** — fifteen of them, covering the window
+  background, the surfaces, the borders, the two text colours, the accent
+  colours, the selection and scrollbar colours, and the two danger colours. It
+  does not set fonts, sizes or spacing.
+- Colours are written `#rrggbb`. A colour a theme leaves out is inherited from
+  the app's built-in theme *for the light or dark file it is in*, so a theme
+  that sets one colour and leaves out the rest still works.
+- A theme may supply artwork for the position picker — `assets.positionPicker`
+  takes a file name for each of its `default`, `hover` and `selected` states, and
+  any state it leaves out uses the built-in picture. A file name that is
+  anything other than a plain name in the theme's own directory is ignored, and
+  the built-in picture is used.
+- A theme that makes text hard to read is still applied, and the window says so
+  in the status bar rather than refusing to load it. The two built-in themes are
+  held to a readable contrast in the test suite.
+- **What a theme does not cover.** The latency graph's colours — its line, its
+  background, its timeout marker and its startup line — belong to each overlay
+  and are set on the Overlays page, not by a theme. The tray menu is drawn by
+  Windows from your system settings and is not themed. The tray icon and the
+  About page's logo are the app's own artwork.
+
+## Light and dark
+- The window has a **light** and a **dark** theme, and follows Windows by
+  default: flipping Windows between light and dark changes the window, including
+  while it is open.
+- A preference overrides that if you want it: **System** (follow Windows),
+  **Light**, or **Dark**. The tray's menu follows Windows either way, so an
+  explicit Light or Dark is the only case where the two can look different.
+- The default is System, so nothing changes for a user who has never set it.
+
 ## Config window layout
 - The Config window has three panes and a status bar.
 - The **navigation rail** is the leftmost pane: one row per page (**Overlays**,

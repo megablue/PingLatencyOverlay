@@ -76,6 +76,8 @@ winresource = "0.1.17"
 # What is left here is only what the shell itself touches:
 #   eframe / image    the configuration window, its window icon and the About
 #                     page's logo
+#   serde / serde_json  reading a theme file, which is the window's own data
+#                     rather than anything the renderer needs
 #   windows-sys       `ShellExecuteW`, to hand a URL to the user's browser
 #   log               shell diagnostics
 #   env_logger        `run()` initialises the logger once at startup
@@ -83,6 +85,11 @@ winresource = "0.1.17"
 ping-latency-overlay-core = { path = "crates/core" }
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Already in the lock file via the core crate, so neither pulls a second copy.
+# The theme loader needs both by name: the derive on the file shapes, and the
+# parser to read them.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # `ShellExecuteW` is how Windows hands a URL to the user's browser. eframe's
 # NATIVE runner ignores `egui::OutputCommand::OpenUrl` (only its web runner
 # acts on it), so the app has to open the URL itself. Pinned to a version

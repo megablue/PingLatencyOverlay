@@ -9,6 +9,7 @@
 //! context costs tens of megabytes of driver memory for as long as it exists, so
 //! it is started on demand and exits when it is closed.
 
+mod theme;
 mod ui;
 
 /// Start the configuration window.

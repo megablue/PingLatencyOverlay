@@ -464,6 +464,31 @@ pub struct UiPrefs {
     /// the version belongs.
     #[serde(default)]
     pub show_version_in_title: bool,
+    /// Which of a theme's two files the window uses.
+    ///
+    /// `System` by default, so the window and the native tray menu agree without
+    /// either being told: both read the same Windows setting. An explicit
+    /// choice is the only way they can disagree.
+    #[serde(default)]
+    pub theme: ThemeMode,
+}
+
+/// Which of a theme's two files the Config window uses.
+///
+/// Lives here rather than in the shell's `theme` module because `UiPrefs` holds
+/// it, and `UiPrefs` is here. It carries no GUI dependency, which is the only
+/// thing that would stop it: the palette and the egui mapping stay in the shell
+/// because the renderer never reads them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemeMode {
+    /// Follow Windows. The default, and the only value under which the Config
+    /// window and the native tray menu agree for free: both read the same
+    /// setting, so neither has to be told.
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 /// A profile in the profiles directory: its id and the name shown in the UI.
@@ -1068,6 +1093,15 @@ pub fn config_dir() -> PathBuf {
 /// `~/.config/.PingLatencyOverlay/profiles`
 pub fn profiles_dir() -> PathBuf {
     store().profiles_dir()
+}
+
+/// `~/.config/.PingLatencyOverlay/themes`
+///
+/// One directory per theme, each holding that theme's colours and any artwork
+/// it wants to override. `default` is the theme the app ships and repairs; the
+/// rest are the user's.
+pub fn themes_dir() -> PathBuf {
+    config_dir().join("themes")
 }
 
 /// `~/.config/.PingLatencyOverlay/globalconfig.json`

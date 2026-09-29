@@ -13,12 +13,14 @@ use eframe::{App, CreationContext, NativeOptions};
 // its own process now, so there is no tray code here at all: menu choices
 // arrive as pipe messages, and this window talks to the renderer over the
 // named pipe rather than touching either of those types directly, which is the
-// whole point — nothing in this binary can draw a graph.
+// whole point ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â nothing in this binary can draw a graph.
 use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig,
 };
 use ping_latency_overlay_core::monitors::{self, MonitorInfo};
 use ping_latency_overlay_core::transport::{Client, Message};
+
+use crate::theme::{self, windows_app_mode, Mode, Theme, ThemeMode};
 
 const SIDEBAR_WIDTH: f32 = 270.0;
 /// Width a scroll bar's contents may use, the difference between the list
@@ -197,9 +199,9 @@ fn about_page_column(ui: &mut Ui, logo: &egui::TextureHandle) {
             match line.kind {
                 AboutKind::Text => {
                     let colour = if index == 1 {
-                        UI_TEXT_SECONDARY
+                        UI_TEXT_SECONDARY()
                     } else {
-                        UI_TEXT
+                        UI_TEXT()
                     };
                     ui.label(RichText::new(&line.text).font(font).color(colour));
                 }
@@ -357,82 +359,67 @@ const PROFILE_NAME_FIELD_ID: &str = "profile-name-field";
 const PROFILE_POPUP_WIDTH: f32 = SIDEBAR_WIDTH - 40.0;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
-// Windows 11 Explorer-inspired dark palette.
-const UI_BACKGROUND: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
-const UI_SURFACE: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
-const UI_SURFACE_ALT: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
-const UI_SURFACE_HOVER: Color32 = Color32::from_rgb(0x38, 0x38, 0x38);
-const UI_INPUT_BACKGROUND: Color32 = Color32::from_rgb(0x0f, 0x0f, 0x0f);
-const UI_BORDER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-const UI_TEXT: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf2);
-const UI_TEXT_SECONDARY: Color32 = Color32::from_rgb(0xc5, 0xc5, 0xc5);
-const UI_ACCENT: Color32 = Color32::from_rgb(0x60, 0xcd, 0xff);
-const UI_ACCENT_STRONG: Color32 = Color32::from_rgb(0x2f, 0x6f, 0x9f);
-const UI_SELECTION: Color32 = Color32::from_rgb(0x2d, 0x4f, 0x6d);
-const UI_SCROLLBAR: Color32 = Color32::from_rgb(0x23, 0x40, 0x56);
-const UI_SCROLLBAR_HOVER: Color32 = Color32::from_rgb(0x2d, 0x4f, 0x6d);
-const UI_DANGER: Color32 = Color32::from_rgb(0xf4, 0x87, 0x71);
-const UI_DANGER_STRONG: Color32 = Color32::from_rgb(0x9e, 0x2b, 0x2b);
+// The palette in force for the frame being drawn.
+//
+// These used to be `const`s, and there are 119 uses of them across this file.
+// Threading a `&Palette` through every one of those call sites would be a large
+// refactor whose diff would bury the actual change, and the alternative ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â a
+// palette baked into each paint call ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â is the thing theming is for. So the
+// palette is held once and read from here.
+//
+// A thread-local rather than a field on `PingApp` because most of the 119 are in
+// free functions that already take a `&Ui` or a `&Painter` and have no way to
+// reach the app. That is a real trade: the palette is global state, so a test
+// that needs a particular palette has to set it, and a second UI thread would
+// not see the same one. The egui UI is single-threaded and the palette does not
+// change within a frame, so neither bites today.
+thread_local! {
+    static CURRENT_PALETTE: std::cell::RefCell<theme::Palette> =
+        std::cell::RefCell::new(theme::builtin(Mode::Dark).colors);
+}
 
-fn explorer_dark_visuals() -> egui::Visuals {
-    let mut visuals = egui::Visuals::dark();
-    let border = egui::Stroke::new(1.0, UI_BORDER);
-    let text = egui::Stroke::new(1.0, UI_TEXT);
-    let accent_text = egui::Stroke::new(1.0, UI_ACCENT);
-    let radius = egui::CornerRadius::same(4);
+/// Install the palette for subsequent frames.
+fn set_palette(palette: theme::Palette) {
+    CURRENT_PALETTE.with(|current| *current.borrow_mut() = palette);
+}
 
-    visuals.override_text_color = Some(UI_TEXT);
-    visuals.weak_text_color = Some(UI_TEXT_SECONDARY);
-    visuals.panel_fill = UI_BACKGROUND;
-    visuals.window_fill = UI_BACKGROUND;
-    visuals.faint_bg_color = UI_SURFACE;
-    visuals.extreme_bg_color = UI_INPUT_BACKGROUND;
-    visuals.text_edit_bg_color = Some(UI_INPUT_BACKGROUND);
-    visuals.hyperlink_color = UI_ACCENT;
-    visuals.warn_fg_color = UI_DANGER;
-    visuals.error_fg_color = UI_DANGER;
-    visuals.selection.bg_fill = UI_SELECTION;
-    visuals.selection.stroke = accent_text;
-    visuals.window_stroke = border;
-    visuals.window_corner_radius = egui::CornerRadius::same(6);
-    visuals.menu_corner_radius = radius;
-    visuals.text_cursor.stroke = accent_text;
-    visuals.button_frame = true;
-    visuals.striped = false;
-    visuals.slider_trailing_fill = true;
-    visuals.disabled_alpha = 0.45;
+/// The palette in force right now.
+fn palette() -> theme::Palette {
+    CURRENT_PALETTE.with(|current| *current.borrow())
+}
 
-    visuals.widgets.noninteractive.bg_fill = UI_SURFACE;
-    visuals.widgets.noninteractive.weak_bg_fill = UI_SURFACE;
-    visuals.widgets.noninteractive.bg_stroke = border;
-    visuals.widgets.noninteractive.fg_stroke = text;
-    visuals.widgets.noninteractive.corner_radius = radius;
+macro_rules! palette_accessors {
+    ($($name:ident => $field:ident),* $(,)?) => {
+        $(
+            #[doc = concat!("The `", stringify!($field), "` colour of the current theme.")]
+            // The names stay the SCREAMING_CASE they were as constants, so the
+            // diff that made them functions is a rename to `()` and nothing
+            // else. A mechanical rename across 119 call sites is the kind of
+            // thing to be able to audit by eye.
+            #[allow(non_snake_case)]
+            fn $name() -> Color32 {
+                palette().$field
+            }
+        )*
+    };
+}
 
-    visuals.widgets.inactive.bg_fill = UI_SCROLLBAR;
-    visuals.widgets.inactive.weak_bg_fill = UI_SURFACE_ALT;
-    visuals.widgets.inactive.bg_stroke = border;
-    visuals.widgets.inactive.fg_stroke = text;
-    visuals.widgets.inactive.corner_radius = radius;
-
-    visuals.widgets.hovered.bg_fill = UI_SCROLLBAR_HOVER;
-    visuals.widgets.hovered.weak_bg_fill = UI_SURFACE_HOVER;
-    visuals.widgets.hovered.bg_stroke = border;
-    visuals.widgets.hovered.fg_stroke = text;
-    visuals.widgets.hovered.corner_radius = radius;
-
-    visuals.widgets.active.bg_fill = UI_SELECTION;
-    visuals.widgets.active.weak_bg_fill = UI_SELECTION;
-    visuals.widgets.active.bg_stroke = accent_text;
-    visuals.widgets.active.fg_stroke = text;
-    visuals.widgets.active.corner_radius = radius;
-
-    visuals.widgets.open.bg_fill = UI_SURFACE_HOVER;
-    visuals.widgets.open.weak_bg_fill = UI_SURFACE_HOVER;
-    visuals.widgets.open.bg_stroke = accent_text;
-    visuals.widgets.open.fg_stroke = text;
-    visuals.widgets.open.corner_radius = radius;
-
-    visuals
+// Only the colours something in this file actually paints. `input_background`,
+// `scrollbar` and `scrollbar_hover` are palette entries used inside
+// `theme::visuals` and nowhere else, so they have no accessor here.
+palette_accessors! {
+    UI_BACKGROUND => background,
+    UI_SURFACE => surface,
+    UI_SURFACE_ALT => surface_alt,
+    UI_SURFACE_HOVER => surface_hover,
+    UI_BORDER => border,
+    UI_TEXT => text,
+    UI_TEXT_SECONDARY => text_secondary,
+    UI_ACCENT => accent,
+    UI_ACCENT_STRONG => accent_strong,
+    UI_SELECTION => selection,
+    UI_DANGER => danger,
+    UI_DANGER_STRONG => danger_strong,
 }
 
 /// How often the attached-display list is re-read.
@@ -452,6 +439,13 @@ struct PositionPicker {
     default_texture: egui::TextureHandle,
     hover_texture: egui::TextureHandle,
     selected_texture: egui::TextureHandle,
+    /// Artwork the current theme supplies, per state, when it supplies any.
+    ///
+    /// A theme's `assets.positionPicker` is optional per state, so this is a
+    /// `HashMap` rather than a fixed set: the built-in images are the fallback
+    /// for every state a theme says nothing about. The key is the full path,
+    /// so a theme change loads new files rather than reusing the old ones.
+    themed_textures: HashMap<std::path::PathBuf, egui::TextureHandle>,
 }
 
 /// One entry in the monitor picker.
@@ -490,19 +484,29 @@ fn primary_choice() -> MonitorChoice {
 /// How one attached display is named in the picker.
 ///
 /// The device name alone is not checkable by eye, and the picker's whole job is
-/// letting a user confirm the monitor they meant — especially after a port
+/// letting a user confirm the monitor they meant ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â especially after a port
 /// change, where the name survives and the panel does not. So the label carries
 /// the resolution, the scaling and where it sits relative to the primary, and
 /// the name comes last where it is least likely to be read as the whole story.
 fn monitor_label(monitor: &MonitorInfo, primary: Option<&MonitorInfo>) -> String {
-    let resolution = format!("{} × {}", monitor.bounds.width(), monitor.bounds.height());
+    let resolution = format!(
+        "{} ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â {}",
+        monitor.bounds.width(),
+        monitor.bounds.height()
+    );
     let scaling = format!("{}%", monitors::scale_percent(monitor));
     let where_it_is = primary
         .filter(|primary| !std::ptr::eq(*primary, monitor))
         .map_or_else(String::new, |primary| {
-            format!(" · {}", monitors::placement(monitor, primary))
+            format!(
+                " ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {}",
+                monitors::placement(monitor, primary)
+            )
         });
-    format!("{resolution} ({scaling}){where_it_is} · {}", monitor.device)
+    format!(
+        "{resolution} ({scaling}){where_it_is} ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· {}",
+        monitor.device
+    )
 }
 
 /// Every entry the picker offers, in the order it offers them.
@@ -513,7 +517,7 @@ fn monitor_label(monitor: &MonitorInfo, primary: Option<&MonitorInfo>) -> String
 ///
 /// A pinned device that is not attached is included, and first, so a hidden
 /// overlay is visibly a hidden overlay. Dropping it would make the picker
-/// silently disagree with what the profile says — a list that does not contain
+/// silently disagree with what the profile says ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â a list that does not contain
 /// the selected value has no way to show it, so the combobox would fall back to
 /// its first row and read as though the user had chosen something else.
 fn monitor_choices(monitors: &[MonitorInfo], selected: Option<&str>) -> Vec<MonitorChoice> {
@@ -527,7 +531,7 @@ fn monitor_choices(monitors: &[MonitorInfo], selected: Option<&str>) -> Vec<Moni
         {
             choices.push(MonitorChoice {
                 device: Some(device.to_string()),
-                label: format!("{device} — not connected"),
+                label: format!("{device} ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â not connected"),
                 hint: "This overlay is hidden while that display is not attached. \
                        It comes back where you left it when the display returns."
                     .to_string(),
@@ -585,26 +589,75 @@ impl PositionPicker {
                 "position-picker-selected",
                 include_bytes!("../../assets/overlay-position-ui-selected.png"),
             ),
+            themed_textures: HashMap::new(),
         }
     }
 
-    fn show(&self, ui: &mut Ui, current: Anchor) -> Option<Anchor> {
+    /// The artwork to draw one state with: the theme's if it named a file that
+    /// loads, the built-in otherwise.
+    ///
+    /// Two independent fallbacks, and both matter. A file that does not exist or
+    /// does not decode is not worth failing a frame over ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the built-in is a
+    /// perfectly good picture ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â and a state the theme says nothing about is the
+    /// common case, since `assets` is optional per state.
+    fn texture_for(
+        &mut self,
+        ctx: &Context,
+        theme: &Theme,
+        state: theme::PickerState,
+        fallback: &egui::TextureHandle,
+    ) -> egui::TextureHandle {
+        let Some(relative) = theme.assets.picker(state) else {
+            return fallback.clone();
+        };
+        let path = config::themes_dir()
+            .join(theme::BUILTIN_THEME_DIR)
+            .join(relative);
+        if let Some(texture) = self.themed_textures.get(&path) {
+            return texture.clone();
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            log_line(
+                "config",
+                &format!(
+                    "The theme names {} but it could not be read, so the built-in image is used.",
+                    path.display()
+                ),
+            );
+            return fallback.clone();
+        };
+        let name = format!("position-picker-{}", state as usize);
+        let texture = load_position_texture(ctx, &name, &bytes);
+        self.themed_textures.insert(path, texture.clone());
+        texture
+    }
+
+    fn show(&mut self, ui: &mut Ui, current: Anchor, theme: &Theme) -> Option<Anchor> {
         let display_size = ui
             .available_width()
             .clamp(1.0, POSITION_PICKER_DISPLAY_SIZE);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(display_size, display_size), egui::Sense::click());
         let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        // The fallbacks are cloned out first: `texture_for` needs `&mut self`
+        // to cache, and reading the built-in handle straight out of `self` while
+        // that borrow is live is the conflict.
+        let fallback = self.default_texture.clone();
+        let default_texture =
+            self.texture_for(ui.ctx(), theme, theme::PickerState::Default, &fallback);
         ui.painter()
-            .image(self.default_texture.id(), rect, full_uv, Color32::WHITE);
+            .image(default_texture.id(), rect, full_uv, Color32::WHITE);
 
         let hovered = response
             .hover_pos()
             .and_then(|point| position_cell_at(rect, point));
         if let Some(index) = hovered {
             let cell_rect = position_cell_rect(rect, index);
+            let fallback = self.hover_texture.clone();
+            let hover_texture =
+                self.texture_for(ui.ctx(), theme, theme::PickerState::Hover, &fallback);
             ui.painter().image(
-                self.hover_texture.id(),
+                hover_texture.id(),
                 cell_rect,
                 position_cell_uv(index),
                 Color32::WHITE,
@@ -613,8 +666,11 @@ impl PositionPicker {
 
         let selected = position_index(current);
         let selected_rect = position_cell_rect(rect, selected);
+        let fallback = self.selected_texture.clone();
+        let selected_texture =
+            self.texture_for(ui.ctx(), theme, theme::PickerState::Selected, &fallback);
         ui.painter().image(
-            self.selected_texture.id(),
+            selected_texture.id(),
             selected_rect,
             position_cell_uv(selected),
             Color32::WHITE,
@@ -622,7 +678,7 @@ impl PositionPicker {
         ui.painter().rect_stroke(
             selected_rect,
             8.0,
-            egui::Stroke::new(1.5, UI_ACCENT),
+            egui::Stroke::new(1.5, UI_ACCENT()),
             egui::StrokeKind::Inside,
         );
 
@@ -853,10 +909,17 @@ pub struct PingApp {
     /// Cached because `EnumDisplayMonitors` is a round trip into the window
     /// manager and this runs every pass. A display can be plugged in or pulled
     /// out at any time without telling us, so this is re-read on a clock rather
-    /// than on a save — the picks list has to be able to add a new monitor the
+    /// than on a save ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â the picks list has to be able to add a new monitor the
     /// user has not configured anything for yet.
     monitors: Vec<MonitorInfo>,
     monitors_read_at: Option<Instant>,
+    /// The theme in force, and the Windows mode it was resolved against.
+    ///
+    /// Both are needed because `System` is the default: the window has to
+    /// re-resolve when Windows changes, and it cannot do that by re-reading the
+    /// preference alone, since the preference has not moved.
+    theme: Theme,
+    system_mode: Mode,
     shutdown_state: ShutdownState,
     /// The app icon, decoded once and shown above the About page's text.
     about_logo: egui::TextureHandle,
@@ -864,10 +927,6 @@ pub struct PingApp {
 
 impl PingApp {
     pub fn new(cc: &CreationContext<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        cc.egui_ctx.set_visuals(explorer_dark_visuals());
-        cc.egui_ctx.global_style_mut(|style| {
-            style.spacing.scroll.foreground_color = false;
-        });
         let position_picker = PositionPicker::new(&cc.egui_ctx);
         let loaded = config::load();
         let config = loaded.config;
@@ -877,6 +936,20 @@ impl PingApp {
         let prefs = loaded.prefs;
         let rail_collapsed = prefs.ui.rail_collapsed;
         let profiles = loaded.profiles;
+        // The theme is resolved before the first frame rather than lazily inside
+        // it, so the window never paints one frame in the wrong colours, and the
+        // resolved mode is kept so the first `logic()` pass is not a no-op that
+        // decides it changed when it did not.
+        //
+        // The preference is read from `prefs`, not hardcoded to `System`: a
+        // `globalconfig.json` a user edited by hand says `light`, and starting
+        // up as System would override it on every launch and never say so.
+        let (system_mode, theme) = sync_theme(None, prefs.ui.theme, &config::themes_dir());
+        set_palette(theme.colors);
+        theme::apply(&cc.egui_ctx, &theme);
+        cc.egui_ctx.global_style_mut(|style| {
+            style.spacing.scroll.foreground_color = false;
+        });
         // Nothing is selected on the Overlays page until the user picks an
         // overlay. Selecting the first one automatically meant a border was
         // animating the moment the window opened, which read as the app doing
@@ -885,7 +958,7 @@ impl PingApp {
         // This process is the window, and it is only ever started because
         // somebody asked for a window, so it starts visible. It used to start
         // hidden behind a `--show-config` flag, which was right when the tray
-        // lived in this process and revealed it from its menu — and became a
+        // lived in this process and revealed it from its menu ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â and became a
         // window nobody could reach once the tray moved out. The flag is still
         // accepted below so the documented development command does not
         // become an error, but it no longer hides anything.
@@ -957,6 +1030,8 @@ impl PingApp {
             // `None` so the first `sync_monitors` reads, rather than showing an
             // empty monitor list until the clock comes round.
             monitors_read_at: None,
+            theme,
+            system_mode,
             shutdown_state: ShutdownState::Running,
             about_logo: about_logo_texture(&cc.egui_ctx),
         };
@@ -1190,12 +1265,12 @@ impl PingApp {
     /// renderer and this window would bring it straight back, so neither could
     /// ever win. It also carries no storm guard, because a storm guard exists
     /// to stop a *crash loop*, and this is not the process that would be
-    /// crash-looping — the tray is, and it has its own.
+    /// crash-looping ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â the tray is, and it has its own.
     ///
     /// Reconnecting rather than doing nothing is worth it for one reason: a
     /// renderer the tray revived becomes usable again, and a window that cannot
     /// save is a window that lies to you. In the meantime the save path reports
-    /// the truth — a profile written while no renderer is listening says so
+    /// the truth ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â a profile written while no renderer is listening says so
     /// rather than claiming the overlays were updated.
     fn reconnect_renderer(&mut self) {
         if self.renderer.as_ref().is_some_and(Client::is_connected) {
@@ -1390,8 +1465,8 @@ impl PingApp {
     ///
     /// The counts cost one file read per profile, so this only runs on a user
     /// action. Arriving on the Profiles page goes through `sync_profiles`;
-    /// everything else that can change a count â€” creating, renaming,
-    /// duplicating, deleting and switching a profile, and opening the switcher â€”
+    /// everything else that can change a count ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â creating, renaming,
+    /// duplicating, deleting and switching a profile, and opening the switcher ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â
     /// calls this directly. Never per frame.
     ///
     /// A profile whose file will not parse is left out of the count map rather
@@ -1414,6 +1489,34 @@ impl PingApp {
         let profiles = &mut self.profiles;
         let counts = &mut self.profile_overlay_counts;
         sync_profile_cache(last_page, page, profiles, counts, read_profile_snapshot);
+    }
+
+    /// Re-resolve the theme, and repaint the window when it changed.
+    ///
+    /// Runs every pass, like `sync_monitors`, and for the same reason: a Windows
+    /// theme change arrives as nothing at all. There is no `WM_SETTINGCHANGE`
+    /// here and no notification, so the only way to notice is to look, and a
+    /// registry read is cheap enough to look with every few hundred
+    /// milliseconds.
+    ///
+    /// The comparison is on the *mode*, not on the theme, because that is the
+    /// only thing that can change without the user touching anything. A theme
+    /// file edited on disk is not noticed until the next launch: reloading it
+    /// would mean watching a directory, which is phase 2's problem.
+    fn sync_theme(&mut self, ctx: &Context) {
+        let previous = (self.system_mode, &self.theme);
+        let (mode, theme) = sync_theme(Some(previous), self.prefs.ui.theme, &config::themes_dir());
+        if mode == self.system_mode {
+            return;
+        }
+        self.system_mode = mode;
+        self.theme = theme;
+        set_palette(self.theme.colors);
+        theme::apply(ctx, &self.theme);
+        // The window background is a `clear_color`, not a widget, so a repaint
+        // with stale visuals would leave a band of the old theme around the
+        // edges until something else asked for a frame.
+        ctx.request_repaint();
     }
 
     /// Keep the list of attached displays fresh.
@@ -1624,7 +1727,7 @@ impl PingApp {
                         if self.config.overlays.is_empty() {
                             ui.label(
                                 RichText::new("No overlays yet. Add one to get started.")
-                                    .color(UI_TEXT_SECONDARY),
+                                    .color(UI_TEXT_SECONDARY()),
                             );
                         }
                         let rows: Vec<(String, String, Anchor, bool)> = self
@@ -1654,9 +1757,9 @@ impl PingApp {
                                 egui::Sense::click(),
                             );
                             let background = if active {
-                                Some(UI_SELECTION)
+                                Some(UI_SELECTION())
                             } else if row_response.hovered() {
-                                Some(UI_SURFACE_ALT)
+                                Some(UI_SURFACE_ALT())
                             } else {
                                 None
                             };
@@ -1761,7 +1864,7 @@ impl PingApp {
                         if profiles.is_empty() {
                             ui.label(
                                 RichText::new("No profiles yet. Create one to get started.")
-                                    .color(UI_TEXT_SECONDARY),
+                                    .color(UI_TEXT_SECONDARY()),
                             );
                         }
                         let rows: Vec<(String, String, bool, bool, Option<usize>)> = profiles
@@ -1787,9 +1890,9 @@ impl PingApp {
                                 egui::Sense::click(),
                             );
                             let background = if is_selected {
-                                Some(UI_SELECTION)
+                                Some(UI_SELECTION())
                             } else if row_response.hovered() {
-                                Some(UI_SURFACE_ALT)
+                                Some(UI_SURFACE_ALT())
                             } else {
                                 None
                             };
@@ -1833,7 +1936,7 @@ impl PingApp {
         }
         let Some(id) = self.selected_profile.clone() else {
             ui.label(
-                RichText::new("Select a profile, or create a new one.").color(UI_TEXT_SECONDARY),
+                RichText::new("Select a profile, or create a new one.").color(UI_TEXT_SECONDARY()),
             );
             return;
         };
@@ -1863,25 +1966,31 @@ impl PingApp {
                         &entry.name
                     })
                     .heading()
-                    .color(UI_TEXT),
+                    .color(UI_TEXT()),
                 );
                 ui.add_space(2.0);
                 // Names may repeat, so the file is what identifies the profile.
                 ui.label(
                     RichText::new(config::profile_file_name(&entry.id))
                         .small()
-                        .color(UI_TEXT_SECONDARY),
+                        .color(UI_TEXT_SECONDARY()),
                 );
                 // Nothing is said when the count is unknown, rather than a zero
                 // that would be a confident lie.
                 let count_label = overlay_count_label(count);
                 if !count_label.is_empty() {
-                    ui.label(RichText::new(count_label).small().color(UI_TEXT_SECONDARY));
+                    ui.label(
+                        RichText::new(count_label)
+                            .small()
+                            .color(UI_TEXT_SECONDARY()),
+                    );
                 }
                 ui.add_space(8.0);
 
                 if is_active {
-                    ui.label(RichText::new("This is the active profile.").color(UI_TEXT_SECONDARY));
+                    ui.label(
+                        RichText::new("This is the active profile.").color(UI_TEXT_SECONDARY()),
+                    );
                 } else {
                     let mut switch_clicked = false;
                     ui.add_enabled_ui(can_switch_profile(dirty), |ui| {
@@ -1889,9 +1998,9 @@ impl PingApp {
                             .add_sized(
                                 [PROFILE_ACTION_WIDTH, 32.0],
                                 egui::Button::new(
-                                    RichText::new("Switch to this profile").color(UI_TEXT),
+                                    RichText::new("Switch to this profile").color(UI_TEXT()),
                                 )
-                                .fill(UI_ACCENT_STRONG),
+                                .fill(UI_ACCENT_STRONG()),
                             )
                             .clicked();
                     });
@@ -1908,7 +2017,7 @@ impl PingApp {
                             "The Overlays page has unsaved changes. Save or discard them there.",
                         )
                         .small()
-                        .color(UI_TEXT_SECONDARY),
+                        .color(UI_TEXT_SECONDARY()),
                     );
                 }
 
@@ -1940,8 +2049,8 @@ impl PingApp {
                     delete_clicked = ui
                         .add_sized(
                             [PROFILE_ACTION_WIDTH, 32.0],
-                            egui::Button::new(RichText::new("Delete").color(UI_DANGER))
-                                .fill(UI_SURFACE_ALT),
+                            egui::Button::new(RichText::new("Delete").color(UI_DANGER()))
+                                .fill(UI_SURFACE_ALT()),
                         )
                         .clicked();
                 });
@@ -1976,11 +2085,11 @@ impl PingApp {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::click());
         let background = if self.profile_menu_open {
-            UI_SELECTION
+            UI_SELECTION()
         } else if response.hovered() {
-            UI_SURFACE_HOVER
+            UI_SURFACE_HOVER()
         } else {
-            UI_SURFACE_ALT
+            UI_SURFACE_ALT()
         };
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::same(4), background);
@@ -1996,16 +2105,16 @@ impl PingApp {
         text.append(
             &name,
             0.0,
-            egui::TextFormat::simple(egui::TextStyle::Button.resolve(ui.style()), UI_TEXT),
+            egui::TextFormat::simple(egui::TextStyle::Button.resolve(ui.style()), UI_TEXT()),
         );
         let galley = ui.painter().layout_job(text);
         let text_offset = (rect.height() - galley.size().y) / 2.0;
         ui.painter().galley(
             rect.left_top() + egui::vec2(SWITCHER_TEXT_LEFT_PAD, text_offset),
             galley,
-            UI_TEXT,
+            UI_TEXT(),
         );
-        draw_dropdown_arrow(ui.painter(), arrow, UI_TEXT_SECONDARY);
+        draw_dropdown_arrow(ui.painter(), arrow, UI_TEXT_SECONDARY());
         let response = response.on_hover_text(config::profile_file_name(&self.active_profile));
         if response.clicked() {
             self.profile_menu_open = !self.profile_menu_open;
@@ -2028,17 +2137,17 @@ impl PingApp {
             ui.add_space(4.0);
             for page in PAGES {
                 let active = self.page == page;
-                let color = if active { UI_TEXT } else { UI_TEXT_SECONDARY };
+                let color = if active { UI_TEXT() } else { UI_TEXT_SECONDARY() };
                 let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(row_width, RAIL_ROW_HEIGHT),
                     egui::Sense::click(),
                 );
                 if active {
                     ui.painter()
-                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SELECTION);
+                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SELECTION());
                 } else if response.hovered() {
                     ui.painter()
-                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SURFACE_ALT);
+                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SURFACE_ALT());
                 }
                 let icon_rect = if collapsed {
                     egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(RAIL_ICON_SIZE))
@@ -2052,7 +2161,7 @@ impl PingApp {
                     ui.painter(),
                     icon_rect,
                     page,
-                    if active { UI_ACCENT } else { UI_TEXT_SECONDARY },
+                    if active { UI_ACCENT() } else { UI_TEXT_SECONDARY() },
                 );
                 if !collapsed {
                     ui.painter().text(
@@ -2068,9 +2177,9 @@ impl PingApp {
                     // The other pages have no Save button, so the rail is what
                     // says a draft is waiting on the Overlays page.
                     if !active {
-                        draw_active_dot(ui.painter(), row_corner_dot_slot(rect), UI_ACCENT);
+                        draw_active_dot(ui.painter(), row_corner_dot_slot(rect), UI_ACCENT());
                     }
-                    hint.push_str(" â€” unsaved changes");
+                    hint.push_str(" ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â unsaved changes");
                 }
                 let response = response.on_hover_text(hint);
                 if response.clicked() {
@@ -2084,11 +2193,11 @@ impl PingApp {
                 );
                 if response.hovered() {
                     ui.painter()
-                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SURFACE_ALT);
+                        .rect_filled(rect, egui::CornerRadius::same(4), UI_SURFACE_ALT());
                 }
                 let icon_rect =
                     egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(RAIL_ICON_SIZE));
-                draw_collapse_chevron(ui.painter(), icon_rect, collapsed, UI_TEXT_SECONDARY);
+                draw_collapse_chevron(ui.painter(), icon_rect, collapsed, UI_TEXT_SECONDARY());
                 let hint = if collapsed {
                     "Expand the navigation rail"
                 } else {
@@ -2126,15 +2235,15 @@ impl PingApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Global").heading().color(UI_TEXT));
+                ui.label(RichText::new("Global").heading().color(UI_TEXT()));
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new("These settings apply to the whole app, not to a profile.")
-                        .color(UI_TEXT_SECONDARY),
+                        .color(UI_TEXT_SECONDARY()),
                 );
 
                 ui.add_space(12.0);
-                ui.label(RichText::new("APPEARANCE").color(UI_ACCENT));
+                ui.label(RichText::new("APPEARANCE").color(UI_ACCENT()));
                 ui.separator();
                 let mut changed = false;
                 ui.add_enabled_ui(true, |ui| {
@@ -2162,7 +2271,7 @@ impl PingApp {
                 }
 
                 ui.add_space(12.0);
-                ui.label(RichText::new("STORAGE").color(UI_ACCENT));
+                ui.label(RichText::new("STORAGE").color(UI_ACCENT()));
                 ui.separator();
                 for (label, path) in [
                     (
@@ -2185,11 +2294,11 @@ impl PingApp {
                             (ui.available_width() - label_width - gap - STORAGE_PATH_MIN).max(60.0);
                         ui.add_sized(
                             [label_width, 26.0],
-                            egui::Label::new(RichText::new(label).color(UI_TEXT_SECONDARY)),
+                            egui::Label::new(RichText::new(label).color(UI_TEXT_SECONDARY())),
                         );
                         ui.add_sized(
                             [path_width, 26.0],
-                            egui::Label::new(RichText::new(&path).color(UI_TEXT)).truncate(),
+                            egui::Label::new(RichText::new(&path).color(UI_TEXT())).truncate(),
                         )
                         .on_hover_text(path.clone());
                     });
@@ -2262,10 +2371,10 @@ impl PingApp {
             .close_behavior(egui::containers::PopupCloseBehavior::CloseOnClickOutside)
             .layout(Layout::top_down(Align::Min))
             .width(PROFILE_POPUP_WIDTH)
-            .frame(Frame::popup(ui.style()).fill(UI_SURFACE))
+            .frame(Frame::popup(ui.style()).fill(UI_SURFACE()))
             .show(|ui| {
                 ui.set_width(PROFILE_POPUP_WIDTH);
-                let header = ui.label(RichText::new("Profiles").strong().color(UI_TEXT));
+                let header = ui.label(RichText::new("Profiles").strong().color(UI_TEXT()));
                 header.on_hover_text(config::profiles_dir().display().to_string());
                 ui.separator();
 
@@ -2274,11 +2383,11 @@ impl PingApp {
                     // Pending edits dim every other profile, because
                     // switching is refused until the draft is saved.
                     let color = if current {
-                        UI_ACCENT
+                        UI_ACCENT()
                     } else if dirty {
-                        UI_TEXT_SECONDARY
+                        UI_TEXT_SECONDARY()
                     } else {
-                        UI_TEXT
+                        UI_TEXT()
                     };
                     let row = ui.add_sized(
                         [ui.available_width(), PROFILE_ROW_HEIGHT],
@@ -2309,7 +2418,7 @@ impl PingApp {
                     ui.label(
                         RichText::new("Save or discard changes before switching profiles.")
                             .small()
-                            .color(UI_TEXT_SECONDARY),
+                            .color(UI_TEXT_SECONDARY()),
                     );
                 }
             });
@@ -2345,11 +2454,11 @@ impl PingApp {
         match &mut dialog {
             Some(ProfileDialog::Create { name }) => {
                 ui.add_space(4.0);
-                ui.label(RichText::new("New profile").heading().color(UI_TEXT));
+                ui.label(RichText::new("New profile").heading().color(UI_TEXT()));
                 ui.label(
                     RichText::new("A new profile starts empty and gets its own file.")
                         .small()
-                        .color(UI_TEXT_SECONDARY),
+                        .color(UI_TEXT_SECONDARY()),
                 );
                 let (submit, cancel) = profile_name_field(ui, name, "Create", focus_field);
                 if submit {
@@ -2359,7 +2468,7 @@ impl PingApp {
             }
             Some(ProfileDialog::Rename { from, name }) => {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Rename profile").heading().color(UI_TEXT));
+                ui.label(RichText::new("Rename profile").heading().color(UI_TEXT()));
                 // Names may repeat, so the file is shown: a taken name gives the
                 // new profile a postfixed file instead of an error.
                 ui.label(
@@ -2368,7 +2477,7 @@ impl PingApp {
                         config::profile_file_name(from)
                     ))
                     .small()
-                    .color(UI_TEXT_SECONDARY),
+                    .color(UI_TEXT_SECONDARY()),
                 );
                 let (submit, cancel) = profile_name_field(ui, name, "Rename", focus_field);
                 if submit {
@@ -2381,14 +2490,18 @@ impl PingApp {
             }
             Some(ProfileDialog::Duplicate { from, name }) => {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Duplicate profile").heading().color(UI_TEXT));
+                ui.label(
+                    RichText::new("Duplicate profile")
+                        .heading()
+                        .color(UI_TEXT()),
+                );
                 ui.label(
                     RichText::new(format!(
                         "The overlays of {} are copied into a new profile.",
                         config::profile_file_name(from)
                     ))
                     .small()
-                    .color(UI_TEXT_SECONDARY),
+                    .color(UI_TEXT_SECONDARY()),
                 );
                 let (submit, cancel) = profile_name_field(ui, name, "Duplicate", focus_field);
                 if submit {
@@ -2404,19 +2517,19 @@ impl PingApp {
                 ui.label(
                     RichText::new(format!("Delete \"{name}\"?"))
                         .heading()
-                        .color(UI_DANGER),
+                        .color(UI_DANGER()),
                 );
                 // Names may repeat, so the file confirms what goes.
                 ui.label(
                     RichText::new(config::profile_file_name(id))
                         .small()
-                        .color(UI_TEXT_SECONDARY),
+                        .color(UI_TEXT_SECONDARY()),
                 );
                 if id == &self.active_profile {
                     ui.label(
                         RichText::new("This is the active profile, so another one is loaded next.")
                             .small()
-                            .color(UI_TEXT_SECONDARY),
+                            .color(UI_TEXT_SECONDARY()),
                     );
                 }
                 let mut confirm = false;
@@ -2425,8 +2538,8 @@ impl PingApp {
                     confirm = ui
                         .add_sized(
                             [96.0, DETAIL_FOOTER_BUTTON_HEIGHT],
-                            egui::Button::new(RichText::new("Delete").color(UI_TEXT))
-                                .fill(UI_DANGER_STRONG),
+                            egui::Button::new(RichText::new("Delete").color(UI_TEXT()))
+                                .fill(UI_DANGER_STRONG()),
                         )
                         .clicked();
                     cancel = ui
@@ -2507,7 +2620,7 @@ impl PingApp {
                         &self.config.overlays[index].name
                     })
                     .heading()
-                    .color(UI_TEXT),
+                    .color(UI_TEXT()),
                 );
                 ui.add_space(8.0);
                 let mut changed = false;
@@ -2515,8 +2628,9 @@ impl PingApp {
                     ui,
                     &mut self.config.overlays[index],
                     &mut changed,
-                    &self.position_picker,
+                    &mut self.position_picker,
                     &self.monitors,
+                    &self.theme,
                 );
                 if changed {
                     self.dirty = true;
@@ -2576,8 +2690,8 @@ impl PingApp {
                         save_clicked = ui
                             .add_sized(
                                 [DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
-                                egui::Button::new(RichText::new("Save").color(UI_TEXT))
-                                    .fill(UI_ACCENT_STRONG),
+                                egui::Button::new(RichText::new("Save").color(UI_TEXT()))
+                                    .fill(UI_ACCENT_STRONG()),
                             )
                             .clicked();
                     });
@@ -2606,7 +2720,7 @@ impl PingApp {
     /// takes its place. The status bar spans the full width underneath.
     fn config_ui(&mut self, ui: &mut Ui) {
         let frame = Frame::central_panel(ui.style())
-            .fill(UI_BACKGROUND)
+            .fill(UI_BACKGROUND())
             .inner_margin(egui::Margin {
                 left: PANE_MARGIN as i8,
                 right: PANE_MARGIN as i8,
@@ -2848,7 +2962,7 @@ fn draw_pane_divider(ui: &mut Ui) {
     ui.painter().vline(
         x,
         ui.min_rect().y_range(),
-        egui::Stroke::new(1.0, UI_BORDER),
+        egui::Stroke::new(1.0, UI_BORDER()),
     );
     ui.add_space(PANE_GAP);
 }
@@ -2911,7 +3025,7 @@ fn overlay_row_contents(
             .layout(Layout::left_to_right(Align::Center)),
     );
     if confirming {
-        let label = ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER));
+        let label = ui.label(RichText::new(format!("Delete \"{name}\"?")).color(UI_DANGER()));
         // The pair is pinned to the row's right edge and the filler between the
         // question and the pair takes whatever is left, so neither can overflow.
         let controls = right_anchored(inner, confirm_controls_width(gap));
@@ -2928,7 +3042,7 @@ fn overlay_row_contents(
         clicks.confirm_remove = buttons
             .add_sized(
                 [OVERLAY_CONFIRM_OK_WIDTH, OVERLAY_CONFIRM_HEIGHT],
-                egui::Button::new(RichText::new("OK").color(UI_TEXT)).fill(UI_DANGER_STRONG),
+                egui::Button::new(RichText::new("OK").color(UI_TEXT())).fill(UI_DANGER_STRONG()),
             )
             .clicked();
         clicks.dismiss_confirm = label.clicked()
@@ -2956,7 +3070,11 @@ fn overlay_row_contents(
         egui::vec2(indicator_size, tab_rect.height()),
     );
     // Reuse the existing blue palette: muted default, bright active selection.
-    let indicator_color = if active { UI_ACCENT } else { UI_ACCENT_STRONG };
+    let indicator_color = if active {
+        UI_ACCENT()
+    } else {
+        UI_ACCENT_STRONG()
+    };
     draw_position_indicator(ui.painter(), indicator_rect, anchor, indicator_color);
     let text_rect = egui::Rect::from_min_max(
         egui::pos2(indicator_rect.right() + 6.0, tab_rect.top()),
@@ -2967,13 +3085,13 @@ fn overlay_row_contents(
     tab_text.wrap.max_width = text_rect.width();
     tab_text.wrap.max_rows = 1;
     tab_text.wrap.break_anywhere = true;
-    tab_text.append(name, 0.0, egui::TextFormat::simple(font_id, UI_TEXT));
+    tab_text.append(name, 0.0, egui::TextFormat::simple(font_id, UI_TEXT()));
     let galley = ui.painter().layout_job(tab_text);
     let text_offset = (text_rect.height() - galley.size().y) / 2.0;
     ui.painter().galley(
         text_rect.left_top() + egui::vec2(0.0, text_offset),
         galley,
-        UI_TEXT,
+        UI_TEXT(),
     );
     if tab_response.hovered() {
         tab_response = tab_response.on_hover_text(position_name(anchor));
@@ -2989,7 +3107,7 @@ fn overlay_row_contents(
     clicks.remove = actions
         .add_sized(
             [OVERLAY_ROW_ACTION_WIDTH, OVERLAY_ROW_HEIGHT],
-            egui::Button::new(RichText::new("X").color(UI_DANGER)),
+            egui::Button::new(RichText::new("X").color(UI_DANGER())),
         )
         .clicked();
     clicks.toggle = actions
@@ -3060,11 +3178,11 @@ fn profile_row_contents(
     // The name is painted, not a button, so the row has no outline of its own.
     // The row background is the hover cue instead.
     let color = if is_active {
-        UI_ACCENT
+        UI_ACCENT()
     } else if dirty {
-        UI_TEXT_SECONDARY
+        UI_TEXT_SECONDARY()
     } else {
-        UI_TEXT
+        UI_TEXT()
     };
     let (name_rect, response) = ui.allocate_exact_size(
         egui::vec2(name_width, PROFILE_ROW_HEIGHT),
@@ -3117,12 +3235,12 @@ fn profile_row_contents(
             egui::Align2::RIGHT_CENTER,
             count.to_string(),
             egui::TextStyle::Small.resolve(ui.style()),
-            UI_TEXT_SECONDARY,
+            UI_TEXT_SECONDARY(),
         );
     }
     if is_active {
         // A dot, because the accent name alone is a weak cue in a long list.
-        draw_active_dot(painter, dot_slot, UI_ACCENT);
+        draw_active_dot(painter, dot_slot, UI_ACCENT());
     }
     ProfileRow {
         clicked,
@@ -3195,7 +3313,7 @@ fn empty_editor_message(_style: &egui::Style) -> &'static str {
 /// into the status bar. See `the_detail_footer_stays_under_the_detail_pane`.
 fn empty_editor(ui: &mut Ui) {
     ui.centered_and_justified(|ui| {
-        ui.label(RichText::new(empty_editor_message(ui.style())).color(UI_TEXT_SECONDARY));
+        ui.label(RichText::new(empty_editor_message(ui.style())).color(UI_TEXT_SECONDARY()));
     });
 }
 
@@ -3251,6 +3369,39 @@ fn sync_profile_cache(
     *profiles = snapshot.profiles;
     *counts = snapshot.counts;
     true
+}
+
+/// The body of `sync_theme`, with the system-mode read passed in.
+///
+/// Same shape and the same reason as `sync_profile_cache`: a test that only
+/// checked the "did the mode change" predicate would pass with the load
+/// deleted, and the load is what turns a mode into colours.
+///
+/// `previous` is what the app last applied. `None` means nothing has been
+/// applied yet â€” the startup case, which must always load. When the mode has not
+/// moved, the previous theme is returned **unchanged**: re-reading the file
+/// would be a disk read every pass, and returning the *built-in* instead of the
+/// one on disk would quietly undo any edit the moment the mode stayed put.
+///
+/// Returns the resolved mode and the theme it resolved to. The caller compares
+/// the mode itself, so an unchanged mode costs no repaint.
+fn sync_theme(
+    previous: Option<(Mode, &Theme)>,
+    preference: ThemeMode,
+    themes_dir: &std::path::Path,
+) -> (Mode, Theme) {
+    let system = windows_app_mode();
+    let mode = theme::resolve(preference, system);
+    if let Some((last_mode, last_theme)) = previous {
+        if last_mode == mode {
+            return (mode, last_theme.clone());
+        }
+    }
+    let (loaded, notices) = theme::load_builtin(themes_dir, mode);
+    for notice in notices {
+        log_line("config", &notice);
+    }
+    (mode, loaded)
 }
 
 /// The body of `sync_monitors`, with the enumeration passed in.
@@ -3436,6 +3587,7 @@ impl App for PingApp {
         self.sync_border_preview();
         self.sync_profiles();
         self.sync_monitors();
+        self.sync_theme(ctx);
         self.sync_window_title(ctx);
         // The renderer owns every animation now: smooth rendering, the
         // cosmetic prefill and the startup border all repaint themselves at
@@ -3465,7 +3617,7 @@ impl App for PingApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        UI_BACKGROUND.to_normalized_gamma_f32()
+        UI_BACKGROUND().to_normalized_gamma_f32()
     }
 }
 
@@ -3489,8 +3641,9 @@ fn edit_overlay(
     ui: &mut Ui,
     overlay: &mut OverlayConfig,
     changed: &mut bool,
-    position_picker: &PositionPicker,
+    position_picker: &mut PositionPicker,
     attached: &[MonitorInfo],
+    theme: &Theme,
 ) {
     section(ui, "General", |ui| {
         Grid::new("general-grid")
@@ -3574,7 +3727,7 @@ fn edit_overlay(
     });
 
     section(ui, "Position", |ui| {
-        if let Some(anchor) = position_picker.show(ui, overlay.position) {
+        if let Some(anchor) = position_picker.show(ui, overlay.position, theme) {
             if anchor != overlay.position {
                 overlay.position = anchor;
                 *changed = true;
@@ -3917,7 +4070,7 @@ fn section(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.label(
         RichText::new(title.to_uppercase())
             .strong()
-            .color(UI_ACCENT),
+            .color(UI_ACCENT()),
     );
     ui.separator();
     add_contents(ui);
@@ -4173,14 +4326,15 @@ mod tests {
         monitor_choices, overlay_count_label, overlay_name_width, overlay_row_contents,
         page_has_detail_footer, page_has_list_pane, pending_edits, profile_name_width,
         profile_row_contents, profile_row_label, rail_width, requested_url, row_inner,
-        selected_overlay_for_border, sync_monitor_list, sync_profile_cache, toggled_selection,
-        ui_text_size, window_title, AboutKind, Frame, Page, ProfileSnapshot, ABOUT_ICON_DOT_RADIUS,
-        ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
-        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
-        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
-        PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH,
-        ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND,
-        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        selected_overlay_for_border, sync_monitor_list, sync_profile_cache, sync_theme, theme,
+        toggled_selection, ui_text_size, window_title, AboutKind, Frame, Mode, Page,
+        ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
+        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
+        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
+        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
+        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{Anchor, ConfigNotice, ProfileEntry};
@@ -4225,7 +4379,7 @@ mod tests {
     /// `build.rs` computes what the About page shows and
     /// `scripts/build-nsis.ps1` computes what the installer is *named*. They
     /// are two implementations of one rule, in two languages, reading one
-    /// `Cargo.toml` — and an app that reports `0.2.3` inside a file called
+    /// `Cargo.toml` ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â and an app that reports `0.2.3` inside a file called
     /// `0.1.77-setup.exe` is exactly the sort of drift nobody notices until a
     /// user files a bug about it. So this asks the script, rather than
     /// re-deriving the rule a third time here.
@@ -4533,7 +4687,7 @@ mod tests {
     ///
     /// A display can be plugged in while the window is open and nothing tells
     /// us, so this cannot be tied to a save or to arriving on a page. The first
-    /// pass reads unconditionally — `monitors_read_at` starts as `None` — because
+    /// pass reads unconditionally ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â `monitors_read_at` starts as `None` ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â because
     /// a list that is empty until the clock comes round would show the picker
     /// with no monitors in it on the first frame, and the user would be looking
     /// at a combobox that claims there is nothing to choose.
@@ -4582,7 +4736,7 @@ mod tests {
     /// This is the whole mitigation for hiding an overlay whose monitor is
     /// missing. A combobox whose entry list does not contain the selected value
     /// falls back to its first row, so dropping the entry would not just hide
-    /// the state — it would report a *different* monitor as chosen, and the user
+    /// the state ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â it would report a *different* monitor as chosen, and the user
     /// saving from there would silently re-pin the overlay. The entry is first so
     /// it is visible without scrolling.
     #[test]
@@ -4616,7 +4770,7 @@ mod tests {
     /// The list names displays in a way a user can check, and offers exactly one
     /// way to be on the primary monitor.
     ///
-    /// Two entries for the primary — a device and a "follow" — would be two
+    /// Two entries for the primary ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â a device and a "follow" ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â would be two
     /// spellings of one choice where one of them quietly stops working when
     /// Windows changes which display is primary.
     #[test]
@@ -4637,7 +4791,9 @@ mod tests {
             "the first entry does not follow the primary"
         );
         assert!(
-            choices[1].label.contains("2560 × 1440"),
+            choices[1]
+                .label
+                .contains("2560 ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â 1440"),
             "the display is not named by its resolution: {}",
             choices[1].label
         );
@@ -4664,6 +4820,40 @@ mod tests {
             1,
             "the primary monitor is offered more than once"
         );
+    }
+
+    /// The theme is reloaded when the mode moves, and left alone when it does
+    /// not.
+    ///
+    /// Two directions, because the two ways to be wrong look identical from
+    /// outside: a reload that never happens leaves the window in the old theme,
+    /// and a reload that always happens is a disk read every frame plus a theme
+    /// that reverts under any hand edit.
+    #[test]
+    fn the_theme_is_reloaded_only_when_the_mode_moves() {
+        let dir = std::env::temp_dir().join("plo-sync-theme");
+        let _ = std::fs::remove_dir_all(&dir);
+        let light = theme::builtin(Mode::Light);
+
+        // Startup: no previous theme, so it must load.
+        let (mode, first) = sync_theme(None, ThemeMode::Dark, &dir);
+        assert_eq!(mode, Mode::Dark);
+        assert_eq!(first.mode, Mode::Dark);
+
+        // An explicit preference beats what Windows is doing.
+        let (mode, _) = sync_theme(Some((mode, &first)), ThemeMode::Light, &dir);
+        assert_eq!(mode, Mode::Light, "an explicit preference was ignored");
+        let (mode, light_theme) = sync_theme(Some((Mode::Light, &light)), ThemeMode::Light, &dir);
+        assert_eq!(mode, Mode::Light);
+
+        // Unchanged: the very same theme comes back, not a re-read one. A
+        // hand-edited theme must survive a pass that did not need to change.
+        let (_, again) = sync_theme(Some((Mode::Light, &light_theme)), ThemeMode::Light, &dir);
+        assert_eq!(
+            again.colors, light_theme.colors,
+            "an unchanged mode reloaded the theme from disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Leaving the Profiles page and coming back is arriving again.
@@ -4748,7 +4938,7 @@ mod tests {
         let mut output = ctx.run_ui(input, |ui| {
             let height = 600.0;
             Frame::central_panel(ui.style())
-                .fill(UI_BACKGROUND)
+                .fill(UI_BACKGROUND())
                 .inner_margin(egui::Margin {
                     left: PANE_MARGIN as i8,
                     right: PANE_MARGIN as i8,
@@ -4917,8 +5107,8 @@ mod tests {
     ///
     /// `requested_url` is the whole reason the About page's link works. egui
     /// emits `OutputCommand::OpenUrl` and expects the host to act on it, and
-    /// eframe's **native** runner has no `OutputCommand` handling at all — only
-    /// its web runner does — so without this mapping the link is inert. That
+    /// eframe's **native** runner has no `OutputCommand` handling at all ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â only
+    /// its web runner does ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â so without this mapping the link is inert. That
     /// shipped once: the page claimed its links opened a browser, and they did
     /// nothing at all.
     #[test]
@@ -5156,7 +5346,7 @@ mod tests {
     /// The strip's two runtime facts, measured through a real scroll area rather
     /// than assumed: the inner `Ui`'s `max_rect` is the viewport, so the strip can
     /// be sized from it, and `ui.interact` leaves the cursor where it found it, so
-    /// the strip cannot grow the content. The second is the one that matters â€”
+    /// the strip cannot grow the content. The second is the one that matters ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â
     /// had the strip been a real widget, a list that exactly filled the viewport
     /// would have pushed the content one widget past it and conjured a scrollbar.
     #[test]
