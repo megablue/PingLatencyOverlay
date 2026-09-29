@@ -141,7 +141,43 @@
 - Existing `marginPx` configurations are migrated relative to each overlay's
   current anchor so their screen position is preserved.
 
-## Probe (per overlay)
+## Groups of hosts
+- **An overlay can graph several hosts at once.** There is no separate kind of
+  overlay: one overlay with one host is exactly what every configuration written
+  before grouping existed, so there is one code path rather than a single-host one
+  and a grouped one that could drift apart.
+- **The hosts share one plot.** One window, one X axis, one Y ceiling, one
+  position, one background, one border. A group spanning 5 ms to 300 ms looks
+  lopsided, and that is the honest picture: comparing the hosts is the point.
+- What belongs to the **group** is the appearance of the window and the plot —
+  orientation, mirror, time window, scale, smoothing, the startup prefill and
+  border, graph height, latency ceiling, position, offsets, monitor, background
+  colour and opacity.
+- What belongs to a **host** is the probe itself and the two colours that
+  identify its line: protocol, target, port, timeout, line colour and timeout
+  colour. A host can also be switched off without being deleted.
+- **A host added next to an existing one is given a different line colour**
+  automatically, cycling through a small set of distinguishable hues. Two lines
+  in the same colour are one line as far as the reader is concerned, so the one
+  thing copying cannot usefully do is copy the colour.
+- **A timeout is a full-height vertical line in that host's own timeout colour.**
+  Two hosts dropping in the same second draw their markers over each other and
+  only the later one is visible, which is the same thing that happens to two
+  lines crossing. Markers are not drawn for a host that has never answered,
+  because a line along the bottom would read as "extremely fast" rather than
+  "has said nothing".
+- **A host's history is its own.** A host added to an existing group has none of
+  the history the others have, and its line is placed by its own samples, not
+  shifted by how much history it is missing.
+- The **startup reveal draws one cosmetic curve per host**, seeded per host so
+  two of them never draw the same fake latency.
+- Probes are independent: each host is measured on its own cadence and its own
+  timeout, so one unreachable host does not delay the others. The tick is one
+  second per host.
+- An overlay's **last host cannot be removed**, because an overlay with no hosts
+  has nothing to draw and nothing to probe.
+
+## Probe (per host)
 - Protocol: ICMP echo or TCP connect.
 - Target: domain name or IP address.
 - Port: required for TCP, unused for ICMP.

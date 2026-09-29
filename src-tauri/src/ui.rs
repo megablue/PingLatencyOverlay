@@ -15,7 +15,7 @@ use eframe::{App, CreationContext, NativeOptions};
 // named pipe rather than touching either of those types directly, which is the
 // whole point ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â nothing in this binary can draw a graph.
 use ping_latency_overlay_core::config::{
-    self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig,
+    self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig, TargetConfig,
 };
 use ping_latency_overlay_core::monitors::{self, MonitorInfo};
 use ping_latency_overlay_core::transport::{Client, Message};
@@ -323,6 +323,13 @@ const ROW_MARGIN: f32 = 4.0;
 const OVERLAY_ROW_HEIGHT: f32 = 28.0;
 /// Width of an overlay row's delete and pause buttons.
 const OVERLAY_ROW_ACTION_WIDTH: f32 = 28.0;
+
+/// A host row in the detail pane: shorter than an overlay row, because it is
+/// inside a pane that already scrolls vertically.
+const TARGET_ROW_HEIGHT: f32 = 24.0;
+const TARGET_ROW_ACTION_WIDTH: f32 = 24.0;
+const TARGET_ROW_SWATCH: f32 = 10.0;
+const TARGET_ROW_SWATCH_GAP: f32 = 6.0;
 /// Height of an overlay row's delete confirmation buttons.
 const OVERLAY_CONFIRM_HEIGHT: f32 = 26.0;
 /// Width of the delete confirmation's OK and Cancel buttons.
@@ -877,6 +884,15 @@ pub struct PingApp {
     profile_dialog: Option<ProfileDialog>,
     profile_name_focus: bool,
     selected_id: Option<String>,
+    /// The target whose host fields the detail pane is editing.
+    ///
+    /// View-only, and subject to the same rules as `selected_id`: it starts as
+    /// `None`, nothing auto-selects it, and clearing it never touches the draft,
+    /// because staged edits live in `config.overlays[..].targets` and not here.
+    /// A second selection rather than an index because a target id is stable and
+    /// an index is not — the moment the list is reordered or one is deleted,
+    /// every index after it points somewhere else.
+    selected_target: Option<String>,
     /// Preferences as last written to `globalconfig.json`.
     prefs: config::GlobalPrefs,
     /// The staged copy the Global page edits, written on Save.
@@ -1058,6 +1074,7 @@ impl PingApp {
             profile_dialog: None,
             profile_name_focus: false,
             selected_id: None,
+            selected_target: None,
             prefs_draft: prefs.clone(),
             prefs,
             prefs_dirty: false,
@@ -1405,6 +1422,10 @@ impl PingApp {
     fn add_overlay(&mut self) {
         let overlay = OverlayConfig::new();
         self.selected_id = Some(overlay.id.clone());
+        // A different overlay, so a host selected in the old one cannot still be
+        // the "selected host" here — the editor looks it up by id and would find
+        // nothing, so the pane would show neither.
+        self.selected_target = None;
         self.config.overlays.push(overlay);
         self.dirty = true;
         self.status.clear();
@@ -1601,6 +1622,9 @@ impl PingApp {
                     self.status = format!("Could not update globalconfig.json: {error}");
                 }
                 self.selected_id = stored.overlays.first().map(|overlay| overlay.id.clone());
+                // A different set of overlays entirely, so a host selected in the
+                // profile being left behind is not a selection here.
+                self.selected_target = None;
                 self.apply_saved_config(stored);
                 self.dirty = false;
                 // Read after the load, so a name that is only stored in the
@@ -1783,11 +1807,7 @@ impl PingApp {
                             .map(|overlay| {
                                 (
                                     overlay.id.clone(),
-                                    if overlay.name.is_empty() {
-                                        "(unnamed)".to_string()
-                                    } else {
-                                        overlay.name.clone()
-                                    },
+                                    overlay_row_label(overlay),
                                     overlay.position,
                                     overlay.enabled,
                                 )
@@ -1834,6 +1854,10 @@ impl PingApp {
                             } else if clicks.name {
                                 self.selected_id =
                                     toggled_selection(self.selected_id.as_deref(), id.as_str());
+                                // The host selection belongs to the overlay it was
+                                // made in, so it cannot follow the selection across
+                                // to a different one.
+                                self.selected_target = None;
                             } else if clicks.remove {
                                 self.confirm_delete = Some(id.clone());
                             } else if clicks.toggle {
@@ -1856,6 +1880,7 @@ impl PingApp {
                             );
                             if response.clicked() {
                                 self.selected_id = None;
+                                self.selected_target = None;
                             }
                         }
                     });
@@ -2687,6 +2712,7 @@ impl PingApp {
             // back to the empty state rather than silently focusing a different
             // overlay, which would start a border nobody asked for.
             self.selected_id = None;
+            self.selected_target = None;
             return;
         };
 
@@ -2704,10 +2730,14 @@ impl PingApp {
                     .color(UI_TEXT()),
                 );
                 ui.add_space(8.0);
+                self.show_target_list(ui, index);
+                ui.add_space(4.0);
                 let mut changed = false;
+                let selected_target = self.selected_target.clone();
                 edit_overlay(
                     ui,
                     &mut self.config.overlays[index],
+                    selected_target.as_deref(),
                     &mut changed,
                     &mut self.position_picker,
                     &self.monitors,
@@ -2718,6 +2748,89 @@ impl PingApp {
                     self.status.clear();
                 }
             });
+    }
+
+    /// The hosts of the selected overlay, above the editor for the chosen one.
+    ///
+    /// In the detail pane rather than the list pane because a list row has one
+    /// click target and this has four, and because the two selections are
+    /// nested: which overlay you are editing, and which of its hosts.
+    fn show_target_list(&mut self, ui: &mut Ui, overlay_index: usize) {
+        // Cloned because the rows are painted and the closure that handles their
+        // clicks needs `&mut self`, which the borrow of the overlay forbids.
+        let targets = self.config.overlays[overlay_index].targets.clone();
+        let selected = self.selected_target.clone();
+        let mut remove: Option<usize> = None;
+        let mut toggle: Option<usize> = None;
+        let mut select: Option<usize> = None;
+
+        section(ui, "Hosts", |ui| {
+            for (index, target) in targets.iter().enumerate() {
+                let active = selected.as_deref() == Some(target.id.as_str());
+                let row = ui.allocate_exact_size(
+                    egui::vec2(
+                        ui.available_width(),
+                        list_pane_row_height(TARGET_ROW_HEIGHT),
+                    ),
+                    egui::Sense::click(),
+                );
+                if active {
+                    ui.painter()
+                        .rect_filled(row.0, egui::CornerRadius::same(4), UI_SELECTION());
+                } else if row.1.hovered() {
+                    ui.painter()
+                        .rect_filled(row.0, egui::CornerRadius::same(4), UI_SURFACE_ALT());
+                }
+                let clicks = target_row_contents(ui, row.0, target, active, index + 1);
+                if clicks.remove {
+                    remove = Some(index);
+                } else if clicks.toggle {
+                    toggle = Some(index);
+                } else if clicks.label {
+                    select = Some(index);
+                }
+            }
+            ui.add_space(4.0);
+            if ui
+                .add_sized([ui.available_width(), 28.0], egui::Button::new("Add host"))
+                .clicked()
+            {
+                self.config.overlays[overlay_index].add_target();
+                self.dirty = true;
+                self.status.clear();
+            }
+        });
+
+        // A row click toggles, exactly as the overlay rows do, so clicking the
+        // host you are already editing puts the editor back to nothing rather
+        // than leaving a selection that looks stuck.
+        if let Some(index) = select {
+            let id = targets[index].id.clone();
+            self.selected_target = toggled_selection(selected.as_deref(), id.as_str());
+        }
+        if let Some(index) = toggle {
+            let target = &mut self.config.overlays[overlay_index].targets[index];
+            target.enabled = !target.enabled;
+            self.dirty = true;
+            self.status.clear();
+        }
+        if let Some(index) = remove {
+            let id = targets[index].id.clone();
+            let last = targets.len() == 1;
+            if last {
+                // An overlay with no targets has nothing to draw and nothing to
+                // probe, and `normalize` would put one back on the next load —
+                // so the last host is not removable, and says why.
+                self.status = "The last host cannot be removed.".to_string();
+            } else {
+                self.config.overlays[overlay_index].targets.remove(index);
+                if self.selected_target.as_deref() == Some(id.as_str()) {
+                    self.selected_target = None;
+                }
+                self.dirty = true;
+                self.status.clear();
+            }
+        }
     }
 
     /// Pane 3: the page's own content, plus the sticky Save/Discard footer on the
@@ -3204,6 +3317,139 @@ fn overlay_row_contents(
     }
 }
 
+/// The host the detail pane's per-host editor is showing.
+///
+/// Returns `None` when the overlay has no such host — the selection is stale,
+/// which happens when a host is deleted while the window is closed to the
+/// Profiles page. The editor treats that as "nothing selected" rather than
+/// reaching for a different host, so a stale id can never show somebody else's
+/// settings under the name of the one they clicked.
+fn selected_target_in<'a>(
+    overlay: &'a OverlayConfig,
+    selected: Option<&str>,
+) -> Option<&'a TargetConfig> {
+    let id = selected?;
+    overlay.targets.iter().find(|target| target.id == id)
+}
+
+/// The name a list-pane row shows for an overlay.
+///
+/// A group carries its host count, because a row reading like any other is how
+/// four separate overlays and one overlay of four hosts end up looking the
+/// same from across the room. One host shows nothing, which keeps the common
+/// case exactly as it was.
+fn overlay_row_label(overlay: &OverlayConfig) -> String {
+    let name = if overlay.name.is_empty() {
+        "(unnamed)".to_string()
+    } else {
+        overlay.name.clone()
+    };
+    let enabled = overlay
+        .targets
+        .iter()
+        .filter(|target| target.enabled)
+        .count();
+    let total = overlay.targets.len();
+    match (enabled, total) {
+        (1, 1) => name,
+        _ => format!("{name} ({enabled}/{total} hosts)"),
+    }
+}
+
+/// What a host row's controls did, kept out of the borrow.
+#[derive(Default)]
+struct TargetRowClicks {
+    label: bool,
+    toggle: bool,
+    remove: bool,
+}
+
+/// The inside of a host row: a colour swatch, the host, and two buttons.
+///
+/// Built the same way as an overlay row and for the same reasons: painted
+/// rather than framed, allocated at its own height rather than its content's,
+/// and with both halves taken from one rect so the name and the buttons cannot
+/// disagree about where the row ends.
+fn target_row_contents(
+    ui: &mut Ui,
+    row: egui::Rect,
+    target: &TargetConfig,
+    active: bool,
+    position: usize,
+) -> TargetRowClicks {
+    let inner = row_inner(row);
+    let gap = ui.spacing().item_spacing.x;
+    let mut clicks = TargetRowClicks::default();
+    let mut ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+
+    // The swatch is the row's own identification: on screen the only thing that
+    // says which line is which is its colour, so the list has to show it.
+    let swatch = ui.allocate_exact_size(
+        egui::vec2(TARGET_ROW_SWATCH, TARGET_ROW_SWATCH),
+        egui::Sense::hover(),
+    );
+    ui.painter().circle_filled(
+        swatch.0.center(),
+        TARGET_ROW_SWATCH / 2.0,
+        parse_color(&target.line_color),
+    );
+    ui.painter().circle_stroke(
+        swatch.0.center(),
+        TARGET_ROW_SWATCH / 2.0,
+        egui::Stroke::new(1.0, UI_BORDER()),
+    );
+
+    let controls_width = TARGET_ROW_ACTION_WIDTH * 2.0 + gap;
+    let label_width =
+        (inner.width() - swatch.0.width() - TARGET_ROW_SWATCH_GAP - controls_width - gap).max(24.0);
+    let (label_rect, mut label_response) = ui.allocate_exact_size(
+        egui::vec2(label_width, TARGET_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let label = host_row_label(target, position);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = label_rect.width();
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.append(&label, 0.0, egui::TextFormat::simple(font_id, UI_TEXT()));
+    let galley = ui.painter().layout_job(job);
+    let text_offset = (label_rect.height() - galley.size().y) / 2.0;
+    ui.painter().galley(
+        label_rect.left_top() + egui::vec2(0.0, text_offset),
+        galley,
+        if active { UI_ACCENT() } else { UI_TEXT() },
+    );
+    if label_response.hovered() {
+        label_response = label_response.on_hover_text(target.probe.host());
+    }
+    clicks.label = label_response.clicked();
+
+    let controls = right_anchored(inner, controls_width);
+    let mut actions = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(controls)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    clicks.remove = actions
+        .add_sized(
+            [TARGET_ROW_ACTION_WIDTH, TARGET_ROW_HEIGHT],
+            egui::Button::new(RichText::new("X").color(UI_DANGER())),
+        )
+        .clicked();
+    clicks.toggle = actions
+        .add_sized(
+            [TARGET_ROW_ACTION_WIDTH, TARGET_ROW_HEIGHT],
+            egui::Button::new(if target.enabled { "||" } else { "> " }),
+        )
+        .clicked();
+    clicks
+}
+
 /// The right-hand area of an overlay row: the two action buttons and the gap
 /// between them, anchored to the row's right edge.
 fn overlay_controls_width(gap: f32) -> f32 {
@@ -3423,6 +3669,19 @@ fn read_profile_snapshot() -> ProfileSnapshot {
 /// Profiles page stays the current one for as long as the user reads it.
 fn arriving_page_needs_profiles(from: Page, to: Page) -> bool {
     from != to && to == Page::Profiles
+}
+
+/// How a host is labelled in the detail pane's list.
+///
+/// A blank host says so rather than showing nothing: a row with no text is a
+/// layout bug, and "no host" tells the user which field to fill in.
+fn host_row_label(target: &TargetConfig, position: usize) -> String {
+    let host = target.label();
+    if host == "(no host)" {
+        format!("{position}. (no host yet)")
+    } else {
+        format!("{position}. {host}")
+    }
 }
 
 /// The body of `sync_profiles`, with the disk read passed in.
@@ -3718,9 +3977,99 @@ impl Drop for PingApp {
     }
 }
 
+/// The host fields of one target: protocol, host, port and timeout.
+///
+/// Its own function because these are per host rather than per overlay, and
+/// because the same four controls would otherwise have to appear twice — once
+/// for the selected target in the detail pane and once per row of the target
+/// list, where only a compact form makes sense.
+fn edit_target(ui: &mut Ui, target: &mut TargetConfig, changed: &mut bool) {
+    Grid::new("target-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Protocol");
+            let mut protocol = match target.probe {
+                ProbeConfig::Icmp { .. } => "icmp",
+                ProbeConfig::Tcp { .. } => "tcp",
+            };
+            ComboBox::from_id_salt("target-protocol")
+                .selected_text(if protocol == "icmp" {
+                    "ICMP echo"
+                } else {
+                    "TCP connect"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut protocol, "icmp", "ICMP echo");
+                    ui.selectable_value(&mut protocol, "tcp", "TCP connect");
+                });
+            if protocol == "tcp" && matches!(target.probe, ProbeConfig::Icmp { .. }) {
+                let host = target.probe.host().to_string();
+                target.probe = ProbeConfig::Tcp { host, port: 80 };
+                *changed = true;
+            } else if protocol == "icmp" && matches!(target.probe, ProbeConfig::Tcp { .. }) {
+                let host = target.probe.host().to_string();
+                target.probe = ProbeConfig::Icmp { host };
+                *changed = true;
+            }
+            ui.end_row();
+
+            ui.label("Target host / IP");
+            let mut host = target.probe.host().to_string();
+            if ui
+                .add(egui::TextEdit::singleline(&mut host).desired_width(f32::INFINITY))
+                .changed()
+            {
+                set_probe_host(&mut target.probe, host);
+                *changed = true;
+            }
+            ui.end_row();
+
+            ui.label("Port (TCP only)");
+            let mut port = target.probe.port().max(1) as i64;
+            if matches!(target.probe, ProbeConfig::Icmp { .. }) {
+                ui.add_enabled(false, egui::DragValue::new(&mut port).range(1..=65535));
+            } else if ui
+                .add(egui::DragValue::new(&mut port).range(1..=65535))
+                .changed()
+            {
+                if let ProbeConfig::Tcp { port: value, .. } = &mut target.probe {
+                    *value = port.clamp(1, 65535) as u16;
+                }
+                *changed = true;
+            }
+            ui.end_row();
+
+            ui.label("Timeout (ms)");
+            let mut timeout = target.timeout_ms.max(1) as i64;
+            if ui
+                .add(egui::DragValue::new(&mut timeout).range(1..=600_000))
+                .changed()
+            {
+                target.timeout_ms = timeout.clamp(1, 600_000) as u32;
+                *changed = true;
+            }
+            ui.end_row();
+        });
+}
+
+/// The per-target colours, in the same grid shape as the rest of the editor.
+fn edit_target_colors(ui: &mut Ui, target: &mut TargetConfig, changed: &mut bool) {
+    Grid::new("target-colors-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            color_field(ui, "Line color", &mut target.line_color, changed);
+            ui.end_row();
+            color_field(ui, "Timeout color", &mut target.timeout_color, changed);
+            ui.end_row();
+        });
+}
+
 fn edit_overlay(
     ui: &mut Ui,
     overlay: &mut OverlayConfig,
+    selected_target: Option<&str>,
     changed: &mut bool,
     position_picker: &mut PositionPicker,
     attached: &[MonitorInfo],
@@ -3741,71 +4090,25 @@ fn edit_overlay(
                     *changed = true;
                 }
                 ui.end_row();
-
-                ui.label("Protocol");
-                let mut protocol = match overlay.probe {
-                    ProbeConfig::Icmp { .. } => "icmp",
-                    ProbeConfig::Tcp { .. } => "tcp",
-                };
-                ComboBox::from_id_salt("protocol")
-                    .selected_text(if protocol == "icmp" {
-                        "ICMP echo"
-                    } else {
-                        "TCP connect"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut protocol, "icmp", "ICMP echo");
-                        ui.selectable_value(&mut protocol, "tcp", "TCP connect");
-                    });
-                if protocol == "tcp" && matches!(overlay.probe, ProbeConfig::Icmp { .. }) {
-                    let host = overlay.probe.host().to_string();
-                    overlay.probe = ProbeConfig::Tcp { host, port: 80 };
-                    *changed = true;
-                } else if protocol == "icmp" && matches!(overlay.probe, ProbeConfig::Tcp { .. }) {
-                    let host = overlay.probe.host().to_string();
-                    overlay.probe = ProbeConfig::Icmp { host };
-                    *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Target host / IP");
-                let mut host = overlay.probe.host().to_string();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut host).desired_width(f32::INFINITY))
-                    .changed()
-                {
-                    set_probe_host(&mut overlay.probe, host);
-                    *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Port (TCP only)");
-                let mut port = overlay.probe.port().max(1) as i64;
-                if matches!(overlay.probe, ProbeConfig::Icmp { .. }) {
-                    ui.add_enabled(false, egui::DragValue::new(&mut port).range(1..=65535));
-                } else if ui
-                    .add(egui::DragValue::new(&mut port).range(1..=65535))
-                    .changed()
-                {
-                    if let ProbeConfig::Tcp { port: value, .. } = &mut overlay.probe {
-                        *value = port.clamp(1, 65535) as u16;
-                    }
-                    *changed = true;
-                }
-                ui.end_row();
-
-                ui.label("Timeout (ms)");
-                let mut timeout = overlay.timeout_ms.max(1) as i64;
-                if ui
-                    .add(egui::DragValue::new(&mut timeout).range(1..=600_000))
-                    .changed()
-                {
-                    overlay.timeout_ms = timeout.clamp(1, 600_000) as u32;
-                    *changed = true;
-                }
-                ui.end_row();
             });
     });
+
+    // The lookup is by id, so a selection that is not one of this overlay's
+    // hosts draws nothing at all. That is the whole point: the pane must never
+    // show host 2's fields while host 1 is the one highlighted in the list.
+    if let Some(target) = selected_target_in(overlay, selected_target) {
+        let target = target.clone();
+        let index = overlay
+            .targets
+            .iter()
+            .position(|candidate| candidate.id == target.id)
+            .expect("the lookup just found it");
+        section(ui, "Selected host", |ui| {
+            edit_target(ui, &mut overlay.targets[index], changed);
+            ui.add_space(6.0);
+            edit_target_colors(ui, &mut overlay.targets[index], changed);
+        });
+    }
 
     section(ui, "Position", |ui| {
         if let Some(anchor) = position_picker.show(ui, overlay.position, theme) {
@@ -4014,10 +4317,6 @@ fn edit_overlay(
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                color_field(ui, "Line color", &mut overlay.line_color, changed);
-                ui.end_row();
-                color_field(ui, "Timeout color", &mut overlay.timeout_color, changed);
-                ui.end_row();
                 color_field(ui, "Background color", &mut overlay.bg_color, changed);
                 ui.end_row();
 
@@ -4403,25 +4702,156 @@ mod tests {
     use super::{
         about_page_lines, app_version, can_switch_profile, choose_theme, config,
         config_notice_status, config_notices_status, deselect_strip_rect, draw_pane_divider,
-        empty_editor, list_pane_column, list_pane_row_height, list_pane_row_width_for,
-        monitor_choice_label, monitor_choices, overlay_count_label, overlay_name_width,
-        overlay_row_contents, page_has_detail_footer, page_has_list_pane, pending_edits,
-        profile_name_width, profile_row_contents, profile_row_label, rail_width, requested_url,
-        row_inner, selected_overlay_for_border, sync_monitor_list, sync_profile_cache, sync_theme,
-        theme, theme_choices, toggled_selection, ui_text_size, window_title, AboutKind, Frame,
-        Mode, Page, ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS,
-        ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
-        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
-        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
-        PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH,
-        ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, UI_BACKGROUND,
+        empty_editor, host_row_label, list_pane_column, list_pane_row_height,
+        list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
+        overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
+        page_has_list_pane, pending_edits, profile_name_width, profile_row_contents,
+        profile_row_label, rail_width, requested_url, row_inner, selected_overlay_for_border,
+        selected_target_in, sync_monitor_list, sync_profile_cache, sync_theme, theme,
+        theme_choices, toggled_selection, ui_text_size, window_title, AboutKind, Frame, Mode, Page,
+        ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
+        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
+        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
+        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
+        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, UI_BACKGROUND,
         WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
-    use ping_latency_overlay_core::config::{Anchor, ConfigNotice, ProfileEntry};
+    use ping_latency_overlay_core::config::{
+        Anchor, ConfigNotice, OverlayConfig, ProbeConfig, ProfileEntry, TargetConfig,
+    };
     use ping_latency_overlay_core::monitors::{self, MonitorInfo};
     use std::collections::HashMap;
     use std::time::Instant;
+
+    fn overlay_with_hosts(count: usize) -> OverlayConfig {
+        let mut overlay = OverlayConfig::new();
+        for index in 1..count {
+            let mut target = overlay.first_target().clone();
+            target.id = format!("{}-host-{index}", overlay.id);
+            target.probe = ProbeConfig::Tcp {
+                host: format!("host-{index}.example"),
+                port: 443,
+            };
+            overlay.targets.push(target);
+        }
+        overlay
+    }
+
+    /// The host editor shows the host that is selected, and nothing else.
+    ///
+    /// The lookup is by id rather than by index, so a stale selection — a host
+    /// deleted while the pane was showing another overlay — draws nothing rather
+    /// than showing whichever host happens to be first. Showing host 1's fields
+    /// under host 2's highlight is a worse failure than showing none: it is
+    /// saved to host 1 and the user is editing host 2.
+    #[test]
+    fn the_host_editor_shows_only_the_selected_host() {
+        let overlay = overlay_with_hosts(3);
+        let second = overlay.targets[1].id.clone();
+        let third = overlay.targets[2].id.clone();
+
+        assert_eq!(
+            selected_target_in(&overlay, Some(second.as_str())).map(|target| target.id.as_str()),
+            Some(second.as_str())
+        );
+        assert_eq!(
+            selected_target_in(&overlay, Some(third.as_str())).map(|target| target.probe.host()),
+            Some("host-2.example")
+        );
+        assert!(
+            selected_target_in(&overlay, None).is_none(),
+            "no selection showed a host anyway"
+        );
+        assert!(
+            selected_target_in(&overlay, Some("not-a-host")).is_none(),
+            "an unknown id showed a host anyway"
+        );
+    }
+
+    /// Two overlays may hold the same host id, so an id identifies a host only
+    /// together with its overlay — which is why the editor never resolves one
+    /// without the other.
+    #[test]
+    fn a_host_id_is_only_unique_within_its_overlay() {
+        let first = overlay_with_hosts(2);
+        let mut second = overlay_with_hosts(2);
+        // The same id in both, which `validate` allows: it checks uniqueness per
+        // overlay, and probes key on the pair.
+        second.targets[1].id = first.targets[1].id.clone();
+
+        let shared = first.targets[1].id.clone();
+        assert_eq!(
+            selected_target_in(&first, Some(shared.as_str())).map(|target| target.probe.host()),
+            Some("host-1.example")
+        );
+        assert_eq!(
+            selected_target_in(&second, Some(shared.as_str())).map(|target| target.probe.host()),
+            Some("host-1.example"),
+            "the two overlays are not distinguished by the lookup"
+        );
+    }
+
+    /// A row that has not been given a host says so.
+    ///
+    /// The alternative is a row with no text in it, which reads as a broken row
+    /// rather than as a host that needs filling in.
+    #[test]
+    fn a_row_with_no_host_says_so() {
+        let mut target = TargetConfig::new();
+        target.probe = ProbeConfig::Icmp {
+            host: "   ".to_string(),
+        };
+        assert_eq!(host_row_label(&target, 2), "2. (no host yet)");
+
+        target.probe = ProbeConfig::Icmp {
+            host: "1.1.1.1".to_string(),
+        };
+        assert_eq!(host_row_label(&target, 2), "2. 1.1.1.1");
+    }
+
+    /// A group reads as a group in the list.
+    ///
+    /// Four overlays of one host each and one overlay of four hosts look
+    /// identical otherwise, and that is exactly the confusion grouping
+    /// introduces. One host shows no count, so the common case is unchanged.
+    #[test]
+    fn an_overlay_row_says_how_many_hosts_are_enabled() {
+        let mut one = overlay_with_hosts(1);
+        assert_eq!(overlay_row_label(&one), "New overlay");
+
+        let mut four = overlay_with_hosts(4);
+        assert_eq!(overlay_row_label(&four), "New overlay (4/4 hosts)");
+
+        four.targets[1].enabled = false;
+        four.targets[2].enabled = false;
+        assert_eq!(overlay_row_label(&four), "New overlay (2/4 hosts)");
+
+        // An overlay with nothing enabled still says so, rather than reading as
+        // the single-host case with the "1" omitted.
+        for target in &mut one.targets {
+            target.enabled = false;
+        }
+        assert_eq!(overlay_row_label(&one), "New overlay (0/1 hosts)");
+    }
+
+    /// A host row is a row: it carries its own margin, so its controls are not
+    /// flush against the fill.
+    ///
+    /// The same rule `a_painted_row_carries_its_margin` holds for the overlay
+    /// rows, and for the same reason — `rect_filled` does not size itself, so a
+    /// row allocated at its content height hands the child less room than it
+    /// asked for.
+    #[test]
+    fn a_host_row_carries_its_margin() {
+        let height = list_pane_row_height(TARGET_ROW_HEIGHT);
+        assert!(
+            height > TARGET_ROW_HEIGHT,
+            "the host row is allocated at exactly its content height, so its \
+             controls sit flush against the fill"
+        );
+    }
 
     /// A display with no appbar, so `bounds` and `work` agree and a test about
     /// the picker is not also a test of taskbar geometry.

@@ -7,13 +7,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::border::{border_frame_interval, BorderAnimator};
-use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig};
+use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig, TargetConfig};
 #[cfg(windows)]
 use crate::monitors::MonitorInfo;
 use crate::probes::SampleStore;
 use crate::render::{
-    cosmetic_prefill_samples, render_graph_into_with_border, render_prefill_into, SamplePoint,
+    cosmetic_prefill_samples, render_series_into_with_border, SamplePoint, Series,
 };
+
+#[cfg(test)]
+use crate::render::cosmetic_prefill_values;
 
 /// The Win32 surface this crate needs, declared here rather than taken from a
 /// binding crate.
@@ -377,7 +380,9 @@ pub fn pump_messages() {
 struct PrefillState {
     started_at: Instant,
     duration: Duration,
-    samples: Vec<SamplePoint>,
+    /// One cosmetic curve per enabled target, in the overlay's target order, so
+    /// it can be zipped with the live samples without a lookup.
+    samples: Vec<Vec<SamplePoint>>,
     completed_rendered: bool,
 }
 
@@ -386,7 +391,12 @@ impl PrefillState {
         Self {
             started_at: now,
             duration: Duration::from_secs(config.prefill_animation_sec.max(1) as u64),
-            samples: cosmetic_prefill_samples(config, now),
+            samples: config
+                .targets
+                .iter()
+                .filter(|target| target.enabled)
+                .map(|target| cosmetic_prefill_samples(config, &target.id, now))
+                .collect(),
             completed_rendered: false,
         }
     }
@@ -401,17 +411,50 @@ impl PrefillState {
     }
 }
 
+/// One target's line as the window currently holds it.
+struct WindowSeries {
+    /// The target id, so a reordered or removed target can be matched up.
+    target_id: String,
+    samples: Vec<SamplePoint>,
+    /// The generation the samples were read at, so "did this change" is a
+    /// comparison rather than a length check that misses an equal-length update.
+    generation: u64,
+    /// The prefill and the live samples merged in time order.
+    history: Vec<SamplePoint>,
+}
+
+impl WindowSeries {
+    fn new(target_id: &str) -> Self {
+        Self {
+            target_id: target_id.to_string(),
+            samples: Vec::new(),
+            generation: 0,
+            history: Vec::new(),
+        }
+    }
+}
+
 struct OverlayWindow {
     hwnd: HWND,
     config: OverlayConfig,
-    samples: Vec<SamplePoint>,
+    /// One entry per enabled target, in the overlay's target order. The order
+    /// is the config's, so a reorder changes which line is drawn first and
+    /// nothing else about the frame.
+    series: Vec<WindowSeries>,
     prefill: Option<PrefillState>,
-    render_points: Vec<SamplePoint>,
-    history_points: Vec<SamplePoint>,
+    /// Scratch for the in-progress reveal: one truncated curve per target,
+    /// reused every frame so the reveal does not allocate at frame rate.
+    prefill_points: Vec<Vec<SamplePoint>>,
     history_dirty: bool,
     border: BorderAnimator,
     border_selected: bool,
     pixels: Vec<u8>,
+    /// Whether any target has ever produced a sample.
+    ///
+    /// Per overlay rather than per target, because it answers one question:
+    /// has the real graph started? A group where one target has answered and
+    /// another has not is past the prefill, and the one that has not draws an
+    /// empty line rather than a fake one.
     sample_generation: u64,
     size: (i32, i32),
     position: (i32, i32),
@@ -430,15 +473,77 @@ struct OverlayWindow {
 }
 
 impl OverlayWindow {
+    /// The prefill curve belonging to the target at `index`, if there is one.
+    ///
+    /// Indexed rather than keyed because the prefill is built from the same
+    /// filtered list as `series`, in the same order, so the two cannot disagree
+    /// — and a lookup that could come back empty would have to be handled as a
+    /// state that this pair makes unrepresentable.
+    fn prefill_samples(&self, index: usize) -> Option<&[SamplePoint]> {
+        self.prefill.as_ref()?.samples.get(index).map(Vec::as_slice)
+    }
+
     fn rebuild_history(&mut self) {
-        self.history_points.clear();
-        if let Some(prefill) = &self.prefill {
-            self.history_points.extend(prefill.samples.iter().copied());
+        // Borrow the two fields separately rather than the whole window, which
+        // is what calling `self.prefill_samples` inside the loop would need.
+        let prefill = self.prefill.as_ref();
+        for (index, series) in self.series.iter_mut().enumerate() {
+            series.history.clear();
+            if let Some(samples) = prefill.and_then(|state| state.samples.get(index)) {
+                series.history.extend(samples.iter().copied());
+            }
+            series.history.extend(series.samples.iter().copied());
+            series.history.sort_by_key(|sample| sample.timestamp);
         }
-        self.history_points.extend(self.samples.iter().copied());
-        self.history_points.sort_by_key(|sample| sample.timestamp);
         self.history_dirty = false;
     }
+
+    /// Rebuild the per-target series list to match the configuration.
+    fn sync_series(&mut self, targets: &[TargetConfig]) -> bool {
+        sync_series(&mut self.series, targets)
+    }
+}
+
+/// Bring a window's series list in line with the configured targets, keeping the
+/// entries whose target id is still there.
+///
+/// Free rather than a method on `OverlayWindow` so it can be tested without one:
+/// a window owns an `HWND` and a `LayeredSurface`, so a test that had to build
+/// one to exercise a list operation would need a real window and would then be
+/// skipped on anything but Windows.
+///
+/// The returned flag is what `apply` uses to ask for a frame. It matters more
+/// than it looks: a host added while the samples and the rest of the config are
+/// both unchanged is invisible to every other trigger in `apply`, so without
+/// this the new line appears one frame late — or not at all, if nothing else
+/// asks for a redraw.
+fn sync_series(series: &mut Vec<WindowSeries>, targets: &[TargetConfig]) -> bool {
+    let wanted: Vec<&TargetConfig> = targets.iter().filter(|t| t.enabled).collect();
+    if series.len() == wanted.len()
+        && series
+            .iter()
+            .zip(wanted.iter())
+            .all(|(existing, target)| existing.target_id == target.id)
+    {
+        return false;
+    }
+
+    // Keyed by id rather than by position, so a reorder or a removal above a
+    // target does not reset the samples of the ones below it. That would show as
+    // every remaining line restarting from scratch.
+    let mut previous: HashMap<String, WindowSeries> = std::mem::take(series)
+        .into_iter()
+        .map(|entry| (entry.target_id.clone(), entry))
+        .collect();
+    *series = wanted
+        .iter()
+        .map(|target| {
+            previous
+                .remove(&target.id)
+                .unwrap_or_else(|| WindowSeries::new(&target.id))
+        })
+        .collect();
+    true
 }
 
 // Keep the DIB, source DC, and BGRA staging buffer alive for the lifetime of
@@ -682,26 +787,28 @@ impl OverlayManager {
             };
             let (size, position) = layout_for(overlay, monitor);
 
-            let (sample_generation, samples_changed, sample_buffer) = {
+            // One lock for the whole overlay rather than one per target: the
+            // renderer touches every target of this overlay on this frame, and a
+            // per-target lock would make the cost of a group grow with the very
+            // thing the lock protects.
+            let stored: Vec<Option<(u64, Vec<SamplePoint>)>> = {
                 let store = samples.lock().unwrap();
-                let generation = store
-                    .get(&overlay.id)
-                    .map(|buffer| buffer.generation)
-                    .unwrap_or(0);
-                let changed = self
-                    .windows
-                    .get(&overlay.id)
-                    .map(|window| window.sample_generation != generation)
-                    .unwrap_or(true);
-                let buffer = if changed {
-                    store
-                        .get(&overlay.id)
-                        .map(|buffer| buffer.values.iter().copied().collect::<Vec<_>>())
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                (generation, changed, buffer)
+                let overlay_samples = store.get(&overlay.id);
+                overlay
+                    .targets
+                    .iter()
+                    .filter(|target| target.enabled)
+                    .map(|target| {
+                        overlay_samples
+                            .and_then(|targets| targets.get(&target.id))
+                            .map(|buffer| {
+                                (
+                                    buffer.generation,
+                                    buffer.values.iter().copied().collect::<Vec<_>>(),
+                                )
+                            })
+                    })
+                    .collect()
             };
 
             if !self.windows.contains_key(&overlay.id) {
@@ -734,6 +841,29 @@ impl OverlayManager {
             let config_changed = window.config != *overlay;
             let border_selection_changed = window.border_selected != selected;
             window.border_selected = selected;
+            // A target added, removed, disabled or reordered changes what the
+            // window is holding, and nothing else in this pass would notice:
+            // the samples may be identical and the config comparison may be
+            // false because the window was rebuilt from it this same pass.
+            let series_changed = window.sync_series(&overlay.targets);
+            let mut samples_changed = series_changed;
+            let mut sample_generation = window.sample_generation;
+            for (series, stored) in window.series.iter_mut().zip(stored) {
+                match stored {
+                    Some((generation, buffer)) if series.generation != generation => {
+                        series.samples = buffer;
+                        series.generation = generation;
+                        samples_changed = true;
+                        sample_generation = sample_generation.max(generation);
+                    }
+                    Some((generation, _)) => {
+                        sample_generation = sample_generation.max(generation);
+                    }
+                    // No buffer at all for a target: it has never answered, so
+                    // its generation stays where it was and the line is empty.
+                    None => {}
+                }
+            }
             let changed = window.dirty
                 || window.size != size
                 || window.position != position
@@ -743,20 +873,28 @@ impl OverlayManager {
             if config_changed {
                 window.config = overlay.clone();
             }
-            if samples_changed {
-                window.samples = sample_buffer;
-                window.sample_generation = sample_generation;
-            }
+            // Unconditional, and a maximum across the targets rather than a
+            // value taken from one of them: it answers "has the real graph
+            // started?", and a group where one host answered has started.
+            window.sample_generation = sample_generation;
             if !overlay.cosmetic_startup_prefill {
                 window.prefill = None;
             } else if sample_generation == 0 && (window.prefill.is_none() || config_changed) {
                 window.prefill = Some(PrefillState::new(overlay, Instant::now()));
             }
             if sample_generation > 0 {
-                if let Some(first_real) = window.samples.first() {
+                // Restart the reveal against the first real sample, which for a
+                // group is whichever target answered first.
+                let first_real = window
+                    .series
+                    .iter()
+                    .filter_map(|series| series.samples.first())
+                    .map(|sample| sample.timestamp)
+                    .min();
+                if let Some(first_real) = first_real {
                     if let Some(prefill) = window.prefill.as_ref() {
-                        if prefill.started_at > first_real.timestamp {
-                            window.prefill = Some(PrefillState::new(overlay, first_real.timestamp));
+                        if prefill.started_at > first_real {
+                            window.prefill = Some(PrefillState::new(overlay, first_real));
                         }
                     }
                 }
@@ -890,12 +1028,11 @@ impl OverlayManager {
         let mut window = OverlayWindow {
             hwnd,
             config: config.clone(),
-            samples: Vec::new(),
+            series: Vec::new(),
             prefill: config
                 .cosmetic_startup_prefill
                 .then(|| PrefillState::new(config, Instant::now())),
-            render_points: Vec::new(),
-            history_points: Vec::new(),
+            prefill_points: Vec::new(),
             history_dirty: true,
             border: BorderAnimator::new(),
             border_selected: selected,
@@ -914,6 +1051,11 @@ impl OverlayManager {
         // makes the configured startup effect visible on the very first frame,
         // rather than only after the next overlay reconciliation pass.
         window.border.update(config, selected, Instant::now());
+        // The series list has to exist before the first render, because that
+        // render is what puts something on screen. `apply` would otherwise only
+        // build it on its next pass, so the window would show one empty frame.
+        window.sync_series(&config.targets);
+        window.rebuild_history();
         // Give the layered window its first surface before making it visible.
         // Otherwise Windows can briefly retain the class background (white)
         // behind a fully transparent first frame.
@@ -949,47 +1091,98 @@ impl OverlayManager {
         if prefill_complete && (!prefill_was_completed || window.history_dirty) {
             window.rebuild_history();
         }
-        let prefill_samples = window
-            .prefill
-            .as_ref()
-            .map(|prefill| prefill.samples.as_slice());
+        let has_prefill = window.prefill.is_some();
         let prefill_progress = window
             .prefill
             .as_ref()
             .map(|prefill| prefill.progress(now))
             .unwrap_or(0.0);
-        let render_smooth = smooth || prefill_samples.is_some() || border.is_some();
-        let rendered = if let Some(samples) = prefill_samples {
+        let render_smooth = smooth || has_prefill || border.is_some();
+        let width = window.size.0.max(1) as u32;
+        let height = window.size.1.max(1) as u32;
+        // One borrow of the target list, taken once, because the colour of each
+        // line is the target's and the renderer wants them all at once. Zipped
+        // with the window's series, which `sync_series` keeps in the same order.
+        let targets: Vec<&TargetConfig> = window
+            .config
+            .targets
+            .iter()
+            .filter(|target| target.enabled)
+            .collect();
+        let rendered = if has_prefill {
             if prefill_complete {
-                render_graph_into_with_border(
-                    window.size.0.max(1) as u32,
-                    window.size.1.max(1) as u32,
+                let series: Vec<Series<'_>> = window
+                    .series
+                    .iter()
+                    .zip(targets.iter())
+                    .map(|(entry, target)| Series {
+                        line_color: &target.line_color,
+                        timeout_color: &target.timeout_color,
+                        samples: &entry.history,
+                    })
+                    .collect();
+                render_series_into_with_border(
+                    width,
+                    height,
                     &window.config,
-                    &window.history_points,
+                    &series,
                     now,
                     render_smooth,
                     border.as_ref(),
                     &mut window.pixels,
                 )
             } else {
-                render_prefill_into(
-                    window.size.0.max(1) as u32,
-                    window.size.1.max(1) as u32,
+                // The reveal draws the cosmetic curves only, and all of them
+                // into one buffer: rendering them in a loop would clear the
+                // pixels each pass and leave the last target's curve alone.
+                // Every curve is truncated to the same progress so they reveal
+                // left to right together.
+                window.prefill_points.clear();
+                for index in 0..targets.len() {
+                    let Some(samples) = window.prefill_samples(index) else {
+                        continue;
+                    };
+                    let count = (prefill_progress * samples.len() as f32).ceil() as usize;
+                    window
+                        .prefill_points
+                        .push(samples.iter().take(count).copied().collect::<Vec<_>>());
+                }
+                let series: Vec<Series<'_>> = targets
+                    .iter()
+                    .zip(window.prefill_points.iter())
+                    .map(|(target, samples)| Series {
+                        line_color: &target.line_color,
+                        timeout_color: &target.timeout_color,
+                        samples,
+                    })
+                    .collect();
+                render_series_into_with_border(
+                    width,
+                    height,
                     &window.config,
-                    samples,
+                    &series,
                     now,
-                    prefill_progress,
+                    render_smooth,
                     border.as_ref(),
-                    &mut window.render_points,
                     &mut window.pixels,
                 )
             }
         } else {
-            render_graph_into_with_border(
-                window.size.0.max(1) as u32,
-                window.size.1.max(1) as u32,
+            let series: Vec<Series<'_>> = window
+                .series
+                .iter()
+                .zip(targets.iter())
+                .map(|(entry, target)| Series {
+                    line_color: &target.line_color,
+                    timeout_color: &target.timeout_color,
+                    samples: &entry.samples,
+                })
+                .collect();
+            render_series_into_with_border(
+                width,
+                height,
                 &window.config,
-                &window.samples,
+                &series,
                 now,
                 smooth,
                 border.as_ref(),
@@ -1181,6 +1374,145 @@ fn wide(value: &str) -> Result<Vec<u16>, Box<dyn Error + Send + Sync>> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// The two cosmetic curves a group draws at startup must not be identical.
+    ///
+    /// The seed is the target's id, so this is what says the seed is actually
+    /// read. Two identical curves look like one host with a fat line, which is
+    /// the exact thing grouping exists to disambiguate.
+    #[test]
+    fn two_targets_get_different_startup_curves() {
+        let config = OverlayConfig::new();
+        let first = cosmetic_prefill_values(&config, "target-one");
+        let second = cosmetic_prefill_values(&config, "target-two");
+        assert_ne!(
+            first, second,
+            "two hosts of one group have the same fake latency history"
+        );
+
+        // Deterministic, so a restart does not reshuffle the reveal.
+        assert_eq!(first, cosmetic_prefill_values(&config, "target-one"));
+    }
+
+    /// A group's reveal holds one curve per **enabled** target, and the count
+    /// has to match the series the window draws, because `rebuild_history` and
+    /// the reveal index the two in step.
+    #[test]
+    fn the_startup_curves_match_the_enabled_targets() {
+        let mut config = OverlayConfig::new();
+        config.add_target();
+        assert_eq!(config.targets.len(), 2);
+
+        let before = PrefillState::new(&config, Instant::now());
+        assert_eq!(
+            before.samples.len(),
+            2,
+            "the reveal drew {} curves for 2 targets",
+            before.samples.len()
+        );
+
+        config.targets[1].enabled = false;
+        let after = PrefillState::new(&config, Instant::now());
+        assert_eq!(
+            after.samples.len(),
+            1,
+            "a disabled host still got a startup curve"
+        );
+    }
+
+    /// A target's series survives a change that is not about it.
+    ///
+    /// `sync_series` matches on the target id, so reordering, disabling a
+    /// sibling and editing a colour all have to leave the other targets' samples
+    /// and generations alone. Matching on position instead would silently reset
+    /// a line's history whenever a host above it in the list was removed.
+    #[test]
+    fn a_series_keeps_its_samples_across_a_reorder() {
+        let mut config = OverlayConfig::new();
+        config.add_target();
+        let mut series = Vec::new();
+        assert!(sync_series(&mut series, &config.targets));
+        assert_eq!(series.len(), 2);
+        series[0].generation = 7;
+        series[0].samples.push(SamplePoint {
+            value: Some(42),
+            timestamp: Instant::now(),
+            is_prefill: false,
+        });
+        // The target that has history, by id rather than by position: after the
+        // swap it is second, so anything checked by index would be looking at
+        // the other host's line.
+        let with_history = config.targets[0].id.clone();
+
+        config.targets.swap(0, 1);
+        assert!(sync_series(&mut series, &config.targets));
+
+        assert_eq!(
+            series
+                .iter()
+                .position(|entry| entry.target_id == with_history),
+            Some(1),
+            "the series did not follow the target through the reorder"
+        );
+        let moved = series.last().expect("two series");
+        assert_eq!(
+            moved.generation, 7,
+            "the target that moved lost its generation"
+        );
+        assert_eq!(
+            moved.samples.len(),
+            1,
+            "the target that moved lost its samples"
+        );
+    }
+
+    /// Adding a host grows the series list and asks for a frame.
+    ///
+    /// The "asks for a frame" half is the part that is easy to lose: a target
+    /// added while the samples and the config are both unchanged is invisible to
+    /// every other trigger in `apply`.
+    #[test]
+    fn adding_a_host_grows_the_series_list() {
+        let mut config = OverlayConfig::new();
+        let mut series = Vec::new();
+        assert!(sync_series(&mut series, &config.targets));
+        assert_eq!(series.len(), 1);
+
+        config.add_target();
+        assert!(
+            sync_series(&mut series, &config.targets),
+            "adding a host did not report a change, so no frame would be drawn"
+        );
+        assert_eq!(series.len(), 2);
+
+        // Idempotent: a pass with nothing changed reports nothing, or the
+        // renderer would redraw every frame for the rest of the session.
+        assert!(
+            !sync_series(&mut series, &config.targets),
+            "an unchanged pass reported a change and redraws forever"
+        );
+    }
+
+    /// Disabling one host removes its line and leaves the rest in place.
+    #[test]
+    fn disabling_a_host_drops_only_its_line() {
+        let mut config = OverlayConfig::new();
+        config.add_target();
+        let mut series = Vec::new();
+        sync_series(&mut series, &config.targets);
+        series[0].generation = 3;
+        series[1].generation = 9;
+        let first_generation = series[0].generation;
+
+        config.targets[1].enabled = false;
+        assert!(sync_series(&mut series, &config.targets));
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0].generation, first_generation,
+            "the remaining host's samples were reset"
+        );
+    }
 
     fn work_area() -> RECT {
         RECT {

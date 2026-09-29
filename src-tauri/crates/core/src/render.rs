@@ -15,6 +15,17 @@ pub struct SamplePoint {
     pub is_prefill: bool,
 }
 
+/// One target's line: its samples and the colours that identify it.
+///
+/// Colours travel with the samples rather than being looked up from the
+/// overlay, because they are per target and the overlay no longer has a single
+/// set of them. A group of one builds exactly one of these.
+pub struct Series<'a> {
+    pub line_color: &'a str,
+    pub timeout_color: &'a str,
+    pub samples: &'a [SamplePoint],
+}
+
 /// Render a graph into premultiplied RGBA bytes for a Win32 layered window.
 ///
 /// The native window path deliberately does not use egui or a GPU surface. This
@@ -33,6 +44,21 @@ pub fn render_graph_into(
     render_graph_into_with_border(width, height, config, samples, now, smooth, None, pixels)
 }
 
+#[cfg(test)]
+pub fn render_series_into(
+    width: u32,
+    height: u32,
+    config: &OverlayConfig,
+    series: &[Series<'_>],
+    now: Instant,
+    smooth: bool,
+    pixels: &mut Vec<u8>,
+) -> bool {
+    render_series_into_with_border(width, height, config, series, now, smooth, None, pixels)
+}
+
+/// The single-series path, kept because one target is the overwhelmingly common
+/// case and every existing caller and test means exactly this.
 #[allow(clippy::too_many_arguments)]
 pub fn render_graph_into_with_border(
     width: u32,
@@ -44,17 +70,27 @@ pub fn render_graph_into_with_border(
     border: Option<&BorderVisual>,
     pixels: &mut Vec<u8>,
 ) -> bool {
-    render_graph_into_internal(
-        width,
-        height,
-        config,
+    let target = config.first_target();
+    let series = [Series {
+        line_color: &target.line_color,
+        timeout_color: &target.timeout_color,
         samples,
-        now,
-        smooth,
-        &config.line_color,
-        border,
-        pixels,
-    )
+    }];
+    render_series_into_with_border(width, height, config, &series, now, smooth, border, pixels)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_series_into_with_border(
+    width: u32,
+    height: u32,
+    config: &OverlayConfig,
+    series: &[Series<'_>],
+    now: Instant,
+    smooth: bool,
+    border: Option<&BorderVisual>,
+    pixels: &mut Vec<u8>,
+) -> bool {
+    render_graph_into_internal(width, height, config, series, now, smooth, border, pixels)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -62,10 +98,9 @@ fn render_graph_into_internal(
     width: u32,
     height: u32,
     config: &OverlayConfig,
-    samples: &[SamplePoint],
+    series: &[Series<'_>],
     now: Instant,
     smooth: bool,
-    line_color: &str,
     border: Option<&BorderVisual>,
     pixels: &mut Vec<u8>,
 ) -> bool {
@@ -111,14 +146,6 @@ fn render_graph_into_internal(
     let short_px = if rotated { width as f32 } else { height as f32 };
     let visible_samples = config.window_seconds.max(1) as usize;
     let window_duration = Duration::from_secs(visible_samples as u64);
-    let start = if smooth {
-        samples.partition_point(|sample| {
-            now.saturating_duration_since(sample.timestamp) > window_duration
-        })
-    } else {
-        samples.len().saturating_sub(visible_samples)
-    };
-    let samples = &samples[start..];
     let step = long_px / visible_samples as f32;
 
     let y_max = config.max_y_ms.max(1) as f32;
@@ -144,55 +171,140 @@ fn render_graph_into_internal(
         }
     };
 
-    let mut timeout_paint = Paint::default();
-    let [r, g, b] = parse_hex_color(&config.timeout_color, [239, 68, 68]);
-    timeout_paint.set_color_rgba8(r, g, b, 255);
-    let mut timeout_builder = PathBuilder::new();
-    for (index, sample) in samples.iter().enumerate() {
-        let Some(x) = map_x(index, sample) else {
-            continue;
+    // The slice of one series that is still inside the visible window.
+    //
+    // Per series rather than once for the overlay: two targets of the same
+    // overlay do not have to have answered the same number of times, and a
+    // target that has just been added has none of the history the others have.
+    // Cropping them as one buffer would offset every line by however much the
+    // shorter series is short.
+    fn visible(
+        samples: &[SamplePoint],
+        smooth: bool,
+        now: Instant,
+        window_duration: Duration,
+        visible_samples: usize,
+    ) -> &[SamplePoint] {
+        let start = if smooth {
+            samples.partition_point(|sample| {
+                now.saturating_duration_since(sample.timestamp) > window_duration
+            })
+        } else {
+            samples.len().saturating_sub(visible_samples)
         };
-        if sample.value.is_none() {
-            let start = transform_point(
-                (x, top),
-                long_px,
-                short_px,
-                config.orientation,
-                config.mirrored,
-            );
-            let end = transform_point(
-                (x, bottom),
-                long_px,
-                short_px,
-                config.orientation,
-                config.mirrored,
-            );
-            timeout_builder.move_to(start.0, start.1);
-            timeout_builder.line_to(end.0, end.1);
-        }
-    }
-    if let Some(path) = timeout_builder.finish() {
-        pixmap.stroke_path(
-            &path,
-            &timeout_paint,
-            &Stroke {
-                width: 1.5,
-                ..Stroke::default()
-            },
-            Transform::identity(),
-            None,
-        );
+        &samples[start..]
     }
 
-    let mut real_line_paint = Paint::default();
-    let [r, g, b] = parse_hex_color(line_color, [74, 222, 128]);
-    real_line_paint.set_color_rgba8(r, g, b, 255);
-    let mut prefill_line_paint = Paint::default();
-    let [r, g, b] = parse_hex_color(&config.prefill_line_color, [100, 116, 139]);
-    prefill_line_paint.set_color_rgba8(r, g, b, 255);
     let stroke = Stroke {
         width: 1.5,
         ..Stroke::default()
+    };
+
+    // Timeout markers first, all series, so a line drawn afterwards sits on top
+    // of them rather than being cut by one.
+    for entry in series {
+        // A target that has never responded draws nothing. An empty slice would
+        // otherwise contribute a marker at every x if this were expressed as a
+        // gap, which is the opposite of what "no data yet" should look like.
+        if entry.samples.is_empty() {
+            continue;
+        }
+        let mut timeout_paint = Paint::default();
+        let [r, g, b] = parse_hex_color(entry.timeout_color, [239, 68, 68]);
+        timeout_paint.set_color_rgba8(r, g, b, 255);
+        let mut timeout_builder = PathBuilder::new();
+        let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+        for (index, sample) in samples.iter().enumerate() {
+            let Some(x) = map_x(index, sample) else {
+                continue;
+            };
+            if sample.value.is_none() {
+                let start = transform_point(
+                    (x, top),
+                    long_px,
+                    short_px,
+                    config.orientation,
+                    config.mirrored,
+                );
+                let end = transform_point(
+                    (x, bottom),
+                    long_px,
+                    short_px,
+                    config.orientation,
+                    config.mirrored,
+                );
+                timeout_builder.move_to(start.0, start.1);
+                timeout_builder.line_to(end.0, end.1);
+            }
+        }
+        if let Some(path) = timeout_builder.finish() {
+            pixmap.stroke_path(&path, &timeout_paint, &stroke, Transform::identity(), None);
+        }
+    }
+
+    // The prefill colour is shared by every target: it is the overlay's
+    // cosmetic line colour, and one muted colour for the whole reveal reads as
+    // one event rather than as N unrelated fake graphs.
+    let mut prefill_line_paint = Paint::default();
+    let [r, g, b] = parse_hex_color(&config.prefill_line_color, [100, 116, 139]);
+    prefill_line_paint.set_color_rgba8(r, g, b, 255);
+
+    for entry in series {
+        let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+        if samples.is_empty() {
+            continue;
+        }
+        let mut real_line_paint = Paint::default();
+        let [r, g, b] = parse_hex_color(entry.line_color, [74, 222, 128]);
+        real_line_paint.set_color_rgba8(r, g, b, 255);
+        draw_series(
+            &mut pixmap,
+            samples,
+            &real_line_paint,
+            &prefill_line_paint,
+            &stroke,
+            &map_x,
+            &map_y,
+            long_px,
+            short_px,
+            config.orientation,
+            config.mirrored,
+        );
+    }
+
+    if let Some(border) = border {
+        border::draw_border(&mut pixmap, width, height, border);
+    }
+    *pixels = pixmap.take();
+    true
+}
+
+/// Stroke one target's line, breaking it at timeouts and prefill boundaries.
+///
+/// Split out of the renderer so the per-target bookkeeping is written once
+/// rather than nested inside a loop over targets. The cost of that loop is that
+/// every one of these has to be reset per series; anything carried across
+/// iterations here would be a line joining two different hosts.
+#[allow(clippy::too_many_arguments)]
+fn draw_series(
+    pixmap: &mut Pixmap,
+    samples: &[SamplePoint],
+    real_line_paint: &Paint,
+    prefill_line_paint: &Paint,
+    stroke: &Stroke,
+    map_x: &dyn Fn(usize, &SamplePoint) -> Option<f32>,
+    map_y: &dyn Fn(u32) -> f32,
+    long_px: f32,
+    short_px: f32,
+    orientation: u16,
+    mirrored: bool,
+) {
+    let paint_for = |prefill: Option<bool>| {
+        if prefill == Some(true) {
+            prefill_line_paint
+        } else {
+            real_line_paint
+        }
     };
 
     let mut segment = PathBuilder::new();
@@ -206,13 +318,14 @@ fn render_graph_into_internal(
         };
         let Some(latency) = sample.value else {
             if in_segment {
-                let paint = if segment_prefill == Some(true) {
-                    &prefill_line_paint
-                } else {
-                    &real_line_paint
-                };
                 if let Some(path) = segment.finish() {
-                    pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(
+                        &path,
+                        paint_for(segment_prefill),
+                        stroke,
+                        Transform::identity(),
+                        None,
+                    );
                 }
                 segment = PathBuilder::new();
             }
@@ -227,44 +340,34 @@ fn render_graph_into_internal(
         if !in_segment || segment_prefill != Some(sample_prefill) {
             let previous_segment_prefill = segment_prefill;
             if in_segment {
-                let paint = if previous_segment_prefill == Some(true) {
-                    &prefill_line_paint
-                } else {
-                    &real_line_paint
-                };
                 if let Some(path) = segment.finish() {
-                    pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(
+                        &path,
+                        paint_for(previous_segment_prefill),
+                        stroke,
+                        Transform::identity(),
+                        None,
+                    );
                 }
                 segment = PathBuilder::new();
             }
-            let point = transform_point(
-                (x, y),
-                long_px,
-                short_px,
-                config.orientation,
-                config.mirrored,
-            );
+            let point = transform_point((x, y), long_px, short_px, orientation, mirrored);
             if let Some((previous_x, previous_y)) = last_point {
                 let previous = transform_point(
                     (previous_x, previous_y),
                     long_px,
                     short_px,
-                    config.orientation,
-                    config.mirrored,
+                    orientation,
+                    mirrored,
                 );
-                let connector_paint = if previous_segment_prefill == Some(true) {
-                    &prefill_line_paint
-                } else {
-                    &real_line_paint
-                };
                 let mut connector = PathBuilder::new();
                 connector.move_to(previous.0, previous.1);
                 connector.line_to(point.0, point.1);
                 if let Some(path) = connector.finish() {
                     pixmap.stroke_path(
                         &path,
-                        connector_paint,
-                        &stroke,
+                        paint_for(previous_segment_prefill),
+                        stroke,
                         Transform::identity(),
                         None,
                     );
@@ -273,56 +376,49 @@ fn render_graph_into_internal(
             } else {
                 segment.move_to(point.0, point.1);
                 if let Some(previous_y) = last_y {
-                    let resume = transform_point(
-                        (x, previous_y),
-                        long_px,
-                        short_px,
-                        config.orientation,
-                        config.mirrored,
-                    );
+                    // Resuming after a timeout starts at the next responding
+                    // sample's X at the last responding Y, so the line picks up
+                    // where it left off rather than jumping to the new value.
+                    let resume =
+                        transform_point((x, previous_y), long_px, short_px, orientation, mirrored);
                     segment.line_to(resume.0, resume.1);
                 }
             }
             in_segment = true;
             segment_prefill = Some(sample_prefill);
         } else {
-            let point = transform_point(
-                (x, y),
-                long_px,
-                short_px,
-                config.orientation,
-                config.mirrored,
-            );
+            let point = transform_point((x, y), long_px, short_px, orientation, mirrored);
             segment.line_to(point.0, point.1);
         }
         last_y = Some(y);
         last_point = Some((x, y));
     }
     if in_segment {
-        let paint = if segment_prefill == Some(true) {
-            &prefill_line_paint
-        } else {
-            &real_line_paint
-        };
         if let Some(path) = segment.finish() {
-            pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
+            pixmap.stroke_path(
+                &path,
+                paint_for(segment_prefill),
+                stroke,
+                Transform::identity(),
+                None,
+            );
         }
     }
-
-    if let Some(border) = border {
-        border::draw_border(&mut pixmap, width, height, border);
-    }
-    *pixels = pixmap.take();
-    true
 }
 
 const PREFILL_MAX_SAMPLES: usize = 512;
 
 /// Build a deterministic, plausible-looking cosmetic latency curve.
-pub fn cosmetic_prefill_values(config: &OverlayConfig) -> Vec<u32> {
+///
+/// Seeded from `seed` rather than from the overlay alone. With one target the
+/// overlay id is enough; with several, two targets sharing a curve would look
+/// like one host with a fat line, which is the thing a group exists to
+/// disambiguate.
+pub fn cosmetic_prefill_values(config: &OverlayConfig, seed: &str) -> Vec<u32> {
     let count = config.window_seconds.max(1).min(PREFILL_MAX_SAMPLES as u32) as usize;
     let mut hasher = DefaultHasher::new();
     config.id.hash(&mut hasher);
+    seed.hash(&mut hasher);
     let phase = (hasher.finish() % 360) as f32 * (std::f32::consts::PI / 180.0);
     let max_y = config.max_y_ms.max(1) as f32;
 
@@ -342,8 +438,12 @@ pub fn cosmetic_prefill_values(config: &OverlayConfig) -> Vec<u32> {
 }
 
 /// Build timestamped cosmetic samples that occupy one graph window.
-pub fn cosmetic_prefill_samples(config: &OverlayConfig, now: Instant) -> Vec<SamplePoint> {
-    let values = cosmetic_prefill_values(config);
+pub fn cosmetic_prefill_samples(
+    config: &OverlayConfig,
+    seed: &str,
+    now: Instant,
+) -> Vec<SamplePoint> {
+    let values = cosmetic_prefill_values(config, seed);
     let count = values.len();
     let window_duration = Duration::from_secs(config.window_seconds.max(1) as u64);
     values
@@ -383,17 +483,13 @@ pub fn render_prefill_into(
     let count = (progress * samples.len() as f32).ceil() as usize;
     points.clear();
     points.extend(samples.iter().take(count).copied());
-    render_graph_into_internal(
-        width,
-        height,
-        config,
-        points,
-        now,
-        true,
-        &config.line_color,
-        border,
-        pixels,
-    )
+    let line_color = &config.first_target().line_color;
+    let series = [Series {
+        line_color,
+        timeout_color: &config.first_target().timeout_color,
+        samples: points,
+    }];
+    render_series_into_with_border(width, height, config, &series, now, true, border, pixels)
 }
 
 /// Map logical graph coordinates to the physical layered-window coordinates.
@@ -476,6 +572,303 @@ mod tests {
             .collect()
     }
 
+    /// Where a colour was drawn: every `(row, column)` it covers.
+    ///
+    /// Positions rather than a pixel count, because two lines can overlap and
+    /// one can then hide the other, and a count cannot tell "hidden" from
+    /// "absent". A set of positions can: each host's own set has to match
+    /// whether it was drawn alone or beside another.
+    ///
+    /// The alpha is divided out before the comparison. tiny-skia antialiases a
+    /// 1.5px stroke, so a partially covered pixel is premultiplied to something
+    /// like half the colour, and matching on the stored bytes would find only
+    /// the fully-covered pixels in the middle of a line. That in turn would let
+    /// a test pass on the wrong colour entirely: an assertion for one host's
+    /// timeout marker can be satisfied by another host's *line*, because the
+    /// timeout pass runs first and the line pass draws over it.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn positions_of_color(pixels: &[u8], width: usize, color: [u8; 3]) -> Vec<(usize, usize)> {
+        pixels
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, pixel)| {
+                let alpha = pixel[3];
+                if alpha == 0 {
+                    return false;
+                }
+                let unpremultiplied = |channel: u8| {
+                    let scaled = u32::from(channel) * 255 / u32::from(alpha);
+                    scaled.min(255) as i32
+                };
+                let difference = (unpremultiplied(pixel[0]) - i32::from(color[0])).abs()
+                    + (unpremultiplied(pixel[1]) - i32::from(color[1])).abs()
+                    + (unpremultiplied(pixel[2]) - i32::from(color[2])).abs();
+                difference <= 24
+            })
+            .map(|(index, _)| (index / width, index % width))
+            .collect()
+    }
+
+    /// Render a whole set of hosts into one buffer.
+    #[allow(clippy::type_complexity)]
+    fn render_hosts(
+        config: &OverlayConfig,
+        entries: &[(&str, &str, &[SamplePoint])],
+        now: Instant,
+        smooth: bool,
+    ) -> Vec<u8> {
+        let entries: Vec<(&str, &str, &[SamplePoint])> = entries.to_vec();
+        let series: Vec<Series<'_>> = entries
+            .iter()
+            .map(|(line, timeout, points)| Series {
+                line_color: line,
+                timeout_color: timeout,
+                samples: points,
+            })
+            .collect();
+        let mut pixels = Vec::new();
+        assert!(render_series_into(
+            300,
+            100,
+            config,
+            &series,
+            now,
+            smooth,
+            &mut pixels
+        ));
+        pixels
+    }
+
+    /// Every host in a group is drawn, in its own colour, at its own height.
+    ///
+    /// The colours are checked separately because counting the total strokes
+    /// passes with two lines in one colour, which is the single thing a group
+    /// must never show.
+    #[test]
+    fn every_host_in_a_group_draws_in_its_own_colour_at_its_own_height() {
+        let mut config = OverlayConfig::new();
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        let slow = samples(&[Some(100); 40]);
+        let fast = samples(&[Some(900); 40]);
+
+        let pixels = render_hosts(
+            &config,
+            &[("#00ff00", "#ff0000", &slow), ("#0000ff", "#ff00ff", &fast)],
+            now,
+            false,
+        );
+
+        let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+        let blue = positions_of_color(&pixels, 300, [0, 0, 255]);
+        assert!(!green.is_empty(), "the slow host's line is missing");
+        assert!(!blue.is_empty(), "the fast host's line is missing");
+        let mean_row = |rows: &Vec<(usize, usize)>| {
+            rows.iter().map(|(row, _)| *row).sum::<usize>() / rows.len()
+        };
+        assert!(
+            mean_row(&green) > mean_row(&blue),
+            "100ms and 900ms on a shared 1000ms axis drew at the same height \
+             (green row {}, blue row {}), so they are one line",
+            mean_row(&green),
+            mean_row(&blue)
+        );
+    }
+
+    /// A host that has never answered draws nothing at all.
+    ///
+    /// The failure this guards is a line sitting along y0, which reads as "this
+    /// host is extremely fast" rather than "this host has said nothing".
+    #[test]
+    fn a_host_with_no_samples_draws_nothing() {
+        let config = OverlayConfig::new();
+        let now = Instant::now();
+        let answered = samples(&[Some(500); 40]);
+        let empty: [SamplePoint; 0] = [];
+
+        let with_empty = render_hosts(
+            &config,
+            &[
+                ("#00ff00", "#ff0000", &answered),
+                ("#0000ff", "#ff00ff", &empty),
+            ],
+            now,
+            false,
+        );
+        let alone = render_hosts(&config, &[("#00ff00", "#ff0000", &answered)], now, false);
+
+        assert_eq!(
+            with_empty, alone,
+            "a host with no samples drew something the answering host did not"
+        );
+    }
+
+    /// A timeout belongs to the host that had it, in that host's colour.
+    ///
+    /// A marker is a full-height vertical line, so on a shared plot one host's
+    /// timeout is otherwise indistinguishable from another's — which is why the
+    /// colour travels with the samples rather than being one "something went
+    /// wrong" red for the whole window.
+    #[test]
+    fn a_timeout_is_marked_in_its_own_host_colour_and_only_its_own() {
+        let config = OverlayConfig::new();
+        let now = Instant::now();
+        let steady = samples(&[Some(200); 40]);
+        // The last sample is a non-response, so the line breaks and a marker is
+        // drawn in the second host's timeout colour.
+        let mut gapped = samples(&[Some(200); 40]);
+        gapped.last_mut().expect("not empty").value = None;
+
+        let pixels = render_hosts(
+            &config,
+            &[
+                ("#00ff00", "#ff0000", &steady),
+                ("#0000ff", "#00ff00", &gapped),
+            ],
+            now,
+            false,
+        );
+
+        assert!(
+            !positions_of_color(&pixels, 300, [0, 255, 0]).is_empty(),
+            "the host that timed out did not mark in its own colour"
+        );
+        assert!(
+            positions_of_color(&pixels, 300, [255, 0, 0]).is_empty(),
+            "the host that never timed out drew a marker anyway"
+        );
+    }
+
+    /// Two hosts dropping at different seconds both mark, in their own colours.
+    ///
+    /// Two hosts dropping at the *same* second draw their markers over each
+    /// other and only the later one is visible — the same thing that happens to
+    /// two lines crossing, and unavoidable while a marker is a full-height
+    /// vertical line. So this uses different seconds, which is the case where
+    /// the per-host colour is what tells the two drops apart.
+    #[test]
+    fn two_hosts_dropping_both_mark_in_their_own_colours() {
+        let config = OverlayConfig::new();
+        let now = Instant::now();
+        // Different columns: with index-based positioning the sample at index N
+        // is always at the same x, so two hosts dropping at the same index would
+        // stack their markers and only the second would be visible.
+        let mut first = samples(&[Some(200); 40]);
+        first[33].value = None;
+        let mut second = samples(&[Some(400); 40]);
+        second[38].value = None;
+        second[39].value = None;
+
+        let pixels = render_hosts(
+            &config,
+            &[
+                ("#00ff00", "#ff0000", &first),
+                ("#0000ff", "#0000ff", &second),
+            ],
+            now,
+            false,
+        );
+
+        let red = positions_of_color(&pixels, 300, [255, 0, 0]);
+        let blue = positions_of_color(&pixels, 300, [0, 0, 255]);
+        assert!(!red.is_empty(), "the first host's marker is missing");
+        assert!(!blue.is_empty(), "the second host's marker is missing");
+        assert_ne!(
+            red[0].1, blue[0].1,
+            "both markers are in the same column, so one is hidden behind the \
+             other rather than the two being distinguishable"
+        );
+    }
+
+    /// A host's line is where it would be if it were the only one.
+    ///
+    /// The bookkeeping per target — the segment in progress, the last point, the
+    /// last Y — is the kind of thing that works for one line and silently draws
+    /// a diagonal from one host's last sample to another's first when there are
+    /// two. The two series are far apart vertically so neither can hide the
+    /// other, which makes the comparison exact.
+    #[test]
+    fn a_host_is_drawn_where_it_would_be_drawn_alone() {
+        let mut config = OverlayConfig::new();
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        let low = samples(&[Some(100); 30]);
+        let high = samples(&[Some(900); 30]);
+
+        let first_alone = render_hosts(&config, &[("#00ff00", "#ff0000", &low)], now, false);
+        let second_alone = render_hosts(&config, &[("#0000ff", "#00ff00", &high)], now, false);
+        let together = render_hosts(
+            &config,
+            &[("#00ff00", "#ff0000", &low), ("#0000ff", "#00ff00", &high)],
+            now,
+            false,
+        );
+
+        assert_eq!(
+            positions_of_color(&together, 300, [0, 255, 0]),
+            positions_of_color(&first_alone, 300, [0, 255, 0]),
+            "the first host's line moved because a second host was drawn"
+        );
+        assert_eq!(
+            positions_of_color(&together, 300, [0, 0, 255]),
+            positions_of_color(&second_alone, 300, [0, 0, 255]),
+            "the second host's line moved because a first host was drawn"
+        );
+    }
+
+    /// A newly added host is drawn where its own timestamps put it.
+    ///
+    /// A host added to an existing group has a handful of samples and none of the
+    /// history the others have. If the visible window were computed once for the
+    /// overlay and then applied to every series, the new host's samples would be
+    /// indexed against the *oldest* host's buffer: either dropped entirely, or
+    /// drawn as if they were 55 seconds old at the left of the plot. Both are
+    /// silent, and both look like the host has been dead for most of the window.
+    #[test]
+    fn a_newly_added_host_is_placed_by_its_own_timestamps() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        let now = Instant::now();
+        let long = samples(&[Some(100); 60]);
+
+        // Five samples as if the host had just been added: ages 5s down to 1s.
+        let fresh = samples(&[Some(900); 5]);
+        let oldest_age = fresh
+            .first()
+            .expect("not empty")
+            .timestamp
+            .elapsed()
+            .as_secs();
+
+        let pixels = render_hosts(
+            &config,
+            &[
+                ("#00ff00", "#ff0000", &long),
+                ("#0000ff", "#00ff00", &fresh),
+            ],
+            now,
+            true,
+        );
+
+        let blue = positions_of_color(&pixels, 300, [0, 0, 255]);
+        assert!(!blue.is_empty(), "the newly added host drew nothing");
+        let leftmost = blue
+            .iter()
+            .map(|(_, column)| *column)
+            .min()
+            .expect("not empty");
+        // Time runs right to left, so the newest sample is at the right edge and
+        // a sample `oldest_age` old is that fraction of the width in from it.
+        let expected_left = 300 - (300.0 * oldest_age as f32 / 30.0) as usize;
+        assert!(
+            leftmost >= expected_left.saturating_sub(6) && leftmost <= 300,
+            "the new host's line starts at column {leftmost}, but samples no \
+             older than {oldest_age}s in a 30s window belong at column \
+             {expected_left} or further right — its history is being cropped \
+             with the other host's"
+        );
+    }
+
     #[test]
     #[allow(clippy::chunks_exact_to_as_chunks)]
     fn transparent_background_stays_transparent() {
@@ -522,8 +915,8 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.window_seconds = 60;
         config.max_y_ms = 1_000;
-        let first = cosmetic_prefill_values(&config);
-        let second = cosmetic_prefill_values(&config);
+        let first = cosmetic_prefill_values(&config, "t");
+        let second = cosmetic_prefill_values(&config, "t");
         assert_eq!(first, second);
         assert!(!first.is_empty());
         assert!(first.iter().all(|value| (1..=1_000).contains(value)));
@@ -536,7 +929,7 @@ mod tests {
         config.window_seconds = 60;
         config.prefill_line_color = "#ff00ff".to_string();
         let now = Instant::now();
-        let samples = cosmetic_prefill_samples(&config, now);
+        let samples = cosmetic_prefill_samples(&config, "t", now);
         let mut early = Vec::new();
         let mut complete = Vec::new();
         let mut points = Vec::new();
@@ -576,9 +969,9 @@ mod tests {
         let now = Instant::now();
         let mut config = OverlayConfig::new();
         config.window_seconds = 60;
-        config.line_color = "#00ff00".to_string();
+        config.first_target_mut().line_color = "#00ff00".to_string();
         config.prefill_line_color = "#ff00ff".to_string();
-        let mut samples = cosmetic_prefill_samples(&config, now - Duration::from_secs(2));
+        let mut samples = cosmetic_prefill_samples(&config, "t", now - Duration::from_secs(2));
         samples.push(SamplePoint {
             value: Some(500),
             timestamp: now - Duration::from_secs(1),
@@ -617,7 +1010,7 @@ mod tests {
         let now = Instant::now();
         let mut config = OverlayConfig::new();
         config.window_seconds = 3;
-        config.line_color = "#00ff00".to_string();
+        config.first_target_mut().line_color = "#00ff00".to_string();
         config.prefill_line_color = "#ff00ff".to_string();
         let samples = vec![
             SamplePoint {
@@ -669,7 +1062,7 @@ mod tests {
         let now = Instant::now();
         let mut config = OverlayConfig::new();
         config.window_seconds = 30;
-        config.timeout_color = "#ff0000".to_string();
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
         let samples = vec![SamplePoint {
             value: None,
             timestamp: now - Duration::from_secs(15),
@@ -720,8 +1113,8 @@ mod tests {
             let mut config = OverlayConfig::new();
             config.orientation = orientation;
             config.window_seconds = 30;
-            config.line_color = "#00ff00".to_string();
-            config.timeout_color = "#ff0000".to_string();
+            config.first_target_mut().line_color = "#00ff00".to_string();
+            config.first_target_mut().timeout_color = "#ff0000".to_string();
             let (width, height) = if matches!(orientation, 90 | 270) {
                 (100, 300)
             } else {

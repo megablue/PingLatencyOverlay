@@ -80,7 +80,6 @@ pub struct OverlayConfig {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    pub probe: ProbeConfig,
 
     /// Graph rotation: 0, 90, 180 or 270 degrees.
     #[serde(default)]
@@ -88,10 +87,6 @@ pub struct OverlayConfig {
     /// Mirror the graph (combines with any orientation).
     #[serde(default)]
     pub mirrored: bool,
-    #[serde(default = "default_line_color")]
-    pub line_color: String,
-    #[serde(default = "default_timeout_color")]
-    pub timeout_color: String,
     #[serde(default)]
     pub position: Anchor,
 
@@ -128,9 +123,37 @@ pub struct OverlayConfig {
     /// Duration of the border fade-out, in seconds.
     #[serde(default = "default_border_fade_sec")]
     pub border_fade_sec: u32,
-    /// Ping timeout in milliseconds.
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u32,
+
+    /// The hosts this overlay graphs, each drawn as its own line.
+    ///
+    /// One target is one line on a shared plot, and an overlay with a single
+    /// target is what every configuration written before grouping existed. There
+    /// is no separate group type: a group is an overlay with more than one
+    /// target, so there is one code path rather than a single-target one and a
+    /// grouped one that could disagree.
+    ///
+    /// `normalize` guarantees this is never empty, so every reader can index
+    /// the first element rather than treat "no targets" as a state.
+    #[serde(default)]
+    pub targets: Vec<TargetConfig>,
+
+    /// The probe of a configuration written before targets existed.
+    ///
+    /// Consumed into a one-element `targets` list by `normalize` and never
+    /// written back, which is what keeps a migrated profile readable by an
+    /// older build: it keeps exactly the keys it already had.
+    #[serde(rename = "probe", default, skip_serializing)]
+    legacy_probe: Option<ProbeConfig>,
+    /// Legacy line colour, mapped onto the first target.
+    #[serde(rename = "lineColor", default, skip_serializing)]
+    legacy_line_color: Option<String>,
+    /// Legacy timeout colour, mapped onto the first target.
+    #[serde(rename = "timeoutColor", default, skip_serializing)]
+    legacy_timeout_color: Option<String>,
+    /// Legacy ping timeout, mapped onto the first target.
+    #[serde(rename = "timeoutMs", default, skip_serializing)]
+    legacy_timeout_ms: Option<u32>,
+
     /// Height of the Y axis on screen, in logical pixels.
     #[serde(default = "default_graph_height_px")]
     pub graph_height_px: u32,
@@ -185,7 +208,152 @@ impl ProbeConfig {
     }
 }
 
+/// One host drawn as one line on an overlay's shared plot.
+///
+/// Everything here is per host rather than per overlay. The rest of
+/// `OverlayConfig` is the appearance of the window and of the plot, which is
+/// shared by every target in it: one window, one X axis, one Y ceiling, one
+/// position. What cannot be shared is the probe itself, the timeout it is
+/// measured against, and the colours that identify which line is which.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetConfig {
+    /// Stable identity, unique within its overlay.
+    ///
+    /// This is what a probe task and a sample buffer are keyed by, so it has to
+    /// survive a rename or a reorder: changing it is indistinguishable from
+    /// deleting the target and adding another, and the graph starts over.
+    pub id: String,
+    /// Disabled targets keep their settings but are not probed and not drawn.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub probe: ProbeConfig,
+    /// Ping timeout in milliseconds.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u32,
+    /// Colour of this target's line.
+    #[serde(default = "default_line_color")]
+    pub line_color: String,
+    /// Colour of this target's timeout markers.
+    #[serde(default = "default_timeout_color")]
+    pub timeout_color: String,
+}
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+impl TargetConfig {
+    /// A new target, seeded from the defaults a first-ever overlay would use.
+    pub fn new() -> Self {
+        Self {
+            id: unique_id(),
+            enabled: true,
+            probe: ProbeConfig::Icmp {
+                host: "1.1.1.1".to_string(),
+            },
+            timeout_ms: default_timeout_ms(),
+            line_color: default_line_color(),
+            timeout_color: default_timeout_color(),
+        }
+    }
+
+    /// A new target that starts out looking like one the user already has.
+    ///
+    /// A group is usually built by adding a host next to an existing one, and a
+    /// new line in the same colour as the line above it is indistinguishable
+    /// from it. Copying the probe's shape and timeout is what makes an added
+    /// host feel like a variation on the same thing; the colours are given a
+    /// new value so the lines can be told apart, because that is the one thing
+    /// copying cannot usefully do.
+    pub fn like(source: &TargetConfig) -> Self {
+        Self {
+            id: unique_id(),
+            enabled: source.enabled,
+            probe: source.probe.clone(),
+            timeout_ms: source.timeout_ms,
+            line_color: next_line_color(source.line_color.as_str()),
+            timeout_color: source.timeout_color.clone(),
+        }
+    }
+
+    /// The host as it reads in a list: the name, without the port noise.
+    pub fn label(&self) -> &str {
+        let host = self.probe.host().trim();
+        if host.is_empty() {
+            "(no host)"
+        } else {
+            host
+        }
+    }
+}
+
+impl Default for TargetConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Ids are a millisecond timestamp and a monotonic counter, because two targets
+/// added in the same millisecond must not collide.
+fn unique_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{millis}-{sequence}")
+}
+
+/// A line colour for a target added next to an existing one.
+///
+/// Rotating the hue rather than shifting the value keeps the family
+/// recognisable: a group that started green and added three hosts is four
+/// greens of visibly different hue, which reads as one set. A target whose
+/// colour is already this far round comes back to the plain default, so the
+/// rotation is a cycle rather than a walk away from the user's choice.
+fn next_line_color(source: &str) -> String {
+    let [r, g, b] = parse_rgb(source);
+    // Roughly evenly spaced hues that stay legible on a transparent overlay.
+    const HUES: [[u8; 3]; 6] = [
+        [74, 222, 128],
+        [96, 165, 250],
+        [251, 146, 60],
+        [244, 114, 182],
+        [167, 139, 250],
+        [250, 204, 21],
+    ];
+    let distance = |candidate: &[u8; 3]| {
+        let dr = i32::from(r) - i32::from(candidate[0]);
+        let dg = i32::from(g) - i32::from(candidate[1]);
+        let db = i32::from(b) - i32::from(candidate[2]);
+        dr * dr + dg * dg + db * db
+    };
+    let closest = HUES
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, candidate)| distance(candidate))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let [r, g, b] = HUES[(closest + 1) % HUES.len()];
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Read `#rrggbb`, falling back to the default line colour.
+///
+/// Tolerant on purpose: a colour can be typed by hand into a profile file, and
+/// a value this cannot read should fall back to something legible rather than
+/// fail to load a whole profile over one key.
+fn parse_rgb(value: &str) -> [u8; 3] {
+    let hex = value.trim();
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    let parsed = (|| {
+        if hex.len() != 6 {
+            return None;
+        }
+        let component = |index: usize| u8::from_str_radix(&hex[index..index + 2], 16).ok();
+        Some([component(0)?, component(2)?, component(4)?])
+    })();
+    parsed.unwrap_or_else(|| parse_rgb(&default_line_color()))
+}
 
 impl Default for OverlayConfig {
     fn default() -> Self {
@@ -196,22 +364,12 @@ impl Default for OverlayConfig {
 impl OverlayConfig {
     /// A sensible starting point for a newly added overlay.
     pub fn new() -> Self {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or_default();
-        let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Self {
-            id: format!("{millis}-{sequence}"),
+            id: unique_id(),
             name: "New overlay".to_string(),
             enabled: true,
-            probe: ProbeConfig::Icmp {
-                host: "1.1.1.1".to_string(),
-            },
             orientation: 0,
             mirrored: false,
-            line_color: default_line_color(),
-            timeout_color: default_timeout_color(),
             position: Anchor::TopRight,
             window_seconds: default_window_seconds(),
             scale: default_scale(),
@@ -224,7 +382,11 @@ impl OverlayConfig {
             startup_border_effect: default_startup_border_effect(),
             border_animation_sec: default_border_animation_sec(),
             border_fade_sec: default_border_fade_sec(),
-            timeout_ms: default_timeout_ms(),
+            targets: vec![TargetConfig::new()],
+            legacy_probe: None,
+            legacy_line_color: None,
+            legacy_timeout_color: None,
+            legacy_timeout_ms: None,
             graph_height_px: default_graph_height_px(),
             max_y_ms: default_max_y_ms(),
             horizontal_margin_px: DEFAULT_HORIZONTAL_MARGIN_PX,
@@ -234,6 +396,32 @@ impl OverlayConfig {
             bg_opacity: default_bg_opacity(),
             monitor_device: None,
         }
+    }
+
+    /// The target a single-target overlay is really talking about.
+    ///
+    /// `normalize` guarantees at least one, so this is never a guess. It is the
+    /// accessor for the many places that care about one host — a list row, the
+    /// prefill seed, the window title of the overlay — so those places do not
+    /// each have to remember that indexing an empty list is a panic.
+    pub fn first_target(&self) -> &TargetConfig {
+        &self.targets[0]
+    }
+
+    pub fn first_target_mut(&mut self) -> &mut TargetConfig {
+        &mut self.targets[0]
+    }
+
+    /// A target with nothing in common with the ones already here.
+    ///
+    /// Used by an overlay's first target, where there is nothing to be like.
+    pub fn add_target(&mut self) -> &mut TargetConfig {
+        let target = match self.targets.first() {
+            Some(existing) => TargetConfig::like(existing),
+            None => TargetConfig::new(),
+        };
+        self.targets.push(target);
+        self.targets.last_mut().expect("just pushed")
     }
 }
 
@@ -346,6 +534,61 @@ fn anchor_has_vertical_edge(anchor: Anchor) -> bool {
     )
 }
 
+impl TargetConfig {
+    /// Clamp values that the UI might send out of range.
+    ///
+    /// A blank host is left alone rather than replaced. `validate` is what
+    /// refuses to load a profile with an empty host, so this cannot quietly
+    /// turn a host the user is mid-way through typing into a working ping.
+    pub fn normalize(&mut self) {
+        if self.timeout_ms == 0 {
+            self.timeout_ms = DEFAULT_TIMEOUT_MS;
+        }
+    }
+}
+
+impl OverlayConfig {
+    /// Fold a configuration written before targets existed into one.
+    ///
+    /// An overlay that already has targets keeps them and its legacy keys are
+    /// dropped, which is what stops a profile written by a newer build from
+    /// gaining a second host when an older one loads it.
+    ///
+    /// An overlay with *neither* targets nor a legacy probe is deliberately left
+    /// with none. Inventing a host would put `1.1.1.1` on someone's screen that
+    /// they never asked to ping, which is worse than refusing the file: it is a
+    /// confident wrong answer with no gap in the UI to notice it by. `validate`
+    /// rejects it instead, and the file is kept and reported.
+    fn migrate_probe_into_targets(&mut self) {
+        let legacy_probe = self.legacy_probe.take();
+        let legacy_line = self.legacy_line_color.take();
+        let legacy_timeout = self.legacy_timeout_color.take();
+        let legacy_timeout_ms = self.legacy_timeout_ms.take();
+
+        if self.targets.is_empty() {
+            // `Option` so "this file predates targets" is distinguishable from
+            // "this file has a target whose probe is missing".
+            if let Some(probe) = legacy_probe {
+                let mut target = TargetConfig {
+                    id: unique_id(),
+                    enabled: true,
+                    probe,
+                    timeout_ms: legacy_timeout_ms.unwrap_or_else(default_timeout_ms),
+                    line_color: legacy_line.unwrap_or_else(default_line_color),
+                    timeout_color: legacy_timeout.unwrap_or_else(default_timeout_color),
+                };
+                target.normalize();
+                self.targets.push(target);
+            }
+            return;
+        }
+
+        for target in &mut self.targets {
+            target.normalize();
+        }
+    }
+}
+
 impl Config {
     /// Clamp values that the UI might send out of range.
     pub fn normalize(&mut self) {
@@ -383,9 +626,10 @@ impl Config {
             o.vertical_margin_px = o
                 .vertical_margin_px
                 .clamp(MIN_MARGIN_OFFSET_PX, MAX_MARGIN_OFFSET_PX);
-            if o.timeout_ms == 0 {
-                o.timeout_ms = DEFAULT_TIMEOUT_MS;
-            }
+            // Migrates a pre-targets profile and guarantees at least one target,
+            // so the rest of this function and every reader downstream can
+            // index the list without asking whether it is empty.
+            o.migrate_probe_into_targets();
             if o.graph_height_px < MIN_GRAPH_HEIGHT_PX {
                 o.graph_height_px = MIN_GRAPH_HEIGHT_PX;
             }
@@ -1292,17 +1536,42 @@ pub fn validate(config: &Config) -> Result<(), String> {
                 overlay.id
             ));
         }
-        if overlay.probe.host().trim().is_empty() {
-            return Err(format!(
-                "overlay \"{}\" has an empty probe host",
-                overlay.id
-            ));
+        // Checked per host rather than per overlay, and naming the position: a
+        // group of four hosts is four chances to have a blank one, and "overlay
+        // X has an empty probe host" does not say which of them.
+        if overlay.targets.is_empty() {
+            return Err(format!("overlay \"{}\" has no host to probe", overlay.id));
         }
-        if matches!(overlay.probe, ProbeConfig::Tcp { port: 0, .. }) {
-            return Err(format!(
-                "overlay \"{}\" is missing its TCP port",
-                overlay.id
-            ));
+        let mut target_ids = HashSet::new();
+        for (index, target) in overlay.targets.iter().enumerate() {
+            if target.id.trim().is_empty() {
+                return Err(format!(
+                    "overlay \"{}\" has a host at position {} with an empty id",
+                    overlay.id,
+                    index + 1
+                ));
+            }
+            if !target_ids.insert(target.id.as_str()) {
+                return Err(format!(
+                    "target id \"{}\" is used more than once in overlay \"{}\"",
+                    target.id, overlay.id
+                ));
+            }
+            if target.probe.host().trim().is_empty() {
+                return Err(format!(
+                    "overlay \"{}\" host {} has an empty probe host",
+                    overlay.id,
+                    index + 1
+                ));
+            }
+            if matches!(target.probe, ProbeConfig::Tcp { port: 0, .. }) {
+                return Err(format!(
+                    "overlay \"{}\" host {} ({}) is missing its TCP port",
+                    overlay.id,
+                    index + 1,
+                    target.probe.host()
+                ));
+            }
         }
     }
     Ok(())
@@ -1371,6 +1640,16 @@ fn parse_config(raw: &str) -> Result<Config, serde_json::Error> {
 }
 
 /// Parse a file and check its overall shape before it is trusted as a profile.
+///
+/// Normalized **before** it is validated, not after, and the order is
+/// load-bearing. A profile written before hosts were grouped has no `targets`
+/// key at all, so validating first rejects every existing user's file — and
+/// the failure is "overlay has no host to probe", which describes the migration
+/// rather than anything the user did. Repairing first is also the natural order:
+/// normalize only fixes what it can (`marginPx`, `smoothDelayMs`, the legacy
+/// probe, an out-of-range number) and leaves everything validation is there to
+/// catch exactly as it found it — a blank host stays blank and a TCP port of
+/// zero stays zero.
 fn parse_and_validate(raw: &str) -> Result<Config, String> {
     let value: serde_json::Value =
         serde_json::from_str(strip_bom(raw)).map_err(|error| error.to_string())?;
@@ -1382,7 +1661,8 @@ fn parse_and_validate(raw: &str) -> Result<Config, String> {
             return Err("\"overlays\" must be an array".to_string());
         }
     }
-    let config: Config = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    let mut config: Config = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    config.normalize();
     validate(&config)?;
     Ok(config)
 }
@@ -1516,7 +1796,7 @@ mod tests {
         assert_eq!(overlay.startup_border_effect, BorderEffect::RgbLoop);
         assert_eq!(overlay.border_animation_sec, DEFAULT_BORDER_ANIMATION_SEC);
         assert_eq!(overlay.border_fade_sec, DEFAULT_BORDER_FADE_SEC);
-        assert_eq!(overlay.timeout_ms, 1_000);
+        assert_eq!(overlay.first_target().timeout_ms, 1_000);
         assert_eq!(overlay.graph_height_px, 60);
         assert_eq!(overlay.max_y_ms, 1_000);
         assert_eq!(overlay.horizontal_margin_px, 0);
@@ -1813,7 +2093,6 @@ mod tests {
                 prefill_animation_sec: 0,
                 border_animation_sec: 0,
                 border_fade_sec: MAX_BORDER_FADE_SEC + 1,
-                timeout_ms: 0,
                 graph_height_px: 1,
                 max_y_ms: 0,
                 orientation: 45,
@@ -1832,13 +2111,230 @@ mod tests {
         assert_eq!(overlay.prefill_animation_sec, MIN_PREFILL_ANIMATION_SEC);
         assert_eq!(overlay.border_animation_sec, MIN_BORDER_ANIMATION_SEC);
         assert_eq!(overlay.border_fade_sec, MAX_BORDER_FADE_SEC);
-        assert_eq!(overlay.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(overlay.first_target().timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(overlay.graph_height_px, MIN_GRAPH_HEIGHT_PX);
         assert_eq!(overlay.max_y_ms, DEFAULT_MAX_Y_MS);
         assert_eq!(overlay.orientation, 0);
         assert_eq!(overlay.horizontal_margin_px, MAX_MARGIN_OFFSET_PX);
         assert_eq!(overlay.vertical_margin_px, MIN_MARGIN_OFFSET_PX);
         assert_eq!(overlay.bg_opacity, 100);
+    }
+
+    /// The migration that makes every existing overlay a group of one.
+    ///
+    /// Without this a profile written before targets existed would load as an
+    /// overlay with nothing to probe, which is the "silently draws nothing"
+    /// shape: no error, no warning, just an empty window.
+    #[test]
+    fn a_pre_targets_profile_becomes_one_target() {
+        let mut config: Config = serde_json::from_str(
+            r##"{"overlays":[{"id":"legacy","name":"Work","probe":{"protocol":"tcp","host":"10.0.0.1","port":443},"lineColor":"#123456","timeoutColor":"#654321","timeoutMs":2500,"maxYMs":500}]}"##,
+        )
+        .expect("legacy config");
+
+        config.normalize();
+
+        let overlay = &config.overlays[0];
+        assert_eq!(overlay.targets.len(), 1);
+        let target = overlay.first_target();
+        assert_eq!(target.probe.host(), "10.0.0.1");
+        assert_eq!(target.probe.port(), 443);
+        assert_eq!(target.timeout_ms, 2500);
+        assert_eq!(target.line_color, "#123456");
+        assert_eq!(target.timeout_color, "#654321");
+        assert!(target.enabled);
+        assert!(!target.id.trim().is_empty());
+        // The group-level settings are untouched by the migration, which is the
+        // whole point: the window keeps the size and place the user chose.
+        assert_eq!(overlay.max_y_ms, 500);
+        assert_eq!(overlay.name, "Work");
+    }
+
+    /// A migrated profile keeps the keys an older build understands.
+    ///
+    /// The migration is only safe if it can be undone by the version that wrote
+    /// the file, so the legacy keys are dropped on write and the targets
+    /// written in their place. Anything else and downgrading would lose the
+    /// host.
+    ///
+    /// Checked by looking at the overlay object's own keys rather than by
+    /// searching the text: `probe` and `timeoutMs` legitimately appear inside
+    /// every target, so a substring search finds them and reports a pass that
+    /// is not one.
+    #[test]
+    fn a_migrated_profile_no_longer_writes_the_legacy_keys() {
+        let mut config: Config = serde_json::from_str(
+            r#"{"overlays":[{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"},"timeoutMs":2500}]}"#,
+        )
+        .expect("legacy config");
+        config.normalize();
+
+        let written = serde_json::to_value(&config).expect("serialize");
+        let overlay = &written["overlays"][0];
+
+        assert!(overlay.get("probe").is_none(), "{overlay}");
+        assert!(overlay.get("timeoutMs").is_none(), "{overlay}");
+        assert!(overlay.get("lineColor").is_none(), "{overlay}");
+        assert!(overlay.get("timeoutColor").is_none(), "{overlay}");
+        assert!(
+            overlay.get("targets").is_some(),
+            "the targets were not written at all: {overlay}"
+        );
+    }
+
+    /// A profile that already has targets must not gain one from its own
+    /// legacy keys, or reloading it would grow a host every launch.
+    #[test]
+    fn a_profile_that_already_has_targets_gains_none() {
+        let mut config: Config = serde_json::from_str(
+            r#"{"overlays":[{"id":"grouped","probe":{"protocol":"icmp","host":"9.9.9.9"},"targets":[{"id":"a","probe":{"protocol":"icmp","host":"1.1.1.1"}},{"id":"b","probe":{"protocol":"icmp","host":"8.8.8.8"}}]}]}"#,
+        )
+        .expect("config");
+
+        config.normalize();
+
+        let targets = &config.overlays[0].targets;
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].probe.host(), "1.1.1.1");
+        assert_eq!(targets[1].probe.host(), "8.8.8.8");
+    }
+
+    /// An overlay with no hosts at all is refused, not given one.
+    ///
+    /// The tempting repair is to hand it `1.1.1.1`, the same starting host a new
+    /// overlay gets. That would put a graph on somebody's screen that they never
+    /// asked to ping, with no error anywhere — a confident wrong answer. So the
+    /// file is rejected and kept, and the user is told.
+    #[test]
+    fn an_overlay_with_no_hosts_is_refused_rather_than_given_one() {
+        let mut config: Config =
+            serde_json::from_str(r#"{"overlays":[{"id":"empty"}]}"#).expect("config");
+        config.normalize();
+
+        assert!(
+            config.overlays[0].targets.is_empty(),
+            "a host was invented for an overlay that has none"
+        );
+        let error = validate(&config).expect_err("an overlay with no host must not load");
+        assert!(error.contains("no host to probe"), "{error}");
+    }
+
+    /// A zero timeout on any host is repaired, not just the first one.
+    #[test]
+    fn a_zero_timeout_is_repaired_on_every_host() {
+        let mut overlay = OverlayConfig::new();
+        let mut second = TargetConfig::new();
+        second.timeout_ms = 0;
+        overlay.targets.push(second);
+        let mut config = Config {
+            overlays: vec![overlay],
+            ..Config::default()
+        };
+
+        config.normalize();
+
+        assert!(config.overlays[0]
+            .targets
+            .iter()
+            .all(|target| target.timeout_ms == DEFAULT_TIMEOUT_MS));
+    }
+
+    /// Validation is per host, and it says which one. A group of four is four
+    /// chances to have a blank host and "overlay X" does not narrow that down.
+    #[test]
+    fn validation_reports_the_host_that_is_broken() {
+        let mut overlay = OverlayConfig::new();
+        let mut second = TargetConfig::new();
+        second.probe = ProbeConfig::Icmp {
+            host: "   ".to_string(),
+        };
+        overlay.targets.push(second);
+        let config = Config {
+            overlays: vec![overlay],
+            ..Config::default()
+        };
+
+        let error = validate(&config).expect_err("a blank host must not load");
+
+        assert!(
+            error.contains("host 2"),
+            "the message does not say which host: {error}"
+        );
+        assert!(error.contains("empty probe host"), "{error}");
+    }
+
+    /// Two targets sharing an id are two buffers under one name, and the
+    /// second silently overwrites the first's samples forever.
+    #[test]
+    fn validation_rejects_a_repeated_target_id() {
+        let mut overlay = OverlayConfig::new();
+        let mut second = TargetConfig::new();
+        second.id = overlay.first_target().id.clone();
+        overlay.targets.push(second);
+        let config = Config {
+            overlays: vec![overlay],
+            ..Config::default()
+        };
+
+        let error = validate(&config).expect_err("a repeated id must not load");
+        assert!(error.contains("more than once"), "{error}");
+    }
+
+    /// A TCP target with no port would otherwise be probed against port zero,
+    /// which is not a thing you can connect to and fails forever quietly.
+    #[test]
+    fn validation_rejects_a_tcp_host_with_no_port() {
+        let mut overlay = OverlayConfig::new();
+        overlay.first_target_mut().probe = ProbeConfig::Tcp {
+            host: "example.com".to_string(),
+            port: 0,
+        };
+        let config = Config {
+            overlays: vec![overlay],
+            ..Config::default()
+        };
+
+        let error = validate(&config).expect_err("port zero must not load");
+        assert!(error.contains("TCP port"), "{error}");
+    }
+
+    /// A host added next to an existing one gets its own colour, because two
+    /// lines in the same colour are one line as far as the reader is concerned.
+    #[test]
+    fn an_added_host_does_not_inherit_its_neighbours_colour() {
+        let mut overlay = OverlayConfig::new();
+        overlay.first_target_mut().line_color = "#4ade80".to_string();
+
+        let added = overlay.add_target().clone();
+
+        assert_ne!(added.line_color, "#4ade80");
+        assert!(is_hex_color(&added.line_color), "{}", added.line_color);
+        assert_ne!(added.id, overlay.first_target().id);
+    }
+
+    /// Ids come from a clock and a counter, so two hosts added in the same
+    /// millisecond must not collide.
+    #[test]
+    fn every_host_gets_its_own_id() {
+        let mut overlay = OverlayConfig::new();
+        for _ in 0..8 {
+            overlay.add_target();
+        }
+        let mut ids: Vec<&str> = overlay
+            .targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "two hosts shared an id");
+    }
+
+    fn is_hex_color(value: &str) -> bool {
+        value.len() == 7
+            && value.starts_with('#')
+            && value[1..].chars().all(|c| c.is_ascii_hexdigit())
     }
 
     fn store_at(root: &Path) -> Store {

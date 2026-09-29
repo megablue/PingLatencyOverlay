@@ -199,6 +199,20 @@ in `docs/SPEC.md` under *Config window layout*. This is the wiring behind it.
   create/rename/duplicate/delete editors on the Profiles page, and a list row
   sets only `selected_profile`. The load is `switch_profile`, separate from the
   selection precisely because switching is refused while `dirty`.
+- **`selected_target` is a SECOND view-only selection, and it has exactly the
+  rules `selected_id` has.** It starts as `None`, nothing auto-selects it, and
+  clearing it never touches the draft — staged edits live in
+  `config.overlays[..].targets`, never in the selection. Two independent
+  selections because the two are nested (which overlay, which of its hosts), and
+  **it is cleared wherever `selected_id` changes**: a host id belongs to the
+  overlay it was selected in, and an id carried across would either find nothing
+  (the editor draws nothing, which is confusing) or — if ids ever collided —
+  edit a host the user is not looking at. The editor resolves it with
+  `selected_target_in(overlay, selected)`, which finds by id and returns `None`
+  for anything that is not one of this overlay's hosts, so a stale selection
+  shows **no** editor rather than host 1's fields under host 2's highlight.
+  That second outcome is the worse one and the reason the lookup is by id rather
+  than by index.
 - `selected_id` (the overlay in pane 3) starts as `None` and is **view-only**:
   staged edits live in `self.config.overlays`, never in the selection, so it can
   be cleared freely. **Do not re-add a startup auto-selection** — it meant a
@@ -588,6 +602,64 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   at zero; positive values are composited by Windows.
 - **The graph uses the actual physical window dimensions.** Do not assume
   `windowSeconds * scale` is the drawable size under Windows DPI/text scaling.
+- **There is no `groups` array: a group is an overlay with N `targets`, and a
+  single-target overlay is what every pre-grouping profile migrates into.** One
+  code path rather than two is the whole reason; a grouped and an ungrouped path
+  would be two things that could disagree about how a line is placed. The legacy
+  `probe` / `timeoutMs` / `lineColor` / `timeoutColor` keys are
+  `skip_serializing` fields consumed in `migrate_probe_into_targets`, exactly like
+  `legacy_margin_px`. `normalize` guarantees `targets` is non-empty *unless the
+  overlay had no legacy probe either*, and `validate` rejects that case —
+  **inventing a host would put `1.1.1.1` on someone's screen they never asked to
+  ping**, which is the "confident wrong thing" shape. `a_pre_targets_profile_becomes_one_target`
+  and `an_overlay_with_no_hosts_is_refused_rather_than_given_one` pin both halves.
+- **`parse_and_validate` normalizes BEFORE it validates, and the order is
+  load-bearing.** Validating first rejects every existing user's file, because a
+  pre-grouping profile has no `targets` key at all, and the error it produces
+  ("overlay has no host to probe") describes the migration rather than anything
+  the user did. It is also the natural order: normalize only fixes what it can
+  and leaves a blank host blank and a TCP port of zero at zero, so nothing
+  validation is there to catch gets repaired away.
+- **Probe tasks are keyed by `(overlay_id, target_id)`, not by overlay id.**
+  `SampleStore` is therefore `HashMap<overlay id, HashMap<target id, SampleBuffer>>`
+  — nested rather than flat because the renderer walks all of one overlay's hosts
+  on every frame, and a flat map would make the cost of a group grow with the very
+  thing the lock protects. **One task per host, not one per overlay**: a probe
+  measures for as long as its timeout allows, so a task probing four hosts in
+  turn takes four timeouts per tick when they are all down. Separate tasks
+  overlap. A target id is only unique within its overlay, which is why the pair is
+  the key and why `validate` checks per overlay.
+- **Every host's line is drawn from its own series state**, and `draw_series`
+  resets the segment, the last point and the last Y per host. Carrying any of it
+  across iterations draws a diagonal from one host's last sample to another's
+  first — invisible with one line, so it shipped into the first draft of this.
+  `a_host_is_drawn_where_it_would_be_drawn_alone` compares each host's drawn
+  pixels with the group against them alone.
+- **A host's visible window is cropped per series, not once for the overlay.**
+  A newly added host has a handful of samples and none of the history the others
+  have; cropping them at one index drops them or pushes them to the left of where
+  their timestamps put them. `a_newly_added_host_is_placed_by_its_own_timestamps`
+  pins it.
+- **`sync_series` is a free function taking `&mut Vec<WindowSeries>`,** not a
+  method: a window owns an `HWND` and a `LayeredSurface`, so a method could only
+  be tested with a real window and the tests would skip off Windows. It matches
+  on target **id**, not position, so a reorder or a removal does not reset the
+  lines below it, and it returns whether it changed anything — a host added while
+  the samples and the rest of the config are both unchanged is invisible to every
+  other trigger in `apply`.
+- **The prefill is seeded by target id, not overlay id.** Seeding per overlay
+  gives every host of a group the same fake latency curve, which looks like one
+  host with a fat line — the exact thing grouping disambiguates.
+- **`OverlayWindow.sample_generation` is the max across hosts, not one host's.**
+  It answers "has the real graph started", and a group where one host answered
+  has started; the others draw an empty line rather than a fake one.
+- **Timeout markers are drawn in the host's own timeout colour, and the render
+  loop skips an empty series.** The colour is per host because a full-height
+  marker on a shared plot is otherwise indistinguishable from another host's.
+  In the pixel tests, unpremultiply the alpha before comparing colours — a 1.5px
+  antialiased stroke stores roughly half the colour at the edges, and matching
+  the raw bytes finds only the fully covered middle, which is how an assertion
+  meant for a timeout marker can be satisfied by another host's *line*.
 - **A monitor is a device name, and a missing one hides the overlay.**
   `MonitorInfo` is a plain struct with no Win32 in it and `resolve` is pure,
   because the interesting states — a panel left of the primary, one at 150%
