@@ -323,6 +323,19 @@ Behavior — what a theme may set, and where the files live — is in
   "fails as a confident wrong thing" shape: no parse error, no gap in the UI,
   just a window nobody can read. It caught its own test fixture, which had
   asserted that an unreadable edit produced no notices.
+- **A staged setting that something else re-reads every frame must be written
+  LIVE as well as to the draft.** `sync_theme` resolves the mode from
+  `prefs.ui.theme` — the *saved* value — every pass. A control that only wrote
+  `prefs_draft` would have its pick applied and then silently undone on the next
+  frame, which is the "briefly right, then it changes back" shape this app has
+  now produced twice. `choose_theme` writes both, which is also what makes
+  Discard work: `discard_prefs` restores `prefs`, and the same pass puts the
+  theme back. `choosing_a_theme_changes_it_and_survives_the_next_pass` drives
+  both and asserts the staging-only path does *not* change the mode.
+- **A test must not depend on the machine's Windows theme.** `System` resolves
+  from the developer's own setting, so a test written against it passes on a
+  light desktop and fails on a dark one. Pin an explicit `Light`/`Dark`
+  preference in tests that need a known mode.
 - **The mode is re-read on a clock, not on a notification.** `System` is the
   default, Windows changes its app theme with no message this process gets, and
   the registry read is cheap, so `sync_theme` looks every pass the way

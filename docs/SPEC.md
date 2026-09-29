@@ -244,9 +244,14 @@ from the program, so a theme can be written, shared and edited without a build.
 - The window has a **light** and a **dark** theme, and follows Windows by
   default: flipping Windows between light and dark changes the window, including
   while it is open.
-- A preference overrides that if you want it: **System** (follow Windows),
-  **Light**, or **Dark**. The tray's menu follows Windows either way, so an
-  explicit Light or Dark is the only case where the two can look different.
+- You pick between **System (follow Windows)**, **Light** and **Dark** in the
+  Global page, under Appearance. The System option also says which one it
+  currently resolved to, so you can see that it is following.
+- Choosing one takes effect immediately, the way the other Appearance settings
+  do, and **Discard** puts the previous one back. It still needs **Save** to
+  survive a restart, like the rest of the Global page.
+- The tray's menu follows Windows either way, so choosing Light or Dark is the
+  only case where the window and the tray menu can look different.
 - The default is System, so nothing changes for a user who has never set it.
 
 ## Config window layout
