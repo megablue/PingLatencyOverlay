@@ -54,6 +54,11 @@
   programs must be installed into the same directory.
 
 ## Overlay window
+- **Changes appear as you make them.** Editing a colour, a size, a position or a
+  host updates the overlay immediately, without pressing Save. Save is what
+  writes the profile file; it is not what applies your edits. Out-of-range values
+  are clamped as you type, so what the overlay shows while you drag is what gets
+  written.
 - Frameless, transparent background, always on top.
 - Click-through: mouse events pass to the window underneath as if it did not exist.
 - Renders a live line graph of latency samples, one tick per ping.
@@ -157,9 +162,11 @@
   identify its line: protocol, target, port, timeout, line colour and timeout
   colour. A host can also be switched off without being deleted.
 - **A host added next to an existing one is given a different line colour**
-  automatically, cycling through a small set of distinguishable hues. Two lines
+  automatically, stepping through a small set of distinguishable hues. Two lines
   in the same colour are one line as far as the reader is concerned, so the one
-  thing copying cannot usefully do is copy the colour.
+  thing copying cannot usefully do is copy the colour. The set is a cycle, so a
+  group larger than it has two hosts sharing a colour — never two neighbours,
+  because each step is relative to the host added before it.
 - **A timeout is a full-height vertical line in that host's own timeout colour.**
   Two hosts dropping in the same second draw their markers over each other and
   only the later one is visible, which is the same thing that happens to two

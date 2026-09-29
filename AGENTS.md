@@ -533,6 +533,38 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   other failure, because it is the answer that says *start one*. Lumping the
   ordinary answer in with a fault is what makes a working system look broken.
 
+### Live edits
+- **An overlay edit reaches the renderer without a Save.** Before the renderer
+  was its own process, `logic()` called `sync_overlays()` on **every frame** and
+  the in-process overlay manager re-read `self.config`, so any staged change was
+  on screen immediately. `a2e0404` turned that per-frame call into a pipe
+  message and put the message only on the save paths — so every appearance edit
+  silently became save-only, and the only edit that stayed live was the list
+  pane's enable toggle, because `ac58523` had added an explicit call for that
+  one action. **The regression was silent**: the overlay still appeared on Save,
+  so nothing failed and the app just stopped feeling live. If live updating ever
+  looks broken, check `sync_runtime_config` is still called from `logic()`
+  before suspecting the pipe.
+- **`sync_runtime_config` normalizes the draft IN PLACE before comparing, and
+  that order is load-bearing twice over.** Compared the other way — a normalized
+  `last_pushed` against an un-normalized draft — the two never match, so the
+  window sends the whole configuration on **every frame** for as long as it
+  stays open. That is not slow enough to look wrong: it is a pipe write and a
+  full config parse ten times a second, forever, with no symptom. It also makes
+  the drag story right, since a clamped value is what Save would write anyway.
+  `an_out_of_range_draft_settles_instead_of_resending` counts sends over 20
+  frames, which is the only way that bug is visible — there is nothing to assert
+  against except the count.
+- **The comparison is the affordability argument, so do not "simplify" it into
+  an unconditional push.** `Config` derives `PartialEq`, so an unchanged frame
+  costs a field comparison and *no clone*; the clone only happens when there is
+  something to send.
+- **`last_pushed` must be updated by every path that sends a config**, and
+  `persist_current` is the exception that proves it: it sends directly rather
+  than through `push_config` because it has to tell "written to disk" from
+  "renderer told" apart, and it updates the record **only on success** so a
+  failed send leaves `sync_runtime_config` still wanting to try.
+
 ### Supervision
 - **The tray supervises the pipe, not the child handle.** A lost pipe is a
   better signal than a child, because a hung renderer still holds its mutex

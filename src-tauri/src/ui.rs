@@ -903,6 +903,9 @@ pub struct PingApp {
     status: String,
     dirty: bool,
     confirm_delete: Option<String>,
+    /// What the renderer was last told, so `sync_runtime_config` can tell a
+    /// change from a frame that merely followed another.
+    last_pushed: Config,
     /// The connection to the renderer process, when one is running.
     ///
     /// `None` means the renderer is gone and could not be brought back, which is
@@ -1062,6 +1065,13 @@ impl PingApp {
             // arrival and the startup is not spent reading every profile file.
             last_page: Page::Overlays,
             rail_collapsed,
+            // Cloned before it is moved, and seeded with what is loaded: the
+            // `push_config` at the end of `new` tells the renderer exactly this,
+            // so the first `sync_runtime_config` has nothing to say. Seeding it
+            // with `Config::default()` instead would send the whole file once
+            // more on the first frame, which is harmless but means the record
+            // and the renderer disagree at startup for no reason.
+            last_pushed: config.clone(),
             config,
             // Cloned before the id is moved into `active_profile`, so the
             // Profiles page opens on whatever is already loaded.
@@ -1132,11 +1142,55 @@ impl PingApp {
         }
     }
 
-    /// Hand the current configuration to the renderer.
+    /// Hand the current configuration to the renderer, and record that we did.
+    ///
+    /// `last_pushed` is updated here rather than only at the call sites so that
+    /// every path which sends a config leaves the window and the renderer
+    /// agreeing about what the renderer has. `reconnect_renderer` in particular
+    /// attaches to a renderer started by somebody else, which knows nothing
+    /// about this profile; if it did not update the record, the next
+    /// `sync_runtime_config` would either send a redundant copy or — if this
+    /// send had failed — sit there convinced the renderer was already up to date.
     fn push_config(&mut self) {
         self.send(Message::SetConfig {
             config: self.config.clone(),
         });
+        self.last_pushed = self.config.clone();
+    }
+
+    /// Push the draft to the renderer as soon as it changes, without saving it.
+    ///
+    /// This is what makes an edit visible while you are still making it. It used
+    /// to happen by accident: before the renderer was its own process, `logic`
+    /// called `sync_overlays()` every frame and the overlay manager re-read the
+    /// in-memory config, so any staged change was on screen immediately. Moving
+    /// the renderer behind the pipe turned that per-frame call into a message,
+    /// and the message went only down the paths that used to save — so every
+    /// appearance edit silently became save-only. The only edit that stayed live
+    /// was the list pane's enable toggle, because that one had an explicit call
+    /// added to it at the time.
+    ///
+    /// **Normalized in place, before the comparison and not just before the
+    /// write.** Two reasons, and the second is the one that bites. `persist`
+    /// clamps, so an un-normalized draft would move the overlay as you dragged
+    /// it and then jump again on Save — the "briefly right, then it changes
+    /// back" shape this app has produced twice. And comparing a normalized
+    /// record against an un-normalized draft would never match, so the window
+    /// would send the whole configuration on *every single frame* for as long as
+    /// it stayed open. Normalizing into `self.config` first makes the two
+    /// comparable; it is also correct in its own right, because a clamped value
+    /// is what Save would write anyway, so the editor should show it.
+    ///
+    /// Returns whether anything was sent, which is what the test drives.
+    fn sync_runtime_config(&mut self) -> bool {
+        if !runtime_config_changed(&mut self.config, &self.last_pushed) {
+            return false;
+        }
+        self.send(Message::SetConfig {
+            config: self.config.clone(),
+        });
+        self.last_pushed = self.config.clone();
+        true
     }
 
     /// The window title, which names the profile that is currently loaded.
@@ -1350,16 +1404,14 @@ impl PingApp {
         }
     }
 
-    fn apply_runtime_config(&mut self) {
-        // Hand the draft to the renderer without writing it to disk. Existing
-        // probe tasks are reused by the renderer, so a style change does not
-        // interrupt a measurement in flight.
-        self.push_config();
-    }
-
     fn apply_saved_config(&mut self, next: Config) {
         self.config = next;
-        self.apply_runtime_config();
+        // A profile load changes what should be on screen, so it goes out now
+        // rather than waiting for the next pass of `sync_runtime_config`. The
+        // function would get there on the same frame, but a load is a discrete
+        // event and having it announce itself keeps the two paths from being
+        // one obviously-correct one and one that happens to be in step.
+        self.push_config();
     }
 
     /// Whether either draft has something to write.
@@ -1397,10 +1449,17 @@ impl PingApp {
             Ok(()) => {
                 self.config = next;
                 self.dirty = false;
+                // Sent directly rather than through `push_config`, because this
+                // path has to tell the two failures apart: the file reached disk
+                // and the renderer was never told is a different thing from a
+                // confident "Saved.", and the caller is what reports it. The
+                // record is still updated, and only on success — a failed send
+                // has to leave `sync_runtime_config` wanting to try again.
                 match self.try_send(&Message::SetConfig {
                     config: self.config.clone(),
                 }) {
                     Ok(()) => {
+                        self.last_pushed = self.config.clone();
                         self.status.clear();
                         true
                     }
@@ -1445,7 +1504,9 @@ impl PingApp {
         if changed {
             self.dirty = true;
             self.status.clear();
-            self.apply_runtime_config();
+            // The toggle is on screen before the user lets go of the mouse now,
+            // because `sync_runtime_config` sends anything the draft changed
+            // since last frame. Nothing to send here.
         }
     }
 
@@ -3671,6 +3732,25 @@ fn arriving_page_needs_profiles(from: Page, to: Page) -> bool {
     from != to && to == Page::Profiles
 }
 
+/// Whether the renderer has to be told about the draft on this frame.
+///
+/// Free rather than a method so it can be driven without a `PingApp`: the
+/// window owns a renderer connection and a texture, so a test that had to build
+/// one to exercise a two-field decision would not be worth writing.
+///
+/// `draft` is normalized **in place** before the comparison, and that is the
+/// load-bearing half. Comparing a normalized record against an un-normalized
+/// draft never matches, so the window would send the entire configuration on
+/// every frame for as long as it stayed open — which is not slow enough to look
+/// wrong and is exactly that: a pipe write and a full config parse ten times a
+/// second, forever. Normalizing first also means the editor shows the clamped
+/// value that Save would write, so a drag does not move the overlay and then
+/// jump back.
+fn runtime_config_changed(draft: &mut Config, last_pushed: &Config) -> bool {
+    draft.normalize();
+    draft != last_pushed
+}
+
 /// How a host is labelled in the detail pane's list.
 ///
 /// A blank host says so rather than showing nothing: a row with no text is a
@@ -3924,6 +4004,12 @@ impl App for PingApp {
         }
 
         self.reconnect_renderer();
+        if self.sync_runtime_config() {
+            // A pushed config asks the renderer for a frame, so nothing here
+            // needs to — but the window's own layout does, and this is the only
+            // place that knows something changed.
+            ctx.request_repaint();
+        }
         self.sync_border_preview();
         self.sync_profiles();
         self.sync_monitors();
@@ -4706,24 +4792,202 @@ mod tests {
         list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
         overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
         page_has_list_pane, pending_edits, profile_name_width, profile_row_contents,
-        profile_row_label, rail_width, requested_url, row_inner, selected_overlay_for_border,
-        selected_target_in, sync_monitor_list, sync_profile_cache, sync_theme, theme,
-        theme_choices, toggled_selection, ui_text_size, window_title, AboutKind, Frame, Mode, Page,
-        ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
-        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
-        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
-        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
-        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
-        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, UI_BACKGROUND,
-        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        profile_row_label, rail_width, requested_url, row_inner, runtime_config_changed,
+        selected_overlay_for_border, selected_target_in, sync_monitor_list, sync_profile_cache,
+        sync_theme, theme, theme_choices, toggled_selection, ui_text_size, window_title, AboutKind,
+        Frame, Mode, Page, ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS,
+        ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
+        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
+        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
+        PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH,
+        ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT,
+        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{
-        Anchor, ConfigNotice, OverlayConfig, ProbeConfig, ProfileEntry, TargetConfig,
+        Anchor, Config, ConfigNotice, OverlayConfig, ProbeConfig, ProfileEntry, TargetConfig,
     };
     use ping_latency_overlay_core::monitors::{self, MonitorInfo};
     use std::collections::HashMap;
     use std::time::Instant;
+
+    /// A staged edit reaches the renderer without a Save.
+    ///
+    /// This is the behaviour that went missing when the renderer became its own
+    /// process: the per-frame `sync_overlays()` the old in-process overlay
+    /// manager used was what made every edit live, and replacing it with a pipe
+    /// message put the message only on the save path. The regression was silent
+    /// — the overlay still appeared on Save — so nothing failed, the app just
+    /// quietly stopped feeling live.
+    #[test]
+    fn a_staged_edit_reaches_the_renderer_without_saving() {
+        let mut draft = Config::default();
+        let mut last_pushed = draft.clone();
+
+        // Nothing staged, nothing to send.
+        assert!(
+            !runtime_config_changed(&mut draft, &last_pushed),
+            "an untouched window sends the configuration every frame"
+        );
+
+        draft.overlays.push(OverlayConfig::new());
+        assert!(
+            runtime_config_changed(&mut draft, &last_pushed),
+            "a staged overlay never reached the renderer"
+        );
+        last_pushed = draft.clone();
+
+        // A colour, which is the edit that was silently save-only.
+        draft.overlays[0].first_target_mut().line_color = "#123456".to_string();
+        assert!(
+            runtime_config_changed(&mut draft, &last_pushed),
+            "a colour change never reached the renderer"
+        );
+        last_pushed = draft.clone();
+
+        // A size, which resizes the layered window.
+        draft.overlays[0].window_seconds = 120;
+        assert!(
+            runtime_config_changed(&mut draft, &last_pushed),
+            "a size change never reached the renderer"
+        );
+        last_pushed = draft.clone();
+
+        // A host, which is a probe change and not only an appearance one.
+        draft.overlays[0].add_target();
+        assert!(
+            runtime_config_changed(&mut draft, &last_pushed),
+            "adding a host never reached the renderer"
+        );
+    }
+
+    /// A frame where nothing changed sends nothing.
+    ///
+    /// The other half of the same behaviour, and the one that decides whether
+    /// it is affordable: this runs on every pass, so a version that pushed
+    /// unconditionally would serialise the whole configuration ten times a
+    /// second while the user reads the status bar.
+    #[test]
+    fn an_unchanged_window_sends_nothing() {
+        let mut draft = Config::default();
+        draft.overlays.push(OverlayConfig::new());
+        runtime_config_changed(&mut draft, &Config::default());
+        let mut last_pushed = draft.clone();
+
+        for _ in 0..50 {
+            assert!(
+                !runtime_config_changed(&mut draft, &last_pushed),
+                "an idle window is still sending"
+            );
+            last_pushed = draft.clone();
+        }
+    }
+
+    /// Normalization happens **before** the comparison, not only before a save.
+    ///
+    /// A draft holding an out-of-range value normalizes to the same thing the
+    /// renderer was last told, so it settles instead of resending the whole
+    /// configuration on every frame for as long as the window stays open. The
+    /// alternative is not a visible failure — it is a pipe write and a full
+    /// config parse ten times a second, forever.
+    #[test]
+    fn an_out_of_range_draft_settles_instead_of_resending() {
+        let mut draft = Config::default();
+        let mut overlay = OverlayConfig::new();
+        overlay.window_seconds = 5;
+        draft.overlays.push(overlay);
+
+        // The renderer was last told the clamped value.
+        let mut last_pushed = draft.clone();
+        last_pushed.normalize();
+
+        let mut sends = 0;
+        for _ in 0..20 {
+            if runtime_config_changed(&mut draft, &last_pushed) {
+                sends += 1;
+                last_pushed = draft.clone();
+            }
+        }
+
+        assert_eq!(
+            sends, 0,
+            "a draft that normalizes to what the renderer already has sent \
+             {sends} times in 20 frames"
+        );
+        assert_eq!(
+            draft.overlays[0].window_seconds,
+            ping_latency_overlay_core::config::MIN_WINDOW_SECONDS,
+            "the draft was not normalized in place, so the editor is still \
+             showing a value Save would clamp"
+        );
+    }
+
+    /// The value on screen while dragging is the value that gets written.
+    ///
+    /// These are the same claim as the test above seen from the other side: if
+    /// normalization happened only on the way to the renderer, the overlay would
+    /// move as the user dragged and then jump again on Save — the "briefly
+    /// right, then it changes back" shape this app has produced twice already.
+    #[test]
+    fn a_dragged_value_is_clamped_before_it_is_shown() {
+        let mut draft = Config::default();
+        let mut overlay = OverlayConfig::new();
+        overlay.scale = ping_latency_overlay_core::config::MAX_SCALE_INPUT + 500;
+        overlay.bg_opacity = 200;
+        draft.overlays.push(overlay);
+
+        assert!(runtime_config_changed(&mut draft, &Config::default()));
+
+        assert_eq!(
+            draft.overlays[0].scale,
+            ping_latency_overlay_core::config::MAX_SCALE_INPUT
+        );
+        assert_eq!(draft.overlays[0].bg_opacity, 100);
+    }
+
+    /// A host added next to an existing one is never given its colour.
+    ///
+    /// Two lines in one colour are one line as far as the reader is concerned,
+    /// so the host you just added must not look like the one it sits next to.
+    /// Adjacency is the property that holds at any size: past the size of the
+    /// palette the rotation cycles and two hosts further apart can share a
+    /// colour, and pretending otherwise would be a claim the code cannot keep.
+    #[test]
+    fn a_host_added_next_to_another_never_shares_its_colour() {
+        let mut overlay = OverlayConfig::new();
+        for _ in 0..12 {
+            overlay.add_target();
+        }
+
+        let colours: Vec<&str> = overlay
+            .targets
+            .iter()
+            .map(|target| target.line_color.as_str())
+            .collect();
+        for (index, pair) in colours.windows(2).enumerate() {
+            assert_ne!(
+                pair[0],
+                pair[1],
+                "hosts {} and {} were both given {}",
+                index + 1,
+                index + 2,
+                pair[0]
+            );
+        }
+
+        // Within one palette's worth they are all distinct, which is what makes
+        // the neighbours of the common case separable rather than merely
+        // different from each other.
+        let first_six = &colours[..6];
+        let mut sorted = first_six.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            first_six.len(),
+            "the palette does not have six distinct colours"
+        );
+    }
 
     fn overlay_with_hosts(count: usize) -> OverlayConfig {
         let mut overlay = OverlayConfig::new();

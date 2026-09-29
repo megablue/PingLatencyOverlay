@@ -261,9 +261,16 @@ impl TargetConfig {
     /// A group is usually built by adding a host next to an existing one, and a
     /// new line in the same colour as the line above it is indistinguishable
     /// from it. Copying the probe's shape and timeout is what makes an added
-    /// host feel like a variation on the same thing; the colours are given a
-    /// new value so the lines can be told apart, because that is the one thing
-    /// copying cannot usefully do.
+    /// host feel like a variation on the same thing; the line colour is moved
+    /// one step round the palette instead, because that is the one thing copying
+    /// cannot usefully do. The timeout colour is copied: it says "this host did
+    /// not answer" rather than "this is this host", so a group reading alike is
+    /// the point.
+    ///
+    /// The palette is a cycle, so past its size two hosts further apart can
+    /// share a colour. Adjacent hosts never do, and that is the property worth
+    /// having — the pair a reader is comparing is the pair drawn next to each
+    /// other.
     pub fn like(source: &TargetConfig) -> Self {
         Self {
             id: unique_id(),
@@ -305,11 +312,17 @@ fn unique_id() -> String {
 
 /// A line colour for a target added next to an existing one.
 ///
+/// Steps one entry round a small fixed palette, picking the entry nearest the
+/// colour it was given so a hand-picked colour still lands somewhere sensible.
 /// Rotating the hue rather than shifting the value keeps the family
 /// recognisable: a group that started green and added three hosts is four
-/// greens of visibly different hue, which reads as one set. A target whose
-/// colour is already this far round comes back to the plain default, so the
-/// rotation is a cycle rather than a walk away from the user's choice.
+/// greens of visibly different hue, which reads as one set.
+///
+/// It is a **cycle**, not a walk. A target whose colour is already this far
+/// round comes back to the plain default rather than drifting further from what
+/// the user chose, which means a group larger than the palette has two hosts
+/// sharing a colour — never two neighbours, because each step is relative to
+/// the host added before it.
 fn next_line_color(source: &str) -> String {
     let [r, g, b] = parse_rgb(source);
     // Roughly evenly spaced hues that stay legible on a transparent overlay.
@@ -412,11 +425,16 @@ impl OverlayConfig {
         &mut self.targets[0]
     }
 
-    /// A target with nothing in common with the ones already here.
+    /// Append a host modelled on the one above it.
     ///
-    /// Used by an overlay's first target, where there is nothing to be like.
+    /// **The last target, not the first.** The colour walk in
+    /// [`TargetConfig::like`] moves one step from whatever it is given, so
+    /// copying from a fixed donor gives every added host the same colour — five
+    /// additions to a group produce five lines drawn over each other in the
+    /// second palette entry. Copying from the end makes the walk continue, so
+    /// each new host is unlike the one directly above it.
     pub fn add_target(&mut self) -> &mut TargetConfig {
-        let target = match self.targets.first() {
+        let target = match self.targets.last() {
             Some(existing) => TargetConfig::like(existing),
             None => TargetConfig::new(),
         };
