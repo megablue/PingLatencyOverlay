@@ -722,7 +722,7 @@ pub struct GlobalPrefs {
 }
 
 /// Preferences that belong to the Config window rather than to a profile.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPrefs {
     /// Whether the navigation rail is collapsed to its icons.
@@ -734,6 +734,14 @@ pub struct UiPrefs {
     /// the version belongs.
     #[serde(default)]
     pub show_version_in_title: bool,
+    /// Whether selecting an overlay animates that overlay's border.
+    ///
+    /// On by default: the border is what ties a row in the Overlays list to the
+    /// window on screen. Off suppresses only that preview; the per-overlay
+    /// startup effect (`OverlayConfig::startup_border_effect`) is a separate
+    /// setting, configured in the editor.
+    #[serde(default = "default_true")]
+    pub selection_border_animation: bool,
     /// Which of a theme's two files the window uses.
     ///
     /// `System` by default, so the window and the native tray menu agree without
@@ -741,6 +749,23 @@ pub struct UiPrefs {
     /// choice is the only way they can disagree.
     #[serde(default)]
     pub theme: ThemeMode,
+}
+
+/// Hand-written rather than derived because one field defaults to on.
+///
+/// A derive can only produce `false` for a bool, so a derived `Default` would
+/// disagree with the serde default used when the key is missing from an
+/// existing `globalconfig.json`: `GlobalPrefs::default()` is what a missing or
+/// unreadable file yields.
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            rail_collapsed: false,
+            show_version_in_title: false,
+            selection_border_animation: true,
+            theme: ThemeMode::System,
+        }
+    }
 }
 
 /// Which of a theme's two files the Config window uses.
@@ -2621,6 +2646,39 @@ mod tests {
         std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
         assert!(
             !store.read_global_prefs().ui.show_version_in_title,
+            "a ui key without the preference must fall back to the default"
+        );
+    }
+
+    #[test]
+    fn the_selection_border_animation_defaults_on_and_round_trips() {
+        let root = TestDir::new("prefs-selection-border");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+
+        assert!(
+            store.read_global_prefs().ui.selection_border_animation,
+            "the border preview is on unless it is turned off"
+        );
+
+        let prefs = GlobalPrefs {
+            ui: UiPrefs {
+                selection_border_animation: false,
+                ..UiPrefs::default()
+            },
+        };
+        store.write_global_prefs(&prefs).expect("write prefs");
+        assert!(
+            !store.read_global_prefs().ui.selection_border_animation,
+            "the preference did not survive a round trip"
+        );
+
+        // A file written before the preference existed must not fail to load,
+        // and must not silently turn the animation off.
+        let raw = store.global_config_path().to_string_lossy().to_string();
+        std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
+        assert!(
+            store.read_global_prefs().ui.selection_border_animation,
             "a ui key without the preference must fall back to the default"
         );
     }

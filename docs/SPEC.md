@@ -99,7 +99,9 @@
     Selecting an overlay in the list activates the RGB loop; losing the
     selection, leaving the Overlays page, or closing the Config window starts
     the fade and eventually disables the border. A border therefore animates
-    only while you are actually looking at that overlay's settings.
+    only while you are actually looking at that overlay's settings. The
+    selection animation can be turned off in the Global page under
+    **Appearance**; that leaves the startup effect alone.
   - Border animation uses a dedicated 60 FPS redraw path and a 3 px inline
     border, independent of the graph Smooth Rendering setting.
 - Y axis:
@@ -207,12 +209,14 @@
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
   be stored. Preferences live under a single `ui` object, currently
-  `ui.railCollapsed`, `ui.showVersionInTitle` and `ui.theme`; writing
-  preferences rewrites that object and nothing else, so the active profile
-  pointer and any key a future version adds survive. A file that is missing,
-  unparseable or holds unrelated keys simply yields the defaults.
-  `ui.showVersionInTitle` is off by default, because the window title is
-  already long and the About page is where the version belongs.
+  `ui.railCollapsed`, `ui.showVersionInTitle`, `ui.selectionBorderAnimation`
+  and `ui.theme`; writing preferences rewrites that object and nothing else, so
+  the active profile pointer and any key a future version adds survive. A file
+  that is missing, unparseable or holds unrelated keys simply yields the
+  defaults. `ui.showVersionInTitle` is off by default, because the window title
+  is already long and the About page is where the version belongs;
+  `ui.selectionBorderAnimation` is on by default, because the border is what
+  ties the selected row to the window on screen.
 - `~/.config/.PingLatencyOverlay/rules.json` holds the auto profile switching
   rules, app-wide like the preferences. It is a file of its own rather than a
   key in `globalconfig.json` because the tray re-reads it when it changes;
@@ -391,7 +395,12 @@ from the program, so a theme can be written, shared and edited without a build.
   puts the rail back. The Appearance group also holds **Show the version in the
   window title**, which appends the version in brackets to the title
   (`PingLatencyOverlay - Current Profile: Home (v0.1.68)`). Like the rail
-  checkbox it previews immediately and is written only on Save. The About page
+  checkbox it previews immediately and is written only on Save. The group's
+  remaining checkbox is **Animate the selected overlay's border**, the switch
+  for the selection preview described under *Overlay window*: turning it off
+  stops that animation for every selection, including the first overlay a
+  profile switch selects, while the per-overlay startup border effect is
+  untouched. It previews immediately and is written only on Save, like the rest. The About page
   has no list either, so its detail pane spans the same full width, and is
   read-only and centred: the app icon, then one column of lines — the app name
   large, the tagline under it, the version, then the repository, the copyright

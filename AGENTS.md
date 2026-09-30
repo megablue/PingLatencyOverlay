@@ -316,13 +316,22 @@ in `docs/SPEC.md` under *Config window layout*. This is the wiring behind it.
   already selected, and the blank-area hit target. `delete_overlay` and
   `switch_profile` still focus an overlay, being deliberate actions on a
   specific row or profile rather than a startup default.
-- `selected_overlay_for_border` encodes **three** conditions, not one: the
-  window is open, the Overlays page is showing, and something is selected. The
-  page condition went missing for a release, leaving the last overlay's border
-  animating on the Profiles and Global pages. It is the documented exception to
-  "test a trigger by driving it" below: here the predicate *is* the mechanism,
-  because `sync_overlays` calls it every frame and hands the result straight to
-  `overlays.apply`, so a table over the function is the whole test.
+- `selected_overlay_for_border` encodes **four** conditions, not one: the
+  window is open, the Overlays page is showing, something is selected, and the
+  selection border animation is enabled. The page condition went missing for a
+  release, leaving the last overlay's border animating on the Profiles and
+  Global pages. It is the documented exception to "test a trigger by driving
+  it" below: here the predicate *is* the mechanism, because
+  `sync_border_preview` calls it every frame and sends only what changed, so a
+  table over the function is the whole test
+  (`the_border_preview_only_runs_on_the_overlays_page`).
+- **The selection-border toggle is written to `prefs` and `prefs_draft` by the
+  one helper `set_selection_border_animation`, because `sync_border_preview`
+  reads the live value every pass.** A draft-only write leaves the live value
+  unchanged, so the border keeps animating and the control looks dead
+  (`the_selection_border_toggle_is_staged_and_live`). It gates only the
+  selection preview — the per-overlay `startup_border_effect` is a separate
+  setting and this preference does not touch it.
 - The deselect strip must be registered with `ui.interact`, never laid out with
   `allocate_exact_size`. `interact` calls `create_widget` and touches no cursor,
   so the hit target adds nothing to the scroll area's content; a real widget of

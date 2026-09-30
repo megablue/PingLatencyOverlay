@@ -1007,6 +1007,21 @@ fn choose_theme(
     prefs.ui.theme = choice;
 }
 
+/// Stage the selection-border toggle, and make it the live value at the same
+/// time.
+///
+/// Both halves for the same reason `choose_theme` writes both: `sync_border_preview`
+/// runs every pass and reads the live preference, so a control that only wrote
+/// the draft would leave the border animating and the setting looking dead.
+fn set_selection_border_animation(
+    prefs: &mut config::GlobalPrefs,
+    draft: &mut config::GlobalPrefs,
+    enabled: bool,
+) {
+    draft.ui.selection_border_animation = enabled;
+    prefs.ui.selection_border_animation = enabled;
+}
+
 impl PingApp {
     pub fn new(cc: &CreationContext<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let position_picker = PositionPicker::new(&cc.egui_ctx);
@@ -1393,6 +1408,7 @@ impl PingApp {
             self.config_visible,
             self.page,
             self.selected_id.as_deref(),
+            self.prefs.ui.selection_border_animation,
         )
         .map(str::to_string);
         if preview == self.border_preview {
@@ -2531,6 +2547,32 @@ impl PingApp {
                 {
                     self.prefs_draft.ui.show_version_in_title = show_version;
                     self.prefs.ui.show_version_in_title = show_version;
+                    self.prefs_dirty = true;
+                }
+
+                // `sync_border_preview` reads the live preference every pass, so
+                // this writes both through the helper, like `choose_theme`. The
+                // border fades the moment it is unticked; Save is what makes
+                // that survive a restart.
+                let mut selection_border = self.prefs_draft.ui.selection_border_animation;
+                if ui
+                    .checkbox(
+                        &mut selection_border,
+                        "Animate the selected overlay's border",
+                    )
+                    .on_hover_text(
+                        "Highlights the overlay whose settings are open. Switching \
+                         profiles selects that profile's first overlay, so its \
+                         border is shown then too. The startup border effect is a \
+                         separate, per-overlay setting.",
+                    )
+                    .changed()
+                {
+                    set_selection_border_animation(
+                        &mut self.prefs,
+                        &mut self.prefs_draft,
+                        selection_border,
+                    );
                     self.prefs_dirty = true;
                 }
 
@@ -4498,23 +4540,25 @@ fn profile_name_field(
 
 /// The overlay whose border is previewed for the current selection, if any.
 ///
-/// Three things have to line up, and the page was the one that was missing: the
-/// Config window has to be open, the Overlays page has to be the one on screen,
-/// and an overlay has to be selected. Leaving the Overlays page used to leave
-/// the last overlay's border animating, because this only asked whether the
-/// window was visible.
+/// Four things have to line up: the Config window open, the Overlays page on
+/// screen, an overlay selected, and the selection border animation enabled.
+/// The page condition went missing for a release, leaving the last overlay's
+/// border animating on the Profiles and Global pages.
+///
+/// The animation flag belongs here rather than at the send site so the table
+/// test over this function still covers it.
 ///
 /// Unlike the profile-count trigger in `sync_profile_cache`, a table over this
 /// function is the whole mechanism rather than a predicate standing in for one:
-/// `sync_overlays` calls it every frame and hands the answer straight to
-/// `overlays.apply`, so nothing has to act on the result for the test to mean
-/// anything.
+/// `sync_border_preview` calls it every frame and sends only what changed, so
+/// nothing has to act on the result for the test to mean anything.
 fn selected_overlay_for_border(
     config_visible: bool,
     page: Page,
     selected_id: Option<&str>,
+    animation_enabled: bool,
 ) -> Option<&str> {
-    if config_visible && page == Page::Overlays {
+    if config_visible && page == Page::Overlays && animation_enabled {
         selected_id
     } else {
         None
@@ -5380,15 +5424,15 @@ mod tests {
         page_has_list_pane, pending_edits, profile_name_width, profile_row_contents,
         profile_row_label, rail_width, requested_url, row_inner, rule_error,
         runtime_config_changed, selected_overlay_for_border, selected_target_in,
-        sync_auto_preview_text, sync_monitor_list, sync_profile_cache, sync_theme, theme,
-        theme_choices, toggled_selection, ui_text_size, window_title, AboutKind, Frame, Mode, Page,
-        ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
-        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
-        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
-        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
-        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
-        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, UI_BACKGROUND,
-        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        set_selection_border_animation, sync_auto_preview_text, sync_monitor_list,
+        sync_profile_cache, sync_theme, theme, theme_choices, toggled_selection, ui_text_size,
+        window_title, AboutKind, Frame, Mode, Page, ProfileSnapshot, ThemeMode,
+        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
+        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
+        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL,
+        OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
+        RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
+        STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{
@@ -6284,6 +6328,37 @@ mod tests {
              which is exactly why choose_theme has to do both"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The selection-border toggle is written to the draft and to the live
+    /// preference, for the same reason the theme pick is.
+    ///
+    /// `sync_border_preview` runs every pass and reads the live preference, so
+    /// a checkbox that only staged into `prefs_draft` would leave the border
+    /// animating — the setting would look dead until something else re-synced.
+    #[test]
+    fn the_selection_border_toggle_is_staged_and_live() {
+        let mut prefs = config::GlobalPrefs::default();
+        let mut draft = config::GlobalPrefs::default();
+        assert!(
+            prefs.ui.selection_border_animation,
+            "the selection border animates unless it is turned off"
+        );
+
+        set_selection_border_animation(&mut prefs, &mut draft, false);
+        assert!(
+            !draft.ui.selection_border_animation,
+            "the draft was not staged, so Save would write the old value"
+        );
+        assert!(
+            !prefs.ui.selection_border_animation,
+            "the live value was not set, so the next pass would keep animating the border"
+        );
+
+        // And the direction Enable has to work in.
+        set_selection_border_animation(&mut prefs, &mut draft, true);
+        assert!(draft.ui.selection_border_animation);
+        assert!(prefs.ui.selection_border_animation);
     }
 
     /// The three choices say what System follows and what it resolved to.
@@ -7266,29 +7341,35 @@ mod tests {
         }
     }
 
-    /// The border preview needs the window open, the Overlays page showing and
-    /// something selected. The page went missing for a release, so all three are
-    /// pinned here rather than only the window.
+    /// The border preview needs the window open, the Overlays page showing,
+    /// something selected and the animation enabled. The page went missing for
+    /// a release, so all four are pinned here rather than only the window.
     #[test]
     fn the_border_preview_only_runs_on_the_overlays_page() {
         let cases = [
-            (false, Page::Overlays, Some("overlay"), None),
-            (false, Page::Profiles, Some("overlay"), None),
-            (true, Page::Overlays, Some("overlay"), Some("overlay")),
-            (true, Page::Profiles, Some("overlay"), None),
-            (true, Page::Global, Some("overlay"), None),
-            (true, Page::Overlays, None, None),
-            (true, Page::Profiles, None, None),
-            (true, Page::Global, None, None),
+            (false, Page::Overlays, Some("overlay"), true, None),
+            (false, Page::Profiles, Some("overlay"), true, None),
+            (true, Page::Overlays, Some("overlay"), true, Some("overlay")),
+            (true, Page::Profiles, Some("overlay"), true, None),
+            (true, Page::Global, Some("overlay"), true, None),
+            (true, Page::Overlays, None, true, None),
+            (true, Page::Profiles, None, true, None),
+            (true, Page::Global, None, true, None),
+            // The global toggle: an otherwise perfect match animates nothing,
+            // with or without an overlay selected.
+            (true, Page::Overlays, Some("overlay"), false, None),
+            (true, Page::Overlays, None, false, None),
         ];
-        for (visible, page, selected, expected) in cases {
+        for (visible, page, selected, animation, expected) in cases {
             assert_eq!(
-                selected_overlay_for_border(visible, page, selected),
+                selected_overlay_for_border(visible, page, selected, animation),
                 expected,
-                "with the window {} on {} and {:?} selected the border preview should be {:?}",
+                "with the window {} on {}, {:?} selected and the animation {} \
+                 the border preview should be {:?}",
                 if visible { "open" } else { "closed" },
                 page.label(),
                 selected,
+                if animation { "on" } else { "off" },
                 expected
             );
         }
