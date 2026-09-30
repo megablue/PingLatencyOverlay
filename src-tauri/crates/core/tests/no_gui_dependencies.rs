@@ -77,6 +77,7 @@ const WORKSPACE_PACKAGES: &[&str] = &[
     "ping-latency-overlay",
     "ping-latency-overlay-core",
     "ping-latency-overlay-tray",
+    "ping-latency-overlay-build-support",
 ];
 
 /// The package name from one `cargo tree --prefix none` line, which is

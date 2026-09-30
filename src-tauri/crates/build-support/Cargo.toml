@@ -1,0 +1,11 @@
+[package]
+name = "ping-latency-overlay-build-support"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The only thing that turns a `.ico` into an icon on an executable. It shells
+# out to the Windows SDK's `rc.exe`, and it is a build-time dependency of the
+# three packages that produce an executable, never of the renderer itself.
+[dependencies]
+winresource = "0.1.17"

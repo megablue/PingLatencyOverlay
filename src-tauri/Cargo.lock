@@ -2615,10 +2615,17 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "ping-latency-overlay-build-support",
  "ping-latency-overlay-core",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ping-latency-overlay-build-support"
+version = "0.0.0"
+dependencies = [
  "winresource",
 ]
 
@@ -2628,6 +2635,7 @@ version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
  "log",
+ "ping-latency-overlay-build-support",
  "ping-rs",
  "regex",
  "serde",
@@ -2641,6 +2649,7 @@ name = "ping-latency-overlay-tray"
 version = "0.2.0"
 dependencies = [
  "image",
+ "ping-latency-overlay-build-support",
  "ping-latency-overlay-core",
  "tray-icon",
 ]

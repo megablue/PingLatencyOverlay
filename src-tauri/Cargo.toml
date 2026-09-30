@@ -1,12 +1,12 @@
 ﻿[workspace]
-members = ["crates/core", "crates/tray"]
+members = ["crates/core", "crates/tray", "crates/build-support"]
 # Required, not decoration. A manifest that is both a workspace root and a
 # package makes plain `cargo test` operate on THAT PACKAGE ALONE, so without
 # this line most of the suite is silently skipped and the command still exits 0.
 # At the time of the split it reported "35 passed" against a 94-test suite. Those
-# numbers are history and will drift; what matters is that all three members are
+# numbers are history and will drift; what matters is that every member is
 # listed, so the ordinary command covers the whole workspace.
-default-members = [".", "crates/core", "crates/tray"]
+default-members = [".", "crates/core", "crates/tray", "crates/build-support"]
 
 [package]
 name = "ping-latency-overlay"
@@ -60,8 +60,11 @@ crate-type = ["rlib"]
 name = "plo-config"
 path = "src/main.rs"
 
+# The icon and version resource, shared with the tray and the renderer so all
+# three executables carry the same artwork and the same number. See the crate
+# for why this is one implementation rather than three.
 [build-dependencies]
-winresource = "0.1.17"
+ping-latency-overlay-build-support = { path = "crates/build-support" }
 
 # This package is the application shell: the one egui configuration window and
 # whatever it needs to talk to the other two processes. It is the only thing

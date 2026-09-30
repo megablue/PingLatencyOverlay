@@ -20,8 +20,8 @@ value is one more thing that can be wrong.
 
 ## Layout
 - `src-tauri/` — the Cargo workspace; run Cargo commands here. The root
-  manifest is both the workspace and the application package; `crates/core`
-  and `crates/tray` are the other members.
+  manifest is both the workspace and the application package; `crates/core`,
+  `crates/tray` and `crates/build-support` are the other members.
   - `src/main.rs` — the entry point of `plo-config`, the Config window process,
     and the only thing in the project allowed to depend on eframe.
   - `src/ui.rs` — the egui configuration editor. It was "tray-mode" when the
@@ -67,6 +67,12 @@ value is one more thing that can be wrong.
       windows' message pump, the redraw loop, and the pipe server that answers
       a config, a pause or a shutdown.
 - `scripts/gen-icons.mjs` — generates native artwork with no dependencies.
+- `crates/build-support/` — the shared half of the three build scripts. It
+  owns the `MAJOR.MINOR.(commits since countBase)` derivation and the Windows
+  resource that puts the app icon and that version on each executable, so the
+  icon path and the version rule exist once rather than three times. A build
+  dependency runs on the host at build time and contributes a resource, not
+  runtime code; `no_gui_dependencies.rs` still finds no GUI crate under it.
 - `packaging/nsis/` and `scripts/build-nsis.ps1` — native installer packaging.
 - `docs/GAME.md` — design document for the game module, which is **not
   built**. Nothing described there exists in the code. Read it before
@@ -104,10 +110,11 @@ Installer (run from the repository root):
   `cargo test` report 35 passed against a 94-test suite and exit 0, silently
   skipping every test in `core`. `default-members` in the root manifest is what
   makes the ordinary command cover the workspace, and it is load-bearing: it
-  lists `.`, `crates/core` and `crates/tray`, and dropping any of them quietly
-  narrows the suite. If the test count ever drops without a deletion, suspect
-  this before suspecting a filter. The same numbers appear in that manifest's
-  comment; they are historical, so if you correct one, correct both.
+  lists `.`, `crates/core`, `crates/tray` and `crates/build-support`, and
+  dropping any of them quietly narrows the suite. If the test count ever drops
+  without a deletion, suspect this before suspecting a filter. The same numbers
+  appear in that manifest's comment; they are historical, so if you correct
+  one, correct both.
 - **Commit messages go through a file.** Write the message to a scratch file
   (this session uses `%LOCALAPPDATA%\Temp\opencode\plo-commit-msg.txt`) and run
   `git commit -F <path>`; a PowerShell here-string gets its terminator mangled
@@ -124,9 +131,11 @@ Installer (run from the repository root):
 - **Bundle after committing.** The version is
   `MAJOR.MINOR.(commits since countBase)`, not the raw commit count, so a new
   minor restarts at `.1`. `countBase` is in `[package.metadata.build]` in
-  `src-tauri/Cargo.toml` and **both** readers take it from there — `build.rs`
-  (which sets what the app reports) and `scripts/build-nsis.ps1` (which names
-  the installer) — so a constant in each file cannot drift from the other.
+  `src-tauri/Cargo.toml` and **both** readers take it from there —
+  `crates/build-support`, which the three build scripts call (it sets what the
+  app reports and what each exe's version resource says), and
+  `scripts/build-nsis.ps1` (which names the installer) — so a constant in each
+  file cannot drift from the other.
   Raise the minor and the base together, in the same commit.
   `the_installer_and_the_app_agree_on_the_version` runs the script and
   compares it with the version compiled into the binary, because an app that
@@ -866,8 +875,12 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   layered-window code declares its own `extern "system"` blocks).
   `crates/core/tests/no_gui_dependencies.rs` runs `cargo tree` and fails the
   suite if one appears, so do not "fix" a deny-list entry instead of the
-  dependency. The application shell is the only thing allowed a GUI stack, and
-  `tray-icon` belongs to `crates/tray` alone.
+  dependency. That tree includes build-dependencies, and they are allowed:
+  `crates/build-support` runs on the host and contributes a resource to the
+  exe, never runtime code, and its `winresource` subgraph is `toml`,
+  `serde_core`, `winnow` and `version_check` — no GUI crate and no
+  `windows-sys`. The application shell is the only thing allowed a GUI stack,
+  and `tray-icon` belongs to `crates/tray` alone.
 - Do not replace `UpdateLayeredWindow` with egui/GPU child viewports. The old
   multi-viewport renderer was the source of the white-background and excessive
   memory problems.

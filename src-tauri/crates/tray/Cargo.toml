@@ -28,3 +28,8 @@ path = "src/bin/tray_probe.rs"
 ping-latency-overlay-core = { path = "../core" }
 tray-icon = "0.25.1"
 image = "0.25"
+
+# The Explorer icon and version resource. It runs on the host at build time and
+# contributes a resource to the exes; the GUI stack is still only `tray-icon`.
+[build-dependencies]
+ping-latency-overlay-build-support = { path = "../build-support" }
