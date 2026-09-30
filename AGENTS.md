@@ -112,6 +112,15 @@ Installer (run from the repository root):
   (this session uses `%LOCALAPPDATA%\Temp\opencode\plo-commit-msg.txt`) and run
   `git commit -F <path>`; a PowerShell here-string gets its terminator mangled
   by the shell tool.
+- **No AI attribution in a commit message, ever, without being asked.** No
+  `Co-Authored-By` trailer, no `Generated with` footer, nothing that reads as
+  crediting a model or tool. These commits are the user's. This is enforced, not
+  merely preferred: a machine-wide `commit-msg` hook
+  (`core.hooksPath` = `C:/Users/mega/.githooks`) rejects the commit outright,
+  and it blocks human co-authors too, so the only ways past it are `--no-verify`
+  or `ALLOW_COAUTHOR=1`. **Use neither without the user asking in that
+  conversation.** If the hook blocks something, report it and stop; do not
+  reword the message to slip a trailer past the pattern.
 - **Bundle after committing.** The version is
   `MAJOR.MINOR.(commits since countBase)`, not the raw commit count, so a new
   minor restarts at `.1`. `countBase` is in `[package.metadata.build]` in
