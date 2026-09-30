@@ -40,9 +40,10 @@ value is one more thing that can be wrong.
       path and nothing else. It logs every step and deliberately omits the pipe
       attachment, the storm guard and the Config-window spawn, so a menu that
       never appears can be traced to `tray-icon` or the plumbing rather than to
-      any of those. It is behind the `tray-probe` feature, so an ordinary build
-      never produces a fourth executable; `cargo build -p
-      ping-latency-overlay-tray --features tray-probe` builds it when needed.
+      any of those. It is not part of the product, and it is behind the
+      `tray-probe` feature, so an ordinary build never produces a fourth
+      executable; `cargo build -p ping-latency-overlay-tray --features
+      tray-probe` builds it when needed.
   - `crates/core/` — the `ping-latency-overlay-core` crate. Everything the
     renderer needs and **no GUI dependency at all**:
     - `src/lib.rs` — module wiring; the entries below are what it exposes.
