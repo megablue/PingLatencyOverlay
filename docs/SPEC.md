@@ -463,10 +463,11 @@ from the program, so a theme can be written, shared and edited without a build.
   into the same directory, because each finds the others next to itself. Only
   the tray gets a Start Menu or desktop shortcut, since only the tray is what a
   user launches, and the installer's "Launch" checkbox launches the tray too.
-- All three executables carry the app icon and the product version in their
-  Windows resource, so the Start Menu shortcut (which points at the tray) shows
-  the app icon rather than the generic one, and the version Explorer reports
-  agrees with the version the Config window reports.
+- All three executables carry the app icon, the product version and the
+  copyright notice in their Windows resource, so the Start Menu shortcut (which
+  points at the tray) shows the app icon rather than the generic one, and the
+  version and copyright Explorer reports agree with what the Config window
+  shows.
 - The installer stops any running copy of the app before writing the new files,
   including the names used before the three executables were renamed, and
   removes the previous installation first. An upgrade over a running app

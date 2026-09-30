@@ -1,3 +1,7 @@
+﻿; Keep the UTF-8 BOM at the top of this file. MakeNSIS reads a script
+; without one as ANSI, and the em dash in the FileDescription below then
+; reaches Explorer as three mojibake characters. /D values arrive as
+; Unicode on the command line and are unaffected.
 Unicode true
 ManifestDPIAware true
 ManifestDPIAwareness PerMonitorV2
@@ -16,6 +20,9 @@ ManifestDPIAwareness PerMonitorV2
 !endif
 !ifndef APP_ICON
   !error "APP_ICON must be supplied with /DAPP_ICON=<absolute path>"
+!endif
+!ifndef APP_COPYRIGHT
+  !error "APP_COPYRIGHT must be supplied with /DAPP_COPYRIGHT=<notice>"
 !endif
 !ifndef OUT_FILE
   !error "OUT_FILE must be supplied with /DOUT_FILE=<absolute path>"
@@ -47,7 +54,7 @@ SetCompressor /SOLID lzma
 VIProductVersion "${APP_VERSIONWITHBUILD}"
 VIAddVersionKey "ProductName" "${PRODUCTNAME}"
 VIAddVersionKey "FileDescription" "${PRODUCTNAME} — live network latency overlay"
-VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 megablue"
+VIAddVersionKey "LegalCopyright" "${APP_COPYRIGHT}"
 VIAddVersionKey "Comments" "GPL-3.0-only; source: https://github.com/megablue/PingLatencyOverlay"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileVersion" "${APP_VERSION}"

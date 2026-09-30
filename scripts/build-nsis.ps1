@@ -121,6 +121,16 @@ if (-not $makensis) {
 $makensisPath = if ($makensis.Source) { $makensis.Source } else { $makensis.FullName }
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+# The copyright notice in the installer's own version block. Read from the
+# same manifest key `crates/build-support` reads for the exes, so the installer
+# and everything it installs agree about whose work this is.
+$copyrightMatch = [regex]::Match($cargoToml, '(?m)^\s*copyright\s*=\s*"([^"]+)"')
+if (-not $copyrightMatch.Success) {
+    throw "Could not read the copyright from src-tauri/Cargo.toml"
+}
+$copyright = $copyrightMatch.Groups[1].Value
+
 $arguments = @(
     "/DAPP_TRAY_EXE=$tray",
     "/DAPP_CONFIG_EXE=$config",
@@ -130,6 +140,7 @@ $arguments = @(
     "/DOUT_FILE=$outFile",
     "/DAPP_VERSION=$version",
     "/DAPP_VERSIONWITHBUILD=$versionWithBuild",
+    "/DAPP_COPYRIGHT=$copyright",
     $script
 )
 & $makensisPath @arguments

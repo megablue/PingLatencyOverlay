@@ -179,7 +179,7 @@ Further detail lives in [`AGENTS.md`](AGENTS.md) for contributors and
 ## License
 
 PingLatencyOverlay is free software released under the GNU General Public
-License, version 3 only (`GPL-3.0-only`). Copyright (C) 2026 megablue.
+License, version 3 only (`GPL-3.0-only`). Copyright © Evert Chin (megablue).
 
 The complete license text is available in [`LICENSE`](LICENSE). Source code for
 released versions is available from the corresponding GitHub release/tag.

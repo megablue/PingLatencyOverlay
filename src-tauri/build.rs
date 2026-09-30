@@ -7,6 +7,10 @@ fn main() {
         "cargo:rustc-env=APP_BUILD_VERSION={}",
         build_support::product_version()
     );
+    println!(
+        "cargo:rustc-env=APP_COPYRIGHT={}",
+        build_support::copyright_notice()
+    );
     build_support::embed_windows_resources(
         "plo-config.exe",
         "PingLatencyOverlay — live network latency overlay",

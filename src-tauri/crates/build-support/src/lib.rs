@@ -79,6 +79,29 @@ fn derived_version(base: &str, count: Option<u32>, count_base: u32) -> String {
     format!("{major}.{minor}.{patch}")
 }
 
+/// The value of one `key = ...` line in the root manifest.
+///
+/// A line scan rather than a TOML parse: `version`, `countBase` and
+/// `copyright` are the manifest's only single-line facts, and keeping the
+/// scan here is what lets this crate depend on nothing but winresource. The
+/// remainder must start with `=`, so a key that happens to be a prefix of a
+/// longer identifier cannot match. Quoting is optional and dropped, because
+/// `countBase` is a bare number while the strings around it are quoted.
+fn manifest_value(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(root_manifest_path()).ok()?;
+    text.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(key)?;
+        let value = rest.trim_start().strip_prefix('=')?.trim();
+        Some(
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(value)
+                .to_string(),
+        )
+    })
+}
+
 /// The `[package] version` of the root manifest.
 ///
 /// Read from the file rather than `CARGO_PKG_VERSION`, because the build script
@@ -86,27 +109,7 @@ fn derived_version(base: &str, count: Option<u32>, count_base: u32) -> String {
 /// carries that package's own version -- `crates/core` has a `0.1.0` that means
 /// nothing to the product.
 fn package_version() -> Option<String> {
-    let text = std::fs::read_to_string(root_manifest_path()).ok()?;
-    let mut in_package = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_package = line == "[package]";
-            continue;
-        }
-        if !in_package {
-            continue;
-        }
-        let Some(value) = line.strip_prefix("version").map(|rest| rest.trim_start()) else {
-            continue;
-        };
-        let value = value.strip_prefix('=')?.trim();
-        return value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .map(str::to_string);
-    }
-    None
+    manifest_value("version")
 }
 
 /// The commit count the patch number restarts from.
@@ -115,15 +118,20 @@ fn package_version() -> Option<String> {
 /// `scripts/build-nsis.ps1` has to subtract exactly the same number and a
 /// constant in each file is a constant that eventually drifts.
 fn count_base() -> u32 {
-    let Ok(text) = std::fs::read_to_string(root_manifest_path()) else {
-        return 0;
-    };
-    text.lines()
-        .find_map(|line| {
-            let rest = line.trim().strip_prefix("countBase")?;
-            rest.trim_start().strip_prefix('=')?.trim().parse().ok()
-        })
+    manifest_value("countBase")
+        .and_then(|value| value.parse().ok())
         .unwrap_or(0)
+}
+
+/// The copyright notice every exe carries and the About page shows.
+///
+/// A missing key is a build error rather than a blank: a blank would reach
+/// users and look deliberate, and the notice exists so the build cannot
+/// silently ship without one. It carries no year on purpose -- a year in a
+/// shipped resource is a fact that goes stale.
+pub fn copyright_notice() -> String {
+    manifest_value("copyright")
+        .expect("package.metadata.copyright must be set in src-tauri/Cargo.toml")
 }
 
 fn git_commit_count() -> Option<u32> {
@@ -209,6 +217,7 @@ pub fn embed_windows_resources(original_filename: &str, file_description: &str) 
     }
 
     let version = product_version();
+    let copyright = copyright_notice();
     // rc.exe accepts forward slashes, and winresource escapes backslashes on
     // the way into the generated resource file; one separator style avoids
     // having to care which escaping was intended.
@@ -219,6 +228,7 @@ pub fn embed_windows_resources(original_filename: &str, file_description: &str) 
         .set("FileDescription", file_description)
         .set("ProductName", "PingLatencyOverlay")
         .set("InternalName", "ping-latency-overlay")
+        .set("LegalCopyright", &copyright)
         .set("OriginalFilename", original_filename)
         .set("FileVersion", &version)
         .set("ProductVersion", &version)
@@ -288,6 +298,19 @@ mod tests {
         assert!(
             parts.iter().all(|part| part.parse::<u32>().is_ok()),
             "expected three numbers, got {version}"
+        );
+    }
+
+    /// The notice exists, and carries no year: a dated notice in a shipped
+    /// resource goes stale between releases, which is the same reason the
+    /// About page's line has never carried one.
+    #[test]
+    fn the_copyright_notice_has_no_year() {
+        let notice = copyright_notice();
+        assert!(notice.starts_with("Copyright"), "got {notice:?}");
+        assert!(
+            !notice.chars().any(|c| c.is_ascii_digit()),
+            "the notice carries no year on purpose: {notice}"
         );
     }
 

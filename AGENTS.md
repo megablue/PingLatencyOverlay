@@ -69,10 +69,12 @@ value is one more thing that can be wrong.
 - `scripts/gen-icons.mjs` — generates native artwork with no dependencies.
 - `crates/build-support/` — the shared half of the three build scripts. It
   owns the `MAJOR.MINOR.(commits since countBase)` derivation and the Windows
-  resource that puts the app icon and that version on each executable, so the
-  icon path and the version rule exist once rather than three times. A build
-  dependency runs on the host at build time and contributes a resource, not
-  runtime code; `no_gui_dependencies.rs` still finds no GUI crate under it.
+  resource that puts the app icon, the version and the copyright notice on each
+  executable, so the icon path, the version rule and the notice exist once
+  rather than three times. The notice itself is `package.metadata.copyright`
+  in the root manifest, which the About page reads through `APP_COPYRIGHT`. A
+  build dependency runs on the host at build time and contributes a resource,
+  not runtime code; `no_gui_dependencies.rs` still finds no GUI crate under it.
 - `packaging/nsis/` and `scripts/build-nsis.ps1` — native installer packaging.
 - `docs/GAME.md` — design document for the game module, which is **not
   built**. Nothing described there exists in the code. Read it before

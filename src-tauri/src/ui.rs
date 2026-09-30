@@ -125,8 +125,10 @@ struct AboutLine {
 /// The page used to be a labelled table with accent section headers, which read
 /// as settings rather than as an About box. It is one centred column now. The
 /// facts are the ones the page has always carried: what this is, which version,
-/// where the source is, who wrote it, under what licence. The copyright carries
-/// no year on purpose, so nothing here can go stale between releases.
+/// where the source is, who wrote it, under what licence. The copyright is
+/// `APP_COPYRIGHT` from the root manifest, the same string the exes carry as
+/// `LegalCopyright`, and it carries no year on purpose, so nothing here can go
+/// stale between releases.
 ///
 /// Only the repository is clickable. The licence is named in words and not
 /// linked, because the text is not bundled with the app and a link to someone
@@ -154,7 +156,7 @@ fn about_page_lines() -> Vec<AboutLine> {
             AboutKind::Link(ABOUT_REPOSITORY),
             true,
         ),
-        line("Copyright \u{a9} Evert Chin", body, AboutKind::Text, true),
+        line(env!("APP_COPYRIGHT"), body, AboutKind::Text, true),
         line(
             "LICENSE: GNU General Public License v3.0",
             body,

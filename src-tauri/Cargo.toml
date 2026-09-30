@@ -27,6 +27,14 @@ repository = "https://github.com/megablue/PingLatencyOverlay"
 edition = "2021"
 rust-version = "1.88"
 
+# The one copyright notice. `crates/build-support` reads it for the exes'
+# LegalCopyright, the root build script passes it to the About page through
+# APP_COPYRIGHT, and `scripts/build-nsis.ps1` passes it to the installer, so
+# no two places can disagree. It carries no year on purpose: it cannot go
+# stale between releases.
+[package.metadata]
+copyright = "Copyright © Evert Chin (megablue)"
+
 # The single source of truth for where the patch number starts. `build.rs`
 # (which sets the version the app shows) and `scripts/build-nsis.ps1` (which
 # names the installer) both subtract this from the Git commit count, so a
