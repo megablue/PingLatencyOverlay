@@ -8,21 +8,27 @@ publish = false
 name = "ping_latency_overlay_tray"
 path = "src/lib.rs"
 
+[features]
+# Only the diagnostic binary below uses this. Opt-in so that a plain
+# `cargo build` produces exactly the three executables the installer ships.
+tray-probe = []
+
 [[bin]]
 # The crate keeps a descriptive name; the executable does not. See the note on
 # the window's `[[bin]]` about why the three are terse.
 name = "plo-tray"
 path = "src/main.rs"
 
-# A bisection tool, deliberately not shipped. It creates a tray icon and
-# nothing else -- no pipe, no renderer, no supervision, no window -- so that
-# "the tray menu does not open" can be answered without any of the app around
-# it. Cargo would auto-discover it from `src/bin/tray_probe.rs`; naming it
-# explicitly means the name is deliberate and greppable, and the comment above
-# is somewhere a reader will actually find.
+# A bisection tool, deliberately not shipped and behind its own feature. It
+# creates a tray icon and nothing else -- no pipe, no renderer, no supervision,
+# no window -- so that "the tray menu does not open" can be answered without
+# any of the app around it. `required-features` is what keeps an ordinary build
+# from producing a fourth executable; `cargo build -p
+# ping-latency-overlay-tray --features tray-probe` builds it when needed.
 [[bin]]
 name = "plo-tray-probe"
 path = "src/bin/tray_probe.rs"
+required-features = ["tray-probe"]
 
 [dependencies]
 ping-latency-overlay-core = { path = "../core" }

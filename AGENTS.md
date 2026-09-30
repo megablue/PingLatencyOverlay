@@ -40,7 +40,9 @@ value is one more thing that can be wrong.
       path and nothing else. It logs every step and deliberately omits the pipe
       attachment, the storm guard and the Config-window spawn, so a menu that
       never appears can be traced to `tray-icon` or the plumbing rather than to
-      any of those. Not part of the app.
+      any of those. It is behind the `tray-probe` feature, so an ordinary build
+      never produces a fourth executable; `cargo build -p
+      ping-latency-overlay-tray --features tray-probe` builds it when needed.
   - `crates/core/` — the `ping-latency-overlay-core` crate. Everything the
     renderer needs and **no GUI dependency at all**:
     - `src/lib.rs` — module wiring; the entries below are what it exposes.
@@ -88,8 +90,13 @@ Native app (run from `src-tauri/`):
   the tray and renderer if they are not already running.
 - `cargo build --release` — optimized standalone executables
 - `cargo fmt`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo test`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all-features`
+
+`--all-features` is deliberate: it is what keeps the feature-gated
+`plo-tray-probe` target compiling. `cargo build --release` stays feature-free
+on purpose, because it is the command that must produce exactly the three
+executables the installer ships.
 
 Installer (run from the repository root):
 - `npm run icons`
@@ -105,8 +112,8 @@ Installer (run from the repository root):
   carries its own failure mode.
 - **Gate on clippy, not just `cargo test`.** `assertions_on_constants` and
   friends are clippy-only, and `cargo test` compiles and passes with them
-  present. The gate is `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test`, `cargo build --release`.
+  present. The gate is `cargo fmt`, `cargo clippy --all-targets --all-features
+  -- -D warnings`, `cargo test --all-features`, `cargo build --release`.
 - **A manifest that is both a workspace root and a package narrows plain
   `cargo test` to that package alone.** The split into `crates/core` made
   `cargo test` report 35 passed against a 94-test suite and exit 0, silently
