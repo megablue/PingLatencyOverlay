@@ -335,9 +335,12 @@ from the program, so a theme can be written, shared and edited without a build.
 - The window has a **light** and a **dark** theme, and follows Windows by
   default: flipping Windows between light and dark changes the window, including
   while it is open.
-- You pick between **System (follow Windows)**, **Light** and **Dark** in the
-  Global page, under Appearance. The System option also says which one it
-  currently resolved to, so you can see that it is following.
+- You pick between **System Theme**, **Light Theme** and **Dark Theme** with
+  three square buttons in the Global page, under Appearance. Each button is
+  drawn with its own icon — a sun, a crescent moon and a half-filled circle —
+  painted from the theme's colours rather than shipped as artwork. The System
+  button's tooltip says which one it currently resolved to, so you can still see
+  that it is following.
 - Choosing one takes effect immediately, the way the other Appearance settings
   do, and **Discard** puts the previous one back. It still needs **Save** to
   survive a restart, like the rest of the Global page.
@@ -387,7 +390,9 @@ from the program, so a theme can be written, shared and edited without a build.
   **Delete** on the Profiles page. Rename, Duplicate and Delete open their editor
   in place of that detail. The Global page has no list, so the detail pane spans
   the width the list pane would have used, and shows the app-wide preferences:
-  an **Appearance** group with a **Collapse the navigation rail** checkbox, and a
+  an **Appearance** group that opens with the **System Theme**, **Light Theme**
+  and **Dark Theme** buttons described under *Light and dark*, followed by a
+  **Collapse the navigation rail** checkbox, and a
   **Storage** group listing the config folder, the profiles folder and
   `globalconfig.json` as read-only paths, truncated with the full path on hover.
   Toggling the rail applies immediately, so the user watches it collapse as they
@@ -400,7 +405,8 @@ from the program, so a theme can be written, shared and edited without a build.
   for the selection preview described under *Overlay window*: turning it off
   stops that animation for every selection, including the first overlay a
   profile switch selects, while the per-overlay startup border effect is
-  untouched. It previews immediately and is written only on Save, like the rest. The About page
+  untouched. It previews immediately and is written only on Save, like the rest.
+  The About page
   has no list either, so its detail pane spans the same full width, and is
   read-only and centred: the app icon, then one column of lines — the app name
   large, the tagline under it, the version, then the repository, the copyright

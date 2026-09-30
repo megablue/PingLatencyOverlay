@@ -67,6 +67,45 @@ const GLOBAL_ICON_KNOB_RADIUS: f32 = 0.1;
 const ABOUT_ICON_ROWS: [(f32, f32); 2] = [(-0.2, 0.0), (0.16, 0.16)];
 /// Radius of the About glyph's dot, as a fraction of the unit.
 const ABOUT_ICON_DOT_RADIUS: f32 = 0.12;
+/// The theme tiles' mode glyphs, as fractions of the icon box. Fractions of a
+/// unit rather than pixels so the glyph scales with the tile, and named so
+/// `the_theme_glyphs_stay_inside_their_boxes` can hold the drawn extent — ray
+/// or outline included — to half a box either way.
+const THEME_ICON_STROKE: f32 = 0.06;
+const THEME_SUN_CORE_RADIUS: f32 = 0.17;
+const THEME_SUN_RAY_INNER: f32 = 0.28;
+const THEME_SUN_RAY_OUTER: f32 = 0.45;
+/// The sun's eight rays as unit vectors, so the painter and the balance check
+/// read the same table.
+const THEME_SUN_RAYS: [(f32, f32); 8] = [
+    (1.0, 0.0),
+    (
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
+    (0.0, 1.0),
+    (
+        -std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
+    (-1.0, 0.0),
+    (
+        -std::f32::consts::FRAC_1_SQRT_2,
+        -std::f32::consts::FRAC_1_SQRT_2,
+    ),
+    (0.0, -1.0),
+    (
+        std::f32::consts::FRAC_1_SQRT_2,
+        -std::f32::consts::FRAC_1_SQRT_2,
+    ),
+];
+const THEME_MOON_RADIUS: f32 = 0.42;
+const THEME_MOON_BITE_RADIUS: f32 = 0.33;
+/// The moon's bite sits up and to the right, the way the reference does.
+const THEME_MOON_BITE_OFFSET: (f32, f32) = (0.104, -0.104);
+const THEME_SYSTEM_RADIUS: f32 = 0.44;
+/// Segments the System glyph's filled semicircle is drawn with.
+const THEME_SYSTEM_ARC_STEPS: usize = 16;
 /// The About page's repository. This is the one line that opens anything: it is
 /// the only link, and clicking it hands the address to Windows.
 const ABOUT_REPOSITORY: &str = "https://github.com/megablue/PingLatencyOverlay";
@@ -354,6 +393,20 @@ const RAIL_COLLAPSED_WIDTH: f32 = 44.0;
 const RAIL_ROW_HEIGHT: f32 = 40.0;
 const RAIL_ICON_SIZE: f32 = 20.0;
 const RAIL_TEXT_SIZE: f32 = 14.0;
+/// Theme-picker tiles: three share the detail pane's width, so a tile is
+/// `(available - 2*gap)/3`, capped so a wide window gets buttons rather than
+/// billboards.
+const THEME_TILE_GAP: f32 = 10.0;
+const THEME_TILE_MAX: f32 = 112.0;
+/// The tile's icon box, its centre and the label's centre, as fractions of the
+/// tile.
+const THEME_TILE_ICON_SIZE: f32 = 0.42;
+const THEME_TILE_ICON_CENTER_Y: f32 = 0.36;
+const THEME_TILE_LABEL_CENTER_Y: f32 = 0.8;
+/// The label shrinks with the tile rather than overflowing it.
+const THEME_TILE_LABEL_FRACTION: f32 = 0.115;
+const THEME_TILE_LABEL_SIZE_MIN: f32 = 10.0;
+const THEME_TILE_LABEL_SIZE_MAX: f32 = 12.5;
 /// Gap between two panes.
 const PANE_GAP: f32 = 8.0;
 /// Horizontal padding the central frame puts around the panes.
@@ -964,26 +1017,127 @@ pub struct PingApp {
 /// The three theme choices, in the order they are offered, with their labels.
 ///
 /// The labels come from here rather than being written inline so a test can hold
-/// them. The wording carries two pieces of information a bare "System" does not:
-/// what it follows, and what it currently resolved to. The second is the
-/// question a user actually has about a follow-the-system setting — whether it
-/// is working — and without it a correctly-behaving control looks broken.
-fn theme_choices(system: Mode) -> [(ThemeMode, String); 3] {
+/// them. They are short because they sit inside square tiles; the two pieces of
+/// information the old System label carried — what it follows and what it
+/// resolved to — now live in the tile's tooltip (`theme_choice_hint`).
+fn theme_choices() -> [(ThemeMode, &'static str); 3] {
     [
-        (
-            ThemeMode::System,
-            format!(
-                "System (follow Windows) - currently {}",
-                if system == Mode::Dark {
-                    "dark"
-                } else {
-                    "light"
-                }
-            ),
-        ),
-        (ThemeMode::Light, "Light".to_string()),
-        (ThemeMode::Dark, "Dark".to_string()),
+        (ThemeMode::System, "System Theme"),
+        (ThemeMode::Light, "Light Theme"),
+        (ThemeMode::Dark, "Dark Theme"),
     ]
+}
+
+/// The tooltip for a theme tile.
+///
+/// "System Theme" on its own does not say whether the feature is working, so
+/// the hint carries the answer — the question a user actually has about a
+/// follow-the-system setting. The overrides carry the one consequence of
+/// overriding: the tray menu is a native menu Windows paints from the system
+/// setting, so it follows Windows whatever this is set to.
+fn theme_choice_hint(system: Mode, choice: ThemeMode) -> String {
+    match choice {
+        ThemeMode::System => format!(
+            "Follows Windows — currently {}.",
+            if system == Mode::Dark {
+                "dark"
+            } else {
+                "light"
+            }
+        ),
+        ThemeMode::Light | ThemeMode::Dark => {
+            "The tray's menu always follows Windows, so with this set the window and the tray \
+             menu can look different."
+                .to_string()
+        }
+    }
+}
+
+/// A theme tile's side: three tiles and their two gaps share the available
+/// width, capped so a wide window gets buttons rather than billboards.
+///
+/// An uncapped side leaves `3*side + 2*gap` exactly at the available width, so
+/// the row fits either way — `the_theme_tiles_fit_their_pane` measures it.
+fn theme_tile_side(available: f32) -> f32 {
+    ((available - THEME_TILE_GAP * 2.0) / 3.0).min(THEME_TILE_MAX)
+}
+
+/// The tile's label size: it shrinks with the tile rather than overflowing it.
+fn theme_tile_label_size(side: f32) -> f32 {
+    (side * THEME_TILE_LABEL_FRACTION).clamp(THEME_TILE_LABEL_SIZE_MIN, THEME_TILE_LABEL_SIZE_MAX)
+}
+
+/// The theme tiles, painted, returning the choice a click made.
+///
+/// Painted rather than three `selectable_label`s because the mode icon has to
+/// sit inside the button: an egui widget has no image slot, and a glyph from the
+/// font would depend on font coverage — the same reason the rail's glyphs are
+/// painted.
+///
+/// A free function taking the values it needs, like `sync_profile_cache`, so a
+/// test can drive it headlessly and measure what it lays out. The tiles' fill,
+/// stroke and rounding come from `interact_selectable`, the same
+/// `WidgetVisuals` a selectable label uses, so the row follows whatever a theme
+/// does to buttons.
+fn theme_tiles(ui: &mut Ui, current: ThemeMode, system: Mode) -> Option<ThemeMode> {
+    let side = theme_tile_side(ui.available_width());
+    let icon_size = side * THEME_TILE_ICON_SIZE;
+    let label_size = theme_tile_label_size(side);
+    let mut chosen = None;
+    // The row's gap is the constant the side was computed from, so it is set
+    // rather than left to `item_spacing`, and put back afterwards.
+    let previous_gap = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = THEME_TILE_GAP;
+    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+        for (choice, label) in theme_choices() {
+            let picked = current == choice;
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+            let visuals = ui.style().interact_selectable(&response, picked);
+            let painter = ui.painter();
+            painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+            painter.rect_stroke(
+                rect,
+                visuals.corner_radius,
+                visuals.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+            draw_theme_icon(
+                painter,
+                egui::Rect::from_center_size(
+                    egui::pos2(
+                        rect.center().x,
+                        rect.top() + side * THEME_TILE_ICON_CENTER_Y,
+                    ),
+                    egui::Vec2::splat(icon_size),
+                ),
+                choice,
+                visuals.fg_stroke.color,
+                visuals.weak_bg_fill,
+            );
+            painter.text(
+                egui::pos2(
+                    rect.center().x,
+                    rect.top() + side * THEME_TILE_LABEL_CENTER_Y,
+                ),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(label_size),
+                visuals.fg_stroke.color,
+            );
+            if let Some(cursor) = ui.visuals().interact_cursor {
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(cursor);
+                }
+            }
+            let response = response.on_hover_text(theme_choice_hint(system, choice));
+            if response.clicked() && !picked {
+                chosen = Some(choice);
+            }
+        }
+    });
+    ui.spacing_mut().item_spacing.x = previous_gap;
+    chosen
 }
 
 /// Stage a theme choice and make it the live one at the same time.
@@ -2491,32 +2645,12 @@ impl PingApp {
                 ui.label(RichText::new("APPEARANCE").color(UI_ACCENT()));
                 ui.separator();
 
-                // Three selectable labels rather than a dropdown, which is the
-                // shape the Mirrored No/Yes control already uses in the Graph
-                // section. A `ComboBox` would hide two of the three until it was
-                // opened; here every option and the current one are visible at
-                // once, and there is no second click to find out where you are.
-                let current = self.prefs_draft.ui.theme;
-                let mut chosen = None;
-                ui.horizontal_wrapped(|ui| {
-                    for (choice, label) in theme_choices(self.system_mode) {
-                        let picked = current == choice;
-                        let response = ui.selectable_label(picked, label);
-                        if response.clicked() && !picked {
-                            chosen = Some(choice);
-                        }
-                        // The one consequence of overriding: the tray menu is a
-                        // native menu Windows paints from the system setting, so
-                        // it always follows Windows whatever this is set to.
-                        if choice != ThemeMode::System {
-                            response.on_hover_text(
-                                "The tray's menu always follows Windows, so with this set \
-                                 the window and the tray menu can look different.",
-                            );
-                        }
-                    }
-                });
-                if let Some(choice) = chosen {
+                // Three painted tiles rather than a dropdown or selectable
+                // labels: every option and the current one stay visible at once,
+                // and the mode icon sits inside the button. Nothing here draws
+                // its own glyph from the font, so no option depends on font
+                // coverage — the same rule the rail's glyphs follow.
+                if let Some(choice) = theme_tiles(ui, self.prefs_draft.ui.theme, self.system_mode) {
                     choose_theme(&mut self.prefs, &mut self.prefs_draft, choice);
                     self.prefs_dirty = true;
                     // `sync_theme` runs every pass and re-applies from the live
@@ -5359,6 +5493,71 @@ fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: C
     }
 }
 
+/// A theme tile's mode icon, painted rather than shipped as artwork.
+///
+/// Painted for the same reason the rail's glyphs are: it needs no image assets,
+/// no light and dark variants, and it picks the theme's colours up for free.
+///
+/// `fill` is the colour the tile was filled with behind the glyph. The moon is
+/// a disc with a bite taken out, and egui has no subtractive clip, so the bite
+/// is painted in the tile's fill — exact here because the tile painted itself
+/// and hands the same colour back. Anywhere else the bite would show.
+fn draw_theme_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    mode: ThemeMode,
+    color: Color32,
+    fill: Color32,
+) {
+    let unit = rect.width().min(rect.height());
+    let center = rect.center();
+    let stroke = egui::Stroke::new(THEME_ICON_STROKE * unit, color);
+    match mode {
+        // A sun: a core disc with eight rays.
+        ThemeMode::Light => {
+            painter.circle_filled(center, THEME_SUN_CORE_RADIUS * unit, color);
+            for (ray_x, ray_y) in THEME_SUN_RAYS {
+                let direction = egui::vec2(ray_x, ray_y);
+                painter.line_segment(
+                    [
+                        center + direction * (THEME_SUN_RAY_INNER * unit),
+                        center + direction * (THEME_SUN_RAY_OUTER * unit),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        // A crescent: one disc with a second, offset disc cut out of it.
+        ThemeMode::Dark => {
+            painter.circle_filled(center, THEME_MOON_RADIUS * unit, color);
+            let (bite_x, bite_y) = THEME_MOON_BITE_OFFSET;
+            painter.circle_filled(
+                center + egui::vec2(bite_x, bite_y) * unit,
+                THEME_MOON_BITE_RADIUS * unit,
+                fill,
+            );
+        }
+        // A half-filled circle: the left half full, the whole thing outlined.
+        ThemeMode::System => {
+            let radius = THEME_SYSTEM_RADIUS * unit;
+            let mut points = Vec::with_capacity(THEME_SYSTEM_ARC_STEPS + 1);
+            for step in 0..=THEME_SYSTEM_ARC_STEPS {
+                let angle = std::f32::consts::FRAC_PI_2
+                    + step as f32 * std::f32::consts::PI / THEME_SYSTEM_ARC_STEPS as f32;
+                points.push(center + egui::vec2(angle.cos(), angle.sin()) * radius);
+            }
+            // A closed semicircle is convex, so it can be filled; the outline
+            // goes on afterwards so the stroke is not covered by the fill.
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                color,
+                egui::Stroke::NONE,
+            ));
+            painter.circle_stroke(center, radius, stroke);
+        }
+    }
+}
+
 /// The chevron that collapses the rail, pointing away from where it goes.
 fn draw_collapse_chevron(
     painter: &egui::Painter,
@@ -5425,14 +5624,18 @@ mod tests {
         profile_row_label, rail_width, requested_url, row_inner, rule_error,
         runtime_config_changed, selected_overlay_for_border, selected_target_in,
         set_selection_border_animation, sync_auto_preview_text, sync_monitor_list,
-        sync_profile_cache, sync_theme, theme, theme_choices, toggled_selection, ui_text_size,
+        sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
+        theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
         window_title, AboutKind, Frame, Mode, Page, ProfileSnapshot, ThemeMode,
         ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
         DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
         GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL,
         OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
         RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
-        STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, THEME_ICON_STROKE, THEME_MOON_BITE_OFFSET,
+        THEME_MOON_BITE_RADIUS, THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS, THEME_SUN_RAYS,
+        THEME_SUN_RAY_OUTER, THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH, WINDOW_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{
@@ -6361,30 +6564,44 @@ mod tests {
         assert!(prefs.ui.selection_border_animation);
     }
 
-    /// The three choices say what System follows and what it resolved to.
+    /// The labels are the short ones the tiles use, and the tooltips carry what
+    /// the labels cannot: what System follows and resolved to, and the tray-menu
+    /// caveat for an override.
     ///
-    /// "System" on its own does not say whether the feature is working, so the
-    /// label carries the answer.
+    /// "System Theme" on its own does not say whether the feature is working,
+    /// so the hint carries the answer.
     #[test]
-    fn the_theme_choices_name_what_system_follows_and_resolved_to() {
+    fn the_theme_choice_labels_and_hints_say_what_the_tiles_cannot() {
+        // All three, in a fixed order, and nothing longer than the reference
+        // tiles' own wording — the labels have to fit inside a square.
+        assert_eq!(
+            theme_choices(),
+            [
+                (ThemeMode::System, "System Theme"),
+                (ThemeMode::Light, "Light Theme"),
+                (ThemeMode::Dark, "Dark Theme"),
+            ]
+        );
+
         for (system, expected) in [
             (Mode::Light, "currently light"),
             (Mode::Dark, "currently dark"),
         ] {
-            let choices = theme_choices(system);
-            let (mode, label) = &choices[0];
-            assert_eq!(*mode, ThemeMode::System);
+            let hint = theme_choice_hint(system, ThemeMode::System);
+            assert!(hint.contains("Follows Windows"), "{hint:?}");
             assert!(
-                label.contains(expected),
-                "{label:?} does not say {expected:?}"
+                hint.contains(expected),
+                "{hint:?} does not say {expected:?}"
             );
-            assert!(label.contains("follow Windows"), "{label:?}");
         }
-        // All three, in a fixed order, and the two overrides are plain.
-        let choices = theme_choices(Mode::Dark);
-        assert_eq!(choices.len(), 3);
-        assert_eq!(choices[1], (ThemeMode::Light, "Light".to_string()));
-        assert_eq!(choices[2], (ThemeMode::Dark, "Dark".to_string()));
+
+        for choice in [ThemeMode::Light, ThemeMode::Dark] {
+            let hint = theme_choice_hint(Mode::Dark, choice);
+            assert!(
+                hint.contains("tray's menu always follows Windows"),
+                "{hint:?} does not warn about the tray menu"
+            );
+        }
     }
 
     /// Leaving the Profiles page and coming back is arriving again.
@@ -7044,6 +7261,118 @@ mod tests {
             widest * GLOBAL_ICON_TRACK_HALF + GLOBAL_ICON_KNOB_RADIUS <= GLOBAL_ICON_TRACK_HALF,
             "a knob reaches past the end of its track"
         );
+    }
+
+    /// The theme tiles' glyphs reach no further than half the icon box, and the
+    /// sun's rays balance around the centre.
+    ///
+    /// The same pair of invariants the rail's glyphs are held to, and for the
+    /// same reason: a glyph that pokes out of its box reads as a rendering bug
+    /// long before anyone can say which constant is wrong.
+    #[test]
+    fn the_theme_glyphs_stay_inside_their_boxes() {
+        // The sun: the rays come from a table, so the reach and the balance are
+        // summed from the same numbers the painter reads.
+        let (mut dx, mut dy) = (0.0_f32, 0.0_f32);
+        let mut reach = THEME_SUN_CORE_RADIUS;
+        for (ray_x, ray_y) in THEME_SUN_RAYS {
+            dx += ray_x;
+            dy += ray_y;
+            let length = (ray_x * ray_x + ray_y * ray_y).sqrt();
+            reach = reach.max(length * THEME_SUN_RAY_OUTER);
+        }
+        assert!(
+            dx.abs() < 1e-3,
+            "the sun's rays do not balance horizontally: {dx}"
+        );
+        assert!(
+            dy.abs() < 1e-3,
+            "the sun's rays do not balance vertically: {dy}"
+        );
+        let sun = reach + THEME_ICON_STROKE / 2.0;
+        assert!(sun <= 0.5, "the sun reaches {sun} of its box");
+
+        // The moon: the disc is what shows, and the bite has to stay in the box
+        // too, or it would paint the tile's fill outside the icon.
+        let (bite_x, bite_y) = THEME_MOON_BITE_OFFSET;
+        let bite = bite_x.abs().max(bite_y.abs()) + THEME_MOON_BITE_RADIUS;
+        let moon = THEME_MOON_RADIUS.max(bite);
+        assert!(moon <= 0.5, "the moon reaches {moon} of its box");
+
+        // The System disc, outline included.
+        let system = THEME_SYSTEM_RADIUS + THEME_ICON_STROKE / 2.0;
+        assert!(system <= 0.5, "the system disc reaches {system} of its box");
+    }
+
+    /// The three theme tiles and their gaps fit the detail pane at both ends of
+    /// the window's width range, and their labels are measured to fit inside
+    /// them.
+    ///
+    /// Measured rather than deduced: the tiles are laid out for real in a
+    /// headless context — the same `theme_tiles` the window calls — and the
+    /// label widths come from the font atlas at the size the tiles actually use.
+    #[test]
+    fn the_theme_tiles_fit_their_pane() {
+        let ctx = egui::Context::default();
+        let window_widths = [WINDOW_MIN_WIDTH, WINDOW_WIDTH];
+        let mut measured: Vec<(f32, egui::Vec2)> = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for (index, window_width) in window_widths.iter().enumerate() {
+                let available = window_width
+                    - PANE_MARGIN * 2.0
+                    - RAIL_WIDTH
+                    - PANE_GAP * 2.0
+                    - SIDEBAR_WIDTH
+                    - SCROLL_BAR_RESERVE;
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(0.0, index as f32 * 160.0),
+                    egui::vec2(available, 150.0),
+                );
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                theme_tiles(&mut child, ThemeMode::System, Mode::Dark);
+                measured.push((available, child.min_rect().size()));
+            }
+        });
+        output.textures_delta.clear();
+
+        for (available, extent) in &measured {
+            let side = theme_tile_side(*available);
+            let expected = side * 3.0 + THEME_TILE_GAP * 2.0;
+            assert!(
+                (extent.x - expected).abs() < 1.0,
+                "the row laid out {}px wide but three {side}px tiles and two gaps are {expected}px",
+                extent.x
+            );
+            assert!(
+                extent.x <= available + 0.5,
+                "the row overflows the pane: {}px of tiles in {available}px",
+                extent.x
+            );
+            assert!(
+                extent.y >= side - 0.5,
+                "a {side}px tile only reported {}px of height",
+                extent.y
+            );
+        }
+
+        // The labels, measured at the size the tiles draw them, have to keep
+        // clear of the tile's rounded corners.
+        for (available, _) in &measured {
+            let side = theme_tile_side(*available);
+            let font = egui::FontId::proportional(theme_tile_label_size(side));
+            for (_, label) in theme_choices() {
+                let width = ctx.fonts_mut(|fonts| {
+                    fonts
+                        .layout_no_wrap(label.to_owned(), font.clone(), egui::Color32::WHITE)
+                        .size()
+                        .x
+                });
+                assert!(
+                    width <= side - 12.0,
+                    "{label:?} is {width}px wide inside a {side}px tile, which leaves no margin"
+                );
+            }
+        }
     }
 
     /// Only a page that stages a draft carries the Save/Discard footer. The

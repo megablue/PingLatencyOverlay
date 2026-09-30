@@ -450,6 +450,20 @@ Behavior — what a theme may set, and where the files live — is in
   Discard work: `discard_prefs` restores `prefs`, and the same pass puts the
   theme back. `choosing_a_theme_changes_it_and_survives_the_next_pass` drives
   both and asserts the staging-only path does *not* change the mode.
+- **The mode tiles are painted, and the moon's bite is only correct over its
+  own tile.** The row is three `allocate_exact_size` squares; their fill, stroke
+  and rounding come from `Style::interact_selectable`, the same `WidgetVisuals`
+  a `selectable_label` uses, so they follow whatever a theme does to buttons.
+  The glyphs are painted for the same reason the rail's are — no artwork, no
+  light and dark variants — and the moon is a disc with an offset bite painted
+  in the tile's fill colour, because egui has no subtractive clip. That is exact
+  only because the tile paints itself and hands the same colour to
+  `draw_theme_icon`; do not reuse the glyph over another surface.
+  `the_theme_glyphs_stay_inside_their_boxes` holds the geometry (the sun's rays
+  are a table, summed for balance, like `GLOBAL_ICON_ROWS`) and
+  `the_theme_tiles_fit_their_pane` measures the tiles and their labels against
+  the pane. Painted tiles take no keyboard focus, the same trade the rail rows
+  make.
 - **A test must not depend on the machine's Windows theme.** `System` resolves
   from the developer's own setting, so a test written against it passes on a
   light desktop and fails on a dark one. Pin an explicit `Light`/`Dark`
