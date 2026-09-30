@@ -47,6 +47,9 @@ path = "src/bin/renderer.rs"
 #   dirs                locating the config directory
 #   log                 overlay window diagnostics
 #   tiny-skia           software rendering of the graph; no GPU, no shaders
+#   regex               window title/class patterns for auto profile switching.
+#                       Pure Rust, no GUI, and the patterns are compiled once
+#                       when the rules load rather than per window per tick.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -60,4 +63,5 @@ tokio = { version = "1", features = [
 ping-rs = "0.1"
 dirs = "5"
 log = "0.4"
+regex = "1"
 tiny-skia = "0.11.4"

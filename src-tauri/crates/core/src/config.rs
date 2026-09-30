@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::rules::AutoRules;
+
 /// Minimum graph time window, in seconds. Mirrors the spec.
 pub const MIN_WINDOW_SECONDS: u32 = 30;
 /// Default ping timeout, in milliseconds.
@@ -675,6 +677,12 @@ const PROFILES_DIR_NAME: &str = "profiles";
 const PROFILE_PREFIX: &str = "profile_";
 const PROFILE_EXTENSION: &str = ".json";
 const GLOBAL_CONFIG_FILE: &str = "globalconfig.json";
+/// The window-based auto profile switching rules. Its own file rather than a
+/// key in `globalconfig.json` because it is the one app-wide thing that is
+/// also *read by the tray on a clock*: keeping it separate means a rule save
+/// is one small file replace instead of a read-modify-write of the file the
+/// active profile pointer lives in.
+const RULES_FILE: &str = "rules.json";
 const ACTIVE_PROFILE_KEY: &str = "activeProfile";
 const ACTIVE_PROFILE_FILE_KEY: &str = "activeProfileFile";
 /// Profile used when nothing else is stored, and the fallback after a failure.
@@ -1174,6 +1182,44 @@ impl Store {
         write_atomic(&self.global_config_path(), &json)
     }
 
+    /// Path of `rules.json`.
+    fn rules_path(&self) -> PathBuf {
+        self.root.join(RULES_FILE)
+    }
+
+    /// Read the auto profile switching rules.
+    ///
+    /// A missing file is not an error: it is the state of every installation
+    /// that has never used the feature, and it means "switching off" rather
+    /// than "empty rules pending". A file that exists but will not parse is an
+    /// error, and its caller decides what to do — the tray keeps the last good
+    /// rules it had and the window refuses to overwrite the file silently.
+    fn load_rules(&self) -> io::Result<AutoRules> {
+        let path = self.rules_path();
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(AutoRules::default())
+            }
+            Err(error) => return Err(error),
+        };
+        serde_json::from_str(strip_bom(&raw)).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not valid rules JSON: {error}", path.display()),
+            )
+        })
+    }
+
+    /// Write the rules through the same temporary-file dance profiles use.
+    ///
+    /// Atomic because the tray watches this file's modification time: a
+    /// half-written file would both parse as garbage and look like a change.
+    fn save_rules(&self, rules: &AutoRules) -> io::Result<()> {
+        let contents = serde_json::to_string_pretty(rules).map_err(io::Error::other)?;
+        write_atomic(&self.rules_path(), &format!("{contents}\n"))
+    }
+
     /// Move a validated `config.json` into the profiles directory.
     fn import_config(&self) -> io::Result<Option<ProfileImport>> {
         let root = self.config_path();
@@ -1531,6 +1577,21 @@ pub fn read_global_prefs() -> GlobalPrefs {
 /// Store the app-wide preferences, leaving the active profile pointer in place.
 pub fn write_global_prefs(prefs: &GlobalPrefs) -> io::Result<()> {
     store().write_global_prefs(prefs)
+}
+
+/// Path of the auto profile switching rules file.
+pub fn rules_path() -> PathBuf {
+    store().rules_path()
+}
+
+/// Read the auto profile switching rules; a missing file is an inert default.
+pub fn load_rules() -> io::Result<AutoRules> {
+    store().load_rules()
+}
+
+/// Write the auto profile switching rules atomically.
+pub fn save_rules(rules: &AutoRules) -> io::Result<()> {
+    store().save_rules(rules)
 }
 
 pub fn set_active_profile(name: &str) -> io::Result<()> {
@@ -2614,6 +2675,77 @@ mod tests {
         assert_eq!(value["futurePreference"], true);
         assert_eq!(value["activeProfile"], "work");
         assert_eq!(value[UI_PREFS_KEY]["railCollapsed"], true);
+    }
+
+    #[test]
+    fn a_missing_rules_file_loads_as_inert_defaults() {
+        let root = TestDir::new("rules-missing");
+        let store = store_at(root.path());
+
+        assert_eq!(store.rules_path(), root.path().join(RULES_FILE));
+        let rules = store
+            .load_rules()
+            .expect("a missing rules file is not an error");
+        assert_eq!(rules, AutoRules::default());
+        assert!(
+            !rules.enabled,
+            "switching must be off until it is turned on"
+        );
+        assert!(rules.rules.is_empty());
+    }
+
+    #[test]
+    fn rules_round_trip_through_an_atomic_write() {
+        let root = TestDir::new("rules-round-trip");
+        let store = store_at(root.path());
+        let rules = AutoRules {
+            enabled: true,
+            fallback_profile: Some("default".to_string()),
+            rules: vec![crate::rules::Rule {
+                name: "CS2".to_string(),
+                scope: crate::rules::Scope::AnyWindow,
+                combine: crate::rules::Combine::All,
+                when: vec![crate::rules::Condition {
+                    part: crate::rules::Part::ProcessName,
+                    matcher: crate::rules::MatchMode::Exact,
+                    value: "cs2.exe".to_string(),
+                }],
+                profile: "gaming".to_string(),
+            }],
+        };
+        store.save_rules(&rules).expect("save rules");
+
+        assert_eq!(store.load_rules().expect("load rules"), rules);
+        // The temporary name `write_atomic` uses must not survive the write:
+        // the tray watches this file's modification time, and a leftover
+        // partial file next to it is exactly the state that watching is
+        // supposed to be safe against.
+        let leftovers: Vec<String> = fs::read_dir(root.path())
+            .expect("read root")
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "left over: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_broken_rules_file_is_an_error_and_is_left_alone() {
+        let root = TestDir::new("rules-broken");
+        let store = store_at(root.path());
+        store.save_rules(&AutoRules::default()).expect("seed rules");
+        let path = store.rules_path();
+        fs::write(&path, "{ this is not json").expect("break the file");
+
+        let error = store
+            .load_rules()
+            .expect_err("unparseable rules must error");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            "{ this is not json",
+            "loading a broken rules file modified it"
+        );
     }
 
     #[test]

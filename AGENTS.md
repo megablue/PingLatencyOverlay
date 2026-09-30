@@ -167,6 +167,69 @@ is shaped this way:
 - Legacy `marginPx` is mapped per anchor during normalization, so a migrated
   overlay keeps its screen position.
 
+## Auto profile switching
+Behavior — the rule shape, the matching modes, what the user sees — is in
+`docs/SPEC.md` under *Auto profile switching*. This is why the code is shaped
+this way.
+- **The tray owns it, and only the tray.** It is the resident process, so it is
+  the only one running while the Config window is closed, which is when a
+  switch matters. A renderer running with no tray means no switching; that is
+  the same deal as Pause and Exit. No new process and no new pipe message: a
+  switch is the `SetConfig` a profile load already sends. `crates/core/src/rules.rs`
+  is the pure half and both the tray and the window use it, so a switch could
+  be relocated later without rewriting the matching.
+- **`rules.json` is its own file, and the tray re-reads it on `(mtime, len)`.
+  `Store::save_rules` goes through `write_atomic`, so the stamp can be trusted:
+  noticing a change can never mean reading half a file. A parse failure keeps
+  the rules already loaded — compiling "no rules" would strand the user on the
+  fallback because of a typo — while deleting the file means off. The
+  window→tray channel is this file; there is no reverse pipe.
+- **The engine pauses while the Config window is open**
+  (`role_is_running(Role::Config)`), and `Engine::resume()` runs as it closes,
+  so one push always goes out afterwards. Both halves are load-bearing: the
+  window loads and pushes the active profile itself and can switch by hand, so
+  the engine cannot know what happened while it was not the authority — and two
+  writers racing over `activeProfile` is how the pointer and the screen stop
+  agreeing.
+- **An auto switch writes `activeProfile` too, and that is not bookkeeping.**
+  The Config window loads that pointer at startup and pushes what it loaded, so
+  a switch that did not record itself would be silently clobbered the moment
+  the window opened. The write happens only after the renderer took the config:
+  a failed send leaves the engine wanting to retry, which is why
+  `Engine::mark_applied` is called on success only
+  (`a_failed_apply_is_retried_until_it_lands`).
+- **Profile files are never written and the pause state is never touched.** A
+  switch is runtime state plus the pointer.
+- **A rule matches a window, not a set of independent facts.** Every condition
+  is tested against the same candidate window
+  (`every_condition_is_tested_against_the_same_window`): "cs2.exe **and** a
+  title mentioning Counter-Strike" is about one window, not two. First match
+  wins, and the fallback only applies when at least one rule can match —
+  enabled with nothing usable is inert, so a half-typed rule cannot mass-apply
+  the fallback (`enabled_with_no_usable_rules_is_inert_not_always_fallback`).
+- **The debounce counts ticks; `Engine::step` has no clock.** Two consecutive
+  evaluations of the same decision, which is what makes a whole flap history
+  testable in microseconds — the same reason `should_restart` takes a `now`.
+- **A decision is edge-triggered**: a settled decision equal to what is applied
+  is `Tick::Idle`, so the renderer is not sent a full config every second. A
+  failed send is retried, and the retry logs once per distinct failure because
+  a line a second buries everything else in the file.
+- **`winwatch` is the only impure part, and it is a module of its own** so the
+  matching can be tested with synthetic window lists — `monitors::enumerate`
+  vs `resolve` again. Titles come from `GetWindowTextW`, which Windows
+  documents not to send `WM_GETTEXT` to another process's window and so cannot
+  block on a hung game; process names come from a Toolhelp snapshot, which
+  needs no handle into the target and therefore works for an elevated game
+  where `OpenProcess` would fail. Tool windows (`WS_EX_TOOLWINDOW`) and
+  invisible windows are not candidates.
+- **The Config window's preview calls `rules::decide` too**, so the preview
+  cannot drift from behaviour. It runs on a 1s clock and only on the Global
+  page, and `sync_auto_preview_text` takes the enumeration as a parameter so a
+  test can count the reads.
+- **A `rules.json` that will not parse is reported at startup and never
+  rewritten by an unrelated Save.** A rules Save is the explicit permission to
+  replace it, and clearing `rules_error` is that statement.
+
 ## The Config window
 Behavior — what each pane holds, what the buttons do, what blocks a switch — is
 in `docs/SPEC.md` under *Config window layout*. This is the wiring behind it.
@@ -184,19 +247,23 @@ in `docs/SPEC.md` under *Config window layout*. This is the wiring behind it.
 - Edits are staged per source. Detail-pane edits and Add overlay stage into the
   profile draft; list-pane enable/delete and Pause/Resume apply immediately.
   Delete uses an inline confirmation because native script dialogs are not used.
-- **There are two independent draft flags: `dirty` (the profile) and
-  `prefs_dirty` (app-wide preferences).** Anything asking "is there anything to
-  save?" must ask about both, via `has_pending_edits` / the free
-  `pending_edits`. The footer was gated on `dirty` alone, so every Global
-  preference was unsaveable from the day the Global page shipped. `save_edits`
-  already called `persist_current` then `save_prefs` and reported "Saved." if
-  either returned true, so only the enablement was ever wrong.
-- **Both draft writers need the same guard.** `save_prefs` returns early when
+- **There are three independent draft flags: `dirty` (the profile),
+  `prefs_dirty` (app-wide preferences) and `rules_dirty` (the auto switching
+  rules).** Anything asking "is there anything to save?" must ask about all
+  three, via `has_pending_edits` / the free `pending_edits`. The two-flag
+  version gated the footer on `dirty` alone, so every Global preference was
+  unsaveable from the day the Global page shipped. `save_edits` already called
+  `persist_current` then `save_prefs` and reported "Saved." if either returned
+  true, so only the enablement was ever wrong.
+  `the_footer_follows_every_draft` holds the three-flag rule.
+- **Every draft writer needs the same guard.** `save_prefs` returns early when
   `!prefs_dirty`; `persist_current` did not, so an unguarded Save rewrote the
   profile file from the in-memory draft when only `globalconfig.json` had
-  changed, clobbering any edit made to that file from outside the app. The two
-  writers being asymmetric is what gave the bug away. Both return `true` when
-  there was nothing to write, so a preferences-only save still says "Saved."
+  changed, clobbering any edit made to that file from outside the app.
+  `persist_rules` follows `save_prefs`, for the same reason one file over: a
+  Save another draft triggered must not rewrite a `rules.json` the user may
+  have hand-edited. All of them return `true` when there was nothing to write,
+  so a single-draft save still says "Saved."
 - The Global page stages into `prefs_draft` and writes on Save (`save_prefs`),
   while the rail's collapsed state and `show_version_in_title` apply to the
   live UI immediately, so the user watches the change. `PingApp::window_title`

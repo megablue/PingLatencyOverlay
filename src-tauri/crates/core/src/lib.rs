@@ -44,6 +44,18 @@ pub mod probes;
 // and the configuration window call in here; neither sends the other anything.
 pub mod monitors;
 
+// Window-based auto profile switching: the schema stored in `rules.json`, the
+// matching, and the debounced decision engine. Both the tray (which applies a
+// switch) and the configuration window (which previews one) read this, so it
+// lives in the crate neither owns. The matching is pure; the desktop snapshot
+// it runs against is `winwatch`.
+pub mod rules;
+
+// One snapshot of the desktop's windows, for `rules`. Win32, and deliberately
+// the only impure part: the split is what lets the matching be tested with
+// synthetic window lists.
+pub mod winwatch;
+
 // The wire between this process and the configuration window: the pipe name,
 // the message shapes and the line framing. It lives here rather than in the
 // shell because both ends are built from this crate, so the two cannot

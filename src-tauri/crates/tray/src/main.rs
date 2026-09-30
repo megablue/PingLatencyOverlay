@@ -20,10 +20,13 @@
 use std::process::Child;
 use std::time::{Duration, Instant};
 
+use ping_latency_overlay_core::config;
 use ping_latency_overlay_core::diagnostics;
+use ping_latency_overlay_core::rules::{self, Engine, Tick};
 use ping_latency_overlay_core::transport::{
     self, Client, Message, Role, SingleInstance, CONFIG_EXE,
 };
+use ping_latency_overlay_core::winwatch;
 use ping_latency_overlay_tray::{TrayAction, TrayState};
 
 /// How often the loop wakes.
@@ -56,12 +59,56 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_LIMIT: usize = 5;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 
+/// How often auto profile switching evaluates its rules.
+///
+/// One second, and independent of both [`TICK`] (how often the renderer is
+/// looked at) and [`PUMP_INTERVAL`] (how often a click must feel immediate).
+/// The evaluation enumerates the desktop's windows, which is cheap but not
+/// free, and a profile switch is a human-scale event: a second of latency on
+/// a game launching is not something anyone can perceive.
+const AUTO_SWITCH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How a restart history expired.
 ///
 /// Split out of the decision so a test can hold "an old attempt is forgotten"
 /// as a statement about the list rather than inferring it from a boolean.
 fn forget_expired(recent: &mut Vec<Instant>, now: Instant) {
     recent.retain(|at| now.duration_since(*at) < RESTART_WINDOW);
+}
+
+/// What the rules file looked like when it was last read.
+///
+/// The modification time *and* the length, not the time alone: two saves that
+/// land inside the same filesystem timestamp tick would otherwise be missed,
+/// and the length is read in the same `metadata` call. `modified` is an
+/// `Option` because a filesystem may not report one, and the length is still a
+/// usable signal then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
+/// Read and compile `rules.json`, with the stamp the read is good for.
+///
+/// A file that will not parse yields inert rules and the reason, rather than
+/// an error the caller has to route: there is nothing else to do with a
+/// broken rules file, and quietly compiling "no rules" — which is *also* what
+/// a deliberate delete means — would be a lie about which of the two
+/// happened.
+fn read_rules_file() -> (rules::CompiledRules, Option<String>) {
+    match config::load_rules() {
+        Ok(file) => (rules::compile(&file), None),
+        Err(error) => (rules::CompiledRules::default(), Some(error.to_string())),
+    }
 }
 
 fn main() {
@@ -154,6 +201,24 @@ struct App {
     /// that had quietly decided never to try again. Bringing one up is a
     /// separate state with its own deadline, and it does not count.
     starting: Option<Instant>,
+    /// Auto profile switching: the compiled rules, the stamp they were last
+    /// read at, and the last reason a read failed.
+    ///
+    /// The stamp is what makes "only read when it changed" work; the error is
+    /// kept so a rule file that stays broken logs once instead of once a
+    /// second.
+    rules: rules::CompiledRules,
+    rules_stamp: Option<FileStamp>,
+    rules_error: Option<String>,
+    /// The debounced decision machine.
+    engine: Engine,
+    /// Whether the engine is paused because the Config window is open.
+    auto_paused: bool,
+    /// Accumulated time since the last evaluation.
+    since_auto: Duration,
+    /// The last auto-switch failure, for the same reason `rules_error`
+    /// exists: a retry every second must not be a log line every second.
+    auto_error: Option<String>,
 }
 
 impl App {
@@ -167,6 +232,13 @@ impl App {
             // silently does nothing.
             diagnostics::log_line("tray", &message);
         }
+        let (compiled_rules, rules_error) = read_rules_file();
+        if let Some(message) = &rules_error {
+            diagnostics::log_line(
+                "tray",
+                &format!("rules.json could not be read ({message}); auto profile switching is off"),
+            );
+        }
         Ok(Self {
             tray,
             client,
@@ -178,6 +250,13 @@ impl App {
             since_supervise: Duration::ZERO,
             starting: None,
             passes: 0,
+            rules: compiled_rules,
+            rules_stamp: file_stamp(&config::rules_path()),
+            rules_error,
+            engine: Engine::default(),
+            auto_paused: false,
+            since_auto: Duration::ZERO,
+            auto_error: None,
         })
     }
 
@@ -209,6 +288,13 @@ impl App {
         if self.since_supervise >= TICK {
             self.since_supervise = Duration::ZERO;
             self.supervise();
+        }
+        // Auto profile switching has its own clock, independent of both the
+        // supervision tick and the message pump: see `AUTO_SWITCH_INTERVAL`.
+        self.since_auto += PUMP_INTERVAL;
+        if self.since_auto >= AUTO_SWITCH_INTERVAL {
+            self.since_auto = Duration::ZERO;
+            self.auto_switch();
         }
         // 16ms rather than TICK: `pump_messages` peeks rather than waits, so on
         // its own this loop would spin a core. Sixteen milliseconds keeps a click
@@ -448,6 +534,189 @@ impl App {
                 "tray",
                 &format!("the new renderer has not taken its config yet: {error}"),
             ),
+        }
+    }
+
+    /// One evaluation of the auto profile switching rules.
+    ///
+    /// The rules file is checked first, so an edit made in the Config window
+    /// is picked up even while the engine is paused. Then the one interlock:
+    /// **while the Config window is running, this engine does not arbitrate.**
+    /// The window loads the active profile, pushes it, and can switch profiles
+    /// by hand, so the engine cannot know what happened while it was not the
+    /// authority — and two writers racing over the same pointer is how the
+    /// active profile and the screen stop agreeing. Resuming is therefore a
+    /// reset: the next settled decision goes out again even if it names the
+    /// profile that was already applied.
+    fn auto_switch(&mut self) {
+        self.reload_rules_if_changed();
+
+        if transport::role_is_running(Role::Config) {
+            if !self.auto_paused {
+                self.auto_paused = true;
+                self.engine.resume();
+                diagnostics::log_line(
+                    "tray",
+                    "auto profile switching is paused while the Config window is open",
+                );
+            }
+            return;
+        }
+        if self.auto_paused {
+            self.auto_paused = false;
+            diagnostics::log_line(
+                "tray",
+                "auto profile switching resumed; the current decision will be sent again",
+            );
+        }
+
+        // Only enumerate the desktop when a rule could use the answer. With
+        // switching off, or with nothing but rules that cannot match, the
+        // decision is `None` whatever the windows are, and the snapshot is
+        // the expensive half.
+        let snapshot =
+            if self.rules.enabled && self.rules.rules.iter().any(|rule| rule.error.is_none()) {
+                winwatch::snapshot()
+            } else {
+                rules::Snapshot::default()
+            };
+        let decision = rules::decide(&self.rules, &snapshot);
+        match self
+            .engine
+            .step(decision.as_ref().map(|decision| decision.profile.as_str()))
+        {
+            Tick::Idle => {}
+            Tick::Apply { profile } => {
+                let reason = match decision.as_ref().and_then(|decision| decision.rule_index) {
+                    Some(index) => {
+                        let name = self
+                            .rules
+                            .rules
+                            .get(index)
+                            .map(|rule| rule.name.as_str())
+                            .unwrap_or_default();
+                        if name.trim().is_empty() {
+                            format!("rule {} matched", index + 1)
+                        } else {
+                            format!("rule {} \"{}\" matched", index + 1, name)
+                        }
+                    }
+                    None => "nothing matched, so the fallback applies".to_string(),
+                };
+                self.apply_auto_profile(&profile, &reason);
+            }
+        }
+    }
+
+    /// Re-read `rules.json` when its stamp moved.
+    ///
+    /// A file that will not parse keeps the rules that are already loaded, and
+    /// says so once. Compiling "no rules" instead would strand the user on the
+    /// fallback profile because of a typo, and the run of log lines would be
+    /// the only trace of it.
+    fn reload_rules_if_changed(&mut self) {
+        let path = config::rules_path();
+        let stamp = file_stamp(&path);
+        if stamp == self.rules_stamp {
+            return;
+        }
+        self.rules_stamp = stamp;
+
+        // Deleted means off, and no parse error exists to report. Only logged
+        // when there was something to lose: at startup the stamp is already
+        // this `None`, so the comparison above returns before this branch.
+        if stamp.is_none() {
+            if self.rules.enabled || !self.rules.rules.is_empty() {
+                diagnostics::log_line(
+                    "tray",
+                    "rules.json was removed; auto profile switching is off",
+                );
+            }
+            self.rules = rules::CompiledRules::default();
+            self.rules_error = None;
+            return;
+        }
+
+        match config::load_rules() {
+            Ok(file) => {
+                if self.rules_error.is_some() {
+                    diagnostics::log_line("tray", "rules.json is readable again");
+                }
+                self.rules = rules::compile(&file);
+                self.rules_error = None;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if self.rules_error.as_deref() != Some(message.as_str()) {
+                    diagnostics::log_line(
+                        "tray",
+                        &format!(
+                            "rules.json could not be read ({message}); keeping the rules that \
+                             were already loaded"
+                        ),
+                    );
+                    self.rules_error = Some(message);
+                }
+            }
+        }
+    }
+
+    /// Load a profile and put it on screen, then record it as the active one.
+    ///
+    /// The pointer write is not bookkeeping. The Config window loads that
+    /// pointer at startup and pushes what it loaded, so an auto switch that
+    /// did not record itself would be silently clobbered the moment the user
+    /// opened the window. Both halves run only after the renderer took the
+    /// config: a failed send has to leave the engine wanting to retry, not
+    /// believing the screen matches the pointer.
+    ///
+    /// `reason` is what the decision came from — a matched rule, or the lack
+    /// of one — and it is logged, because "switched to X" without it cannot be
+    /// told apart from a rule matching something unexpected.
+    fn apply_auto_profile(&mut self, profile: &str, reason: &str) {
+        let mut loaded = match config::load_profile(profile) {
+            Ok(config) => config,
+            Err(error) => {
+                let message =
+                    format!("auto profile: could not load profile \"{profile}\": {error}");
+                self.note_auto_error(&message);
+                return;
+            }
+        };
+        loaded.normalize();
+        if let Err(error) = self.send(&Message::SetConfig { config: loaded }) {
+            let message = format!(
+                "auto profile: could not reach the renderer to switch to \"{profile}\": {error}"
+            );
+            self.note_auto_error(&message);
+            return;
+        }
+        self.engine.mark_applied(profile);
+        match config::set_active_profile(profile) {
+            Ok(()) => diagnostics::log_line(
+                "tray",
+                &format!("auto profile: switched to \"{profile}\" ({reason})"),
+            ),
+            Err(error) => diagnostics::log_line(
+                "tray",
+                &format!(
+                    "auto profile: switched to \"{profile}\" ({reason}) but globalconfig.json \
+                     was not updated: {error}"
+                ),
+            ),
+        }
+        self.auto_error = None;
+    }
+
+    /// Log a failure once per distinct message.
+    ///
+    /// The engine retries every second until an apply lands, so the failing
+    /// path runs every second too. A log line a second buries everything else
+    /// in the file, and the retry is deliberate; only a *new* failure is news.
+    fn note_auto_error(&mut self, message: &str) {
+        if self.auto_error.as_deref() != Some(message) {
+            diagnostics::log_line("tray", message);
+            self.auto_error = Some(message.to_string());
         }
     }
 }

@@ -207,12 +207,17 @@
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
   be stored. Preferences live under a single `ui` object, currently
-  `ui.railCollapsed` and `ui.showVersionInTitle`; writing preferences rewrites
-  that object and nothing else, so the active profile pointer and any key a
-  future version adds survive. A file that is missing, unparseable or holds
-  unrelated keys simply yields the defaults. `ui.showVersionInTitle` is off by
-  default, because the window title is already long and the About page is where
-  the version belongs.
+  `ui.railCollapsed`, `ui.showVersionInTitle` and `ui.theme`; writing
+  preferences rewrites that object and nothing else, so the active profile
+  pointer and any key a future version adds survive. A file that is missing,
+  unparseable or holds unrelated keys simply yields the defaults.
+  `ui.showVersionInTitle` is off by default, because the window title is
+  already long and the About page is where the version belongs.
+- `~/.config/.PingLatencyOverlay/rules.json` holds the auto profile switching
+  rules, app-wide like the preferences. It is a file of its own rather than a
+  key in `globalconfig.json` because the tray re-reads it when it changes;
+  see *Auto profile switching*. Its absence means switching is off, and
+  nothing else in the app writes it.
 - The active profile is recorded in that file as `activeProfile` (the id) plus
   `activeProfileFile` (the `profile_<id>.json` name), and both keys are removed
   when the active profile is `default`, so an absent key means `default`.
@@ -245,6 +250,45 @@
   migration that could not be done, a profile that was imported, profile names
   that were added to older files, and a stored active profile that no longer
   resolves.
+
+## Auto profile switching
+- The active profile can change on its own to match the windows that are
+  open. The rules live in `<config dir>/rules.json`, are edited in the Global
+  page under **Auto profile switching**, and are applied by the tray.
+- A rule matches a **window**: every condition is asked about the same
+  candidate window, and the rule matches when one window satisfies all of its
+  conditions — or, with **any**, at least one of them. The candidate is either
+  any visible window on the desktop (the default) or only the focused window.
+- A condition looks at the window's **process name** (`cs2.exe`), its
+  **title**, or its **Win32 class name** (`Chrome_WidgetWin_1`), and compares
+  with **is exactly**, **contains** (both case-insensitive) or **matches
+  regex** (as written; use `(?i)` for a case-insensitive pattern). A rule with
+  an incomplete condition or an invalid pattern disables itself and says so
+  in the editor; it never takes the rest of the file down with it.
+- Rules are checked in order and the first match wins; the arrows in the
+  editor change that order. When no rule matches, the **fallback profile**
+  applies. With no rules, or only rules that cannot match, switching is off
+  rather than "always the fallback".
+- A rule naming a profile that was renamed away or deleted matches nothing
+  and is shown as broken in the editor; no other profile is ever used in its
+  place.
+- A decision has to hold through two consecutive checks (about two seconds)
+  before it is applied, so a launcher handing over to the game it started, or
+  an alt-tab, does not cause a visible flip.
+- The switch is a full profile load: overlays are replaced exactly as if the
+  profile had been chosen in the window, the active profile recorded in
+  `globalconfig.json` is updated, and profile files are never written.
+- **While the Config window is open the rules are not applied.** The window is
+  the authority on the active profile; closing it puts the rules back in
+  charge, which may change the profile within a couple of seconds.
+- The Global page shows what the rules as edited would decide right now.
+- The rules are read when `rules.json` changes, so hand-editing the file
+  takes effect without a restart. A file that cannot be parsed leaves the
+  last good rules in force and is reported; the app never silently replaces
+  it, and **Discard** puts the editor back to the last loaded rules.
+- Auto switching runs in the tray. **Close tray, keep overlays running**
+  leaves the overlays exactly as they are and stops switching until the app is
+  launched again.
 
 ## Themes
 The configuration window is themed. Its colours come from a file rather than

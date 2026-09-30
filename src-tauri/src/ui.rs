@@ -18,7 +18,11 @@ use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig, TargetConfig,
 };
 use ping_latency_overlay_core::monitors::{self, MonitorInfo};
+use ping_latency_overlay_core::rules::{
+    self, AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot,
+};
 use ping_latency_overlay_core::transport::{Client, Message};
+use ping_latency_overlay_core::winwatch;
 
 use crate::theme::{self, windows_app_mode, Mode, Theme, ThemeMode};
 
@@ -898,6 +902,27 @@ pub struct PingApp {
     /// The staged copy the Global page edits, written on Save.
     prefs_draft: config::GlobalPrefs,
     prefs_dirty: bool,
+    /// Auto profile switching as last written to `rules.json`.
+    ///
+    /// Its own draft and flag, exactly like the preferences: the Global page
+    /// edits a copy, Save writes `rules.json`, and Discard puts the copy back.
+    rules: AutoRules,
+    rules_draft: AutoRules,
+    rules_dirty: bool,
+    /// A `rules.json` read failure from startup.
+    ///
+    /// The file is left exactly as it was found — an unreadable file is never
+    /// silently rewritten — and the error stays visible until a Save succeeds,
+    /// because the Save is the user explicitly saying "replace it with this".
+    rules_error: Option<String>,
+    /// What the engine would decide with the rules as currently edited, and
+    /// when that was computed.
+    ///
+    /// On a clock rather than per frame: it enumerates the desktop's windows.
+    /// This is the window-side mirror of the tray's decision, from the same
+    /// pure `rules::decide`, so what the preview says is what the engine does.
+    auto_preview: Option<String>,
+    auto_preview_at: Option<Instant>,
     config_visible: bool,
     running: bool,
     status: String,
@@ -996,6 +1021,16 @@ impl PingApp {
         let loaded = config::load();
         let config = loaded.config;
         let status = config_notices_status(&loaded.notices);
+        // Loaded separately from the profile: it is app-wide and the tray is
+        // already reading it. A parse failure is shown in the status bar and
+        // the section, and never rewrites the file on its own.
+        let (rules, rules_error) = match config::load_rules() {
+            Ok(rules) => (rules, None),
+            Err(error) => (
+                AutoRules::default(),
+                Some(format!("rules.json could not be read: {error}")),
+            ),
+        };
         let active_profile = loaded.active_profile;
         // The one place the rail's collapsed state survives a restart.
         let prefs = loaded.prefs;
@@ -1047,10 +1082,8 @@ impl PingApp {
         let (renderer, _renderer_process, failure) = start_or_attach_renderer();
         // Whatever the notices said at startup survives a renderer that would
         // not start, because both are things the user needs to see.
-        let status = match failure {
-            Some(message) => format!("{status} {message}"),
-            None => status,
-        };
+        let status = append_status_message(status, failure.as_deref());
+        let status = append_status_message(status, rules_error.as_deref());
         let running = true;
 
         cc.egui_ctx.send_viewport_cmd_to(
@@ -1088,6 +1121,12 @@ impl PingApp {
             prefs_draft: prefs.clone(),
             prefs,
             prefs_dirty: false,
+            rules_draft: rules.clone(),
+            rules,
+            rules_dirty: false,
+            rules_error,
+            auto_preview: None,
+            auto_preview_at: None,
             config_visible: show_config,
             running,
             status,
@@ -1414,12 +1453,13 @@ impl PingApp {
         self.push_config();
     }
 
-    /// Whether either draft has something to write.
+    /// Whether any draft has something to write.
     ///
-    /// The profile draft and the preferences draft are independent, and pages
-    /// stage into one or the other, so the footer's buttons must follow both.
+    /// The profile draft, the preferences draft and the rules draft are
+    /// independent, and pages stage into one of them, so the footer's buttons
+    /// must follow all three.
     fn has_pending_edits(&self) -> bool {
-        pending_edits(self.dirty, self.prefs_dirty)
+        pending_edits(self.dirty, self.prefs_dirty, self.rules_dirty)
     }
 
     /// Write the active profile, but only when the profile draft has changed.
@@ -1524,9 +1564,9 @@ impl PingApp {
 
     /// Write whichever drafts are dirty.
     ///
-    /// The profile draft and the preferences draft are independent: the Global
-    /// page stages its own copy, so one Save can carry both.
-    /// Write both drafts that have something to write.
+    /// The profile draft, the preferences draft and the rules draft are
+    /// independent: the Global page stages the latter two, so one Save can
+    /// carry all three.
     ///
     /// Returns whether everything that needed writing was written, which is
     /// what the close prompt gates on: a save that reports success but failed
@@ -1536,10 +1576,11 @@ impl PingApp {
     fn save_edits(&mut self) -> bool {
         let profile_saved = self.persist_current();
         let prefs_saved = self.save_prefs();
-        if profile_saved || prefs_saved {
+        let rules_saved = self.persist_rules();
+        if profile_saved || prefs_saved || rules_saved {
             self.status = "Saved.".to_string();
         }
-        profile_saved && prefs_saved
+        profile_saved && prefs_saved && rules_saved
     }
 
     /// Store the preferences draft, leaving the active profile pointer alone.
@@ -1560,10 +1601,36 @@ impl PingApp {
         }
     }
 
+    /// Store the rules draft, clearing a startup read failure.
+    ///
+    /// The guard mirrors `save_prefs`: writing an untouched draft over a
+    /// `rules.json` a user hand-edited from outside the window would discard
+    /// that edit for no reason. A successful save is also the explicit
+    /// "replace the broken file" permission, so the error notice clears here
+    /// and only here.
+    fn persist_rules(&mut self) -> bool {
+        if !self.rules_dirty {
+            return true;
+        }
+        match config::save_rules(&self.rules_draft) {
+            Ok(()) => {
+                self.rules = self.rules_draft.clone();
+                self.rules_dirty = false;
+                self.rules_error = None;
+                true
+            }
+            Err(error) => {
+                self.status = format!("Could not update rules.json: {error}");
+                false
+            }
+        }
+    }
+
     /// Drop unsaved edits by reloading the active profile and the preferences
     /// from disk.
     fn discard_edits(&mut self) {
         self.discard_prefs();
+        self.discard_rules();
         match config::load_profile(&self.active_profile) {
             Ok(mut stored) => {
                 stored.normalize();
@@ -1586,6 +1653,16 @@ impl PingApp {
         self.prefs_draft = self.prefs.clone();
         self.rail_collapsed = self.prefs.ui.rail_collapsed;
         self.prefs_dirty = false;
+    }
+
+    /// Put the rules back to the last load or save.
+    ///
+    /// `rules` is that value; a read failure left it at its default, which is
+    /// what Discard comes back to. The error itself is kept, because it
+    /// describes the file rather than the draft, and the file is untouched.
+    fn discard_rules(&mut self) {
+        self.rules_draft = self.rules.clone();
+        self.rules_dirty = false;
     }
 
     /// Re-read the profile list, and with it the overlay count every profile
@@ -1661,6 +1738,26 @@ impl PingApp {
             &mut self.monitors_read_at,
             now,
             monitors::enumerate,
+        );
+    }
+
+    /// Refresh the auto switching preview, on the Global page only.
+    ///
+    /// The preview asks the same `rules::decide` the tray's engine does, so a
+    /// rule that shows as matching here is a rule that will switch a profile
+    /// when this window closes. It enumerates the desktop's windows, which is
+    /// why it runs on a clock and only where it is drawn.
+    fn sync_auto_preview(&mut self) {
+        if self.page != Page::Global {
+            return;
+        }
+        sync_auto_preview_text(
+            &mut self.auto_preview,
+            &mut self.auto_preview_at,
+            Instant::now(),
+            &self.rules_draft,
+            &self.profiles,
+            winwatch::snapshot,
         );
     }
 
@@ -2438,6 +2535,9 @@ impl PingApp {
                 }
 
                 ui.add_space(12.0);
+                self.show_auto_switch_section(ui);
+
+                ui.add_space(12.0);
                 ui.label(RichText::new("STORAGE").color(UI_ACCENT()));
                 ui.separator();
                 for (label, path) in [
@@ -2471,6 +2571,59 @@ impl PingApp {
                     });
                 }
             });
+    }
+
+    /// The Global page's auto profile switching section.
+    ///
+    /// Edits stage into `rules_draft` and follow the page's Save/Discard the
+    /// way the preferences do: nothing here reaches `rules.json` until Save,
+    /// and nothing here reaches the engine until this window closes, because
+    /// the tray pauses its engine while the window is open.
+    fn show_auto_switch_section(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("AUTO PROFILE SWITCHING").color(UI_ACCENT()));
+        ui.separator();
+        ui.label(
+            RichText::new(
+                "Switch the active profile to match the windows that are open. Rules are \
+                 applied while this window is closed.",
+            )
+            .color(UI_TEXT_SECONDARY()),
+        );
+
+        // An unreadable file is never rewritten silently, so the error stays
+        // visible until the user either fixes the file or edits a rule and
+        // saves over it.
+        if let Some(error) = &self.rules_error {
+            ui.label(
+                RichText::new(format!(
+                    "{error} The file has been left as it is; editing a rule and saving \
+                     replaces it."
+                ))
+                .color(UI_DANGER()),
+            );
+        }
+
+        if auto_switch_section(
+            ui,
+            &mut self.rules_draft,
+            &self.profiles,
+            &self.active_profile,
+        ) {
+            self.rules_dirty = true;
+        }
+
+        ui.add_space(6.0);
+        match &self.auto_preview {
+            Some(line) => {
+                ui.label(RichText::new(format!("Preview: {line}")).color(UI_TEXT_SECONDARY()));
+            }
+            None => {
+                ui.label(
+                    RichText::new("Switching is off; no profile is chosen automatically.")
+                        .color(UI_TEXT_SECONDARY()),
+                );
+            }
+        }
     }
 
     /// Pane 3 of the About page: what this is, which version, and who wrote it.
@@ -3044,6 +3197,19 @@ impl PingApp {
 }
 
 /// One-time startup results, rendered into the Config status bar.
+/// Append a status-bar message to whatever is already there.
+///
+/// A space only when there is something to separate: an empty status plus a
+/// message must not come out as a leading space, which reads as a missing
+/// word rather than as a boundary.
+fn append_status_message(status: String, message: Option<&str>) -> String {
+    match message {
+        Some(message) if status.is_empty() => message.to_string(),
+        Some(message) => format!("{status} {message}"),
+        None => status,
+    }
+}
+
 fn config_notices_status(notices: &[config::ConfigNotice]) -> String {
     notices
         .iter()
@@ -3092,15 +3258,16 @@ fn can_switch_profile(dirty: bool) -> bool {
     !dirty
 }
 
-/// Whether either draft has something to write.
+/// Whether any draft has something to write.
 ///
-/// There are two independent drafts: the profile draft (`dirty`) and the
-/// app-wide preferences draft (`prefs_dirty`). A page stages into one of them,
-/// so anything asking "is there anything to save?" has to ask about both. Free
-/// function so a test can drive the rule rather than assert a predicate nothing
-/// acts on, which is how this shipped broken.
-fn pending_edits(dirty: bool, prefs_dirty: bool) -> bool {
-    dirty || prefs_dirty
+/// There are three independent drafts: the profile draft (`dirty`), the
+/// app-wide preferences draft (`prefs_dirty`), and the auto profile switching
+/// rules (`rules_dirty`). A page stages into one of them, so anything asking
+/// "is there anything to save?" has to ask about all three. Free function so a
+/// test can drive the rule rather than assert a predicate nothing acts on,
+/// which is how the two-draft version shipped broken.
+fn pending_edits(dirty: bool, prefs_dirty: bool, rules_dirty: bool) -> bool {
+    dirty || prefs_dirty || rules_dirty
 }
 
 /// The Config window title, which names the active profile and optionally carries
@@ -3846,6 +4013,423 @@ fn sync_monitor_list(
     true
 }
 
+/// How often the auto switching preview re-reads the desktop, in seconds.
+///
+/// One, matching the tray's own evaluation cadence, so the preview is never
+/// more than a second behind what the engine would do.
+const AUTO_PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The body of `sync_auto_preview`, with the window enumeration passed in.
+///
+/// Same shape and the same reason as `sync_monitor_list`: a test that only
+/// checked the clock would pass with the enumeration deleted. The text is
+/// computed from `rules::decide` — the same pure function the tray's engine
+/// calls — so the preview cannot drift from the behaviour.
+fn sync_auto_preview_text(
+    text: &mut Option<String>,
+    read_at: &mut Option<Instant>,
+    now: Instant,
+    rules: &AutoRules,
+    profiles: &[config::ProfileEntry],
+    read: impl FnOnce() -> Snapshot,
+) {
+    let due = read_at.is_none_or(|at| now.duration_since(at) >= AUTO_PREVIEW_INTERVAL);
+    if !due {
+        return;
+    }
+    if !rules.enabled {
+        // Nothing to say, and nothing worth enumerating for.
+        *text = None;
+        *read_at = Some(now);
+        return;
+    }
+    let snapshot = read();
+    *text = Some(auto_preview_line(rules, &snapshot, profiles));
+    *read_at = Some(now);
+}
+
+/// What the rules as edited would decide against this desktop.
+///
+/// Wording, not logic: `rules::decide` answers the question, and this only
+/// names the answer. A rule that cannot match is named as such rather than
+/// quietly reported as "nothing matched", because the two are different
+/// problems with different fixes.
+fn auto_preview_line(
+    rules: &AutoRules,
+    snapshot: &Snapshot,
+    profiles: &[config::ProfileEntry],
+) -> String {
+    let compiled = rules::compile(rules);
+    if compiled.rules.iter().all(|rule| rule.error.is_some()) && !compiled.rules.is_empty() {
+        return "No rule can match while its conditions are incomplete.".to_string();
+    }
+    match rules::decide(&compiled, snapshot) {
+        Some(decision) => match decision.rule_index {
+            Some(index) => {
+                let rule = &compiled.rules[index];
+                let name = if rule.name.trim().is_empty() {
+                    format!("rule {}", index + 1)
+                } else {
+                    format!("rule {} \"{}\"", index + 1, rule.name)
+                };
+                format!(
+                    "Matches {name} -> {}",
+                    profile_display_name(profiles, &decision.profile)
+                )
+            }
+            None => format!(
+                "Nothing matches -> {}",
+                profile_display_name(profiles, &decision.profile)
+            ),
+        },
+        None => "Add a rule to start switching.".to_string(),
+    }
+}
+
+/// The display name for a profile id, saying when there is no such profile.
+///
+/// A rule can name a profile that was renamed or deleted; the preview has to
+/// say that rather than draw a name that no longer exists, because "the rule
+/// points at nothing" is the thing the user needs to fix.
+fn profile_display_name(profiles: &[config::ProfileEntry], id: &str) -> String {
+    match profiles.iter().find(|profile| profile.id == id) {
+        Some(profile) => profile.name.clone(),
+        None => format!("{id} (no such profile)"),
+    }
+}
+
+/// The auto profile switching editor's widgets.
+///
+/// A free function taking the rules and the profile list as parameters, so the
+/// widget code does not have to reach through the app for either. Returns
+/// whether anything changed, which is what stages the rules draft.
+fn auto_switch_section(
+    ui: &mut Ui,
+    file: &mut AutoRules,
+    profiles: &[config::ProfileEntry],
+    active_profile: &str,
+) -> bool {
+    let mut changed = false;
+
+    changed |= ui
+        .checkbox(&mut file.enabled, "Enable auto profile switching")
+        .changed();
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("When no rule matches, switch to:");
+        if let Some(chosen) = profile_pick(
+            ui,
+            "auto-fallback",
+            profiles,
+            file.fallback_profile.as_deref(),
+            true,
+        ) {
+            file.fallback_profile = chosen;
+            changed = true;
+        }
+    });
+    if file.enabled && !file.rules.is_empty() && file.fallback_profile.is_none() {
+        ui.label(
+            RichText::new("No fallback is set: when nothing matches, the profile in force stays.")
+                .color(UI_DANGER()),
+        );
+    }
+
+    let total = file.rules.len();
+    let mut remove = None;
+    let mut move_up = None;
+    let mut move_down = None;
+    for (index, rule) in file.rules.iter_mut().enumerate() {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Rule {}", index + 1)).strong());
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut rule.name)
+                        .hint_text("name (optional)")
+                        .id_salt(("rule-name", index))
+                        .desired_width(160.0),
+                )
+                .changed();
+            ui.add_enabled_ui(index > 0, |ui| {
+                if ui.button("Up").clicked() {
+                    move_up = Some(index);
+                }
+            });
+            ui.add_enabled_ui(index + 1 < total, |ui| {
+                if ui.button("Down").clicked() {
+                    move_down = Some(index);
+                }
+            });
+            if ui
+                .button(RichText::new("Remove").color(UI_DANGER()))
+                .clicked()
+            {
+                remove = Some(index);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Look at");
+            changed |= scope_combo(ui, index, &mut rule.scope);
+            ui.label("and require");
+            changed |= combine_combo(ui, index, &mut rule.combine);
+            ui.label("of these conditions:");
+        });
+
+        // Every condition below is asked about the same window; `combine`
+        // decides how their answers join. That is why they are one list and
+        // not one row per source.
+        let mut drop_condition = None;
+        for (position, condition) in rule.when.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                changed |= part_combo(ui, index, position, &mut condition.part);
+                changed |= match_combo(ui, index, position, &mut condition.matcher);
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut condition.value)
+                            .hint_text(part_hint(condition.part))
+                            .id_salt(("condition-value", index, position))
+                            .desired_width(200.0),
+                    )
+                    .changed();
+                if ui.button("X").clicked() {
+                    drop_condition = Some(position);
+                }
+            });
+        }
+        if let Some(position) = drop_condition {
+            rule.when.remove(position);
+            changed = true;
+        }
+        if ui.button("+ Add condition").clicked() {
+            rule.when.push(Condition::default());
+            changed = true;
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Switch to");
+            if let Some(chosen) = profile_pick(
+                ui,
+                ("rule-profile", index),
+                profiles,
+                Some(rule.profile.as_str()),
+                false,
+            ) {
+                rule.profile = chosen.unwrap_or_default();
+                changed = true;
+            }
+        });
+
+        // From the same compiler the engine uses, so the editor cannot claim
+        // a rule is fine while the tray skips it.
+        if let Some(error) = rule_error(rule) {
+            ui.label(RichText::new(format!("Cannot match: {error}")).color(UI_DANGER()));
+        }
+    }
+
+    // Structural edits after the iteration borrow ends.
+    if let Some(index) = remove {
+        file.rules.remove(index);
+        changed = true;
+    }
+    if let Some(index) = move_up {
+        file.rules.swap(index - 1, index);
+        changed = true;
+    }
+    if let Some(index) = move_down {
+        file.rules.swap(index, index + 1);
+        changed = true;
+    }
+
+    ui.add_space(8.0);
+    if ui.button("+ Add rule").clicked() {
+        file.rules.push(Rule {
+            name: String::new(),
+            scope: Scope::default(),
+            combine: Combine::default(),
+            when: vec![Condition::default()],
+            profile: active_profile.to_string(),
+        });
+        // A fallback is required in spirit once a rule exists, so the first
+        // rule sets one from the profiles that are there rather than leaving
+        // a warning to fill in later.
+        if file.fallback_profile.is_none() {
+            file.fallback_profile = Some(default_fallback(profiles, active_profile));
+        }
+        changed = true;
+    }
+
+    changed
+}
+
+/// Why a rule cannot match, from the same compiler the engine uses.
+fn rule_error(rule: &Rule) -> Option<String> {
+    let probe = AutoRules {
+        enabled: true,
+        fallback_profile: None,
+        rules: vec![rule.clone()],
+    };
+    rules::compile(&probe)
+        .rules
+        .into_iter()
+        .next()
+        .and_then(|compiled| compiled.error)
+}
+
+/// The fallback a new rule set starts with: `default` when it exists, then
+/// the first profile, then whatever is in force.
+fn default_fallback(profiles: &[config::ProfileEntry], active_profile: &str) -> String {
+    profiles
+        .iter()
+        .find(|profile| profile.id == config::DEFAULT_PROFILE)
+        .or_else(|| profiles.first())
+        .map(|profile| profile.id.clone())
+        .unwrap_or_else(|| active_profile.to_string())
+}
+
+/// A dropdown of profiles, showing display names and resolving to ids.
+///
+/// The value is the profile **id**; display names may repeat and a rule that
+/// stored one would silently follow the wrong file. An id that no longer
+/// resolves is drawn as such rather than omitted, because a `ComboBox` whose
+/// entries do not contain the selected value falls back to its first row —
+/// which would show a different profile as chosen. Returns the picked value,
+/// or `None` when nothing was clicked; `Some(None)` is the explicit "not set"
+/// choice, which only the fallback picker offers.
+fn profile_pick(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    profiles: &[config::ProfileEntry],
+    current: Option<&str>,
+    allow_none: bool,
+) -> Option<Option<String>> {
+    let selected = match current {
+        Some(id) => profile_display_name(profiles, id),
+        None => "(not set)".to_string(),
+    };
+    let mut chosen = None;
+    ComboBox::from_id_salt(id_salt)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            if allow_none
+                && ui
+                    .selectable_label(current.is_none(), "(not set)")
+                    .clicked()
+            {
+                chosen = Some(None);
+            }
+            for profile in profiles {
+                let picked = current == Some(profile.id.as_str());
+                if ui.selectable_label(picked, &profile.name).clicked() {
+                    chosen = Some(Some(profile.id.clone()));
+                }
+            }
+        });
+    chosen
+}
+
+fn scope_combo(ui: &mut Ui, index: usize, scope: &mut Scope) -> bool {
+    let mut changed = false;
+    ComboBox::from_id_salt(("rule-scope", index))
+        .selected_text(scope_label(*scope))
+        .show_ui(ui, |ui| {
+            for option in [Scope::AnyWindow, Scope::Foreground] {
+                changed |= ui
+                    .selectable_value(scope, option, scope_label(option))
+                    .changed();
+            }
+        });
+    changed
+}
+
+fn combine_combo(ui: &mut Ui, index: usize, combine: &mut Combine) -> bool {
+    let mut changed = false;
+    ComboBox::from_id_salt(("rule-combine", index))
+        .selected_text(combine_label(*combine))
+        .show_ui(ui, |ui| {
+            for option in [Combine::All, Combine::Any] {
+                changed |= ui
+                    .selectable_value(combine, option, combine_label(option))
+                    .changed();
+            }
+        });
+    changed
+}
+
+fn part_combo(ui: &mut Ui, index: usize, position: usize, part: &mut Part) -> bool {
+    let mut changed = false;
+    ComboBox::from_id_salt(("condition-part", index, position))
+        .selected_text(part_label(*part))
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            for option in [Part::ProcessName, Part::Title, Part::ClassName] {
+                changed |= ui
+                    .selectable_value(part, option, part_label(option))
+                    .changed();
+            }
+        });
+    changed
+}
+
+fn match_combo(ui: &mut Ui, index: usize, position: usize, matcher: &mut MatchMode) -> bool {
+    let mut changed = false;
+    ComboBox::from_id_salt(("condition-match", index, position))
+        .selected_text(match_label(*matcher))
+        .width(110.0)
+        .show_ui(ui, |ui| {
+            for option in [MatchMode::Exact, MatchMode::Contains, MatchMode::Regex] {
+                changed |= ui
+                    .selectable_value(matcher, option, match_label(option))
+                    .changed();
+            }
+        });
+    changed
+}
+
+fn scope_label(scope: Scope) -> &'static str {
+    match scope {
+        Scope::AnyWindow => "any window",
+        Scope::Foreground => "the foreground window",
+    }
+}
+
+fn combine_label(combine: Combine) -> &'static str {
+    match combine {
+        Combine::All => "all",
+        Combine::Any => "any",
+    }
+}
+
+fn part_label(part: Part) -> &'static str {
+    match part {
+        Part::ProcessName => "process name",
+        Part::Title => "window title",
+        Part::ClassName => "window class",
+    }
+}
+
+fn match_label(matcher: MatchMode) -> &'static str {
+    match matcher {
+        MatchMode::Exact => "is exactly",
+        MatchMode::Contains => "contains",
+        MatchMode::Regex => "matches regex",
+    }
+}
+
+/// Placeholder text for a condition's value, naming the kind of thing that
+/// goes there: the three parts are not interchangeable, and the field is the
+/// one a user has to know what to type in.
+fn part_hint(part: Part) -> &'static str {
+    match part {
+        Part::ProcessName => "cs2.exe",
+        Part::Title => "Counter-Strike",
+        Part::ClassName => "Chrome_WidgetWin_1",
+    }
+}
+
 /// How the detail pane words an overlay count, or nothing when it is unknown.
 ///
 /// A count that has not been read is not the same as a profile with no overlays,
@@ -4013,6 +4597,7 @@ impl App for PingApp {
         self.sync_border_preview();
         self.sync_profiles();
         self.sync_monitors();
+        self.sync_auto_preview();
         self.sync_theme(ctx);
         self.sync_window_title(ctx);
         // The renderer owns every animation now: smooth rendering, the
@@ -4786,30 +5371,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        about_page_lines, app_version, can_switch_profile, choose_theme, config,
-        config_notice_status, config_notices_status, deselect_strip_rect, draw_pane_divider,
+        about_page_lines, app_version, append_status_message, auto_preview_line,
+        auto_switch_section, can_switch_profile, choose_theme, config, config_notice_status,
+        config_notices_status, default_fallback, deselect_strip_rect, draw_pane_divider,
         empty_editor, host_row_label, list_pane_column, list_pane_row_height,
         list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
         overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
         page_has_list_pane, pending_edits, profile_name_width, profile_row_contents,
-        profile_row_label, rail_width, requested_url, row_inner, runtime_config_changed,
-        selected_overlay_for_border, selected_target_in, sync_monitor_list, sync_profile_cache,
-        sync_theme, theme, theme_choices, toggled_selection, ui_text_size, window_title, AboutKind,
-        Frame, Mode, Page, ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS,
-        ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
-        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
-        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
-        PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH,
-        ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT,
-        UI_BACKGROUND, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+        profile_row_label, rail_width, requested_url, row_inner, rule_error,
+        runtime_config_changed, selected_overlay_for_border, selected_target_in,
+        sync_auto_preview_text, sync_monitor_list, sync_profile_cache, sync_theme, theme,
+        theme_choices, toggled_selection, ui_text_size, window_title, AboutKind, Frame, Mode, Page,
+        ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
+        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
+        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
+        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
+        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, UI_BACKGROUND,
+        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{
         Anchor, Config, ConfigNotice, OverlayConfig, ProbeConfig, ProfileEntry, TargetConfig,
     };
     use ping_latency_overlay_core::monitors::{self, MonitorInfo};
+    use ping_latency_overlay_core::rules::{
+        AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot, WindowInfo,
+    };
     use std::collections::HashMap;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     /// A staged edit reaches the renderer without a Save.
     ///
@@ -5896,29 +6486,311 @@ mod tests {
         );
     }
 
-    /// Save and Discard follow *either* draft.
+    /// Save and Discard follow *every* draft.
     ///
-    /// The profile draft and the preferences draft are separate flags and pages
-    /// stage into one or the other, so gating the footer on the profile flag
-    /// alone left every Global preference unsaveable. The rail-collapse
-    /// preference has been in that state since it shipped.
+    /// The profile draft, the preferences draft and the rules draft are
+    /// separate flags and pages stage into one of them, so gating the footer
+    /// on the profile flag alone left every Global preference unsaveable. The
+    /// rail-collapse preference has been in that state since it shipped, and
+    /// the rules section would have repeated it.
     #[test]
-    fn the_footer_follows_either_draft() {
+    fn the_footer_follows_every_draft() {
         let cases = [
-            (false, false, false),
-            (true, false, true),
-            (false, true, true),
-            (true, true, true),
+            (false, false, false, false),
+            (true, false, false, true),
+            (false, true, false, true),
+            (false, false, true, true),
+            (true, true, true, true),
         ];
-        for (dirty, prefs_dirty, expected) in cases {
+        for (dirty, prefs_dirty, rules_dirty, expected) in cases {
             assert_eq!(
-                pending_edits(dirty, prefs_dirty),
+                pending_edits(dirty, prefs_dirty, rules_dirty),
                 expected,
-                "with the profile draft {dirty} and the preferences draft {prefs_dirty} \
-                 Save and Discard should be {}",
+                "with the profile draft {dirty}, the preferences draft {prefs_dirty} and the \
+                 rules draft {rules_dirty}, Save and Discard should be {}",
                 if expected { "enabled" } else { "disabled" }
             );
         }
+    }
+
+    /// A status message must not start with a space.
+    ///
+    /// The startup path joins several independent messages, and an empty
+    /// status plus one message is the ordinary case for a clean install.
+    /// A leading space reads as a missing word at the front of the status bar.
+    #[test]
+    fn a_status_message_does_not_start_with_a_space() {
+        assert_eq!(append_status_message(String::new(), Some("hello")), "hello");
+        assert_eq!(
+            append_status_message("one".to_string(), Some("two")),
+            "one two"
+        );
+        assert_eq!(append_status_message("one".to_string(), None), "one");
+    }
+
+    /// The preview is the engine's own decision, named.
+    ///
+    /// It runs `rules::decide` — the same pure function the tray's engine
+    /// calls — so the preview cannot describe behaviour the engine does not
+    /// have. The cases are the ones a user needs told apart: a rule matched,
+    /// nothing matched and the fallback applies, and nothing can match at all.
+    #[test]
+    fn the_preview_names_what_the_engine_would_do() {
+        let profiles = vec![
+            ProfileEntry {
+                id: "default".to_string(),
+                name: "Default".to_string(),
+            },
+            ProfileEntry {
+                id: "gaming".to_string(),
+                name: "Gaming".to_string(),
+            },
+        ];
+        let mut file = AutoRules {
+            enabled: true,
+            fallback_profile: Some("default".to_string()),
+            rules: vec![Rule {
+                name: "CS2".to_string(),
+                scope: Scope::AnyWindow,
+                combine: Combine::All,
+                when: vec![Condition {
+                    part: Part::ProcessName,
+                    matcher: MatchMode::Exact,
+                    value: "cs2.exe".to_string(),
+                }],
+                profile: "gaming".to_string(),
+            }],
+        };
+        let matched = Snapshot {
+            windows: vec![WindowInfo {
+                process: "cs2.exe".to_string(),
+                title: "Counter-Strike 2".to_string(),
+                class_name: "SDL_app".to_string(),
+            }],
+            foreground: None,
+        };
+        let empty = Snapshot::default();
+
+        assert_eq!(
+            auto_preview_line(&file, &matched, &profiles),
+            "Matches rule 1 \"CS2\" -> Gaming"
+        );
+        assert_eq!(
+            auto_preview_line(&file, &empty, &profiles),
+            "Nothing matches -> Default"
+        );
+
+        // A rule pointing at a deleted profile must say so rather than draw a
+        // name that no longer exists.
+        file.rules[0].profile = "gone".to_string();
+        assert_eq!(
+            auto_preview_line(&file, &matched, &profiles),
+            "Matches rule 1 \"CS2\" -> gone (no such profile)"
+        );
+
+        // Enabled with no usable rule is inert, not "always fall back".
+        file.rules[0].when.clear();
+        assert_eq!(
+            auto_preview_line(&file, &empty, &profiles),
+            "No rule can match while its conditions are incomplete."
+        );
+    }
+
+    /// The preview re-reads the desktop on a clock, and not when switching is
+    /// off.
+    ///
+    /// The enumeration is the cost, so this is the half worth pinning: a due
+    /// check that never fires leaves a stale preview, and one that always
+    /// fires enumerates every frame.
+    #[test]
+    fn the_preview_only_reads_the_desktop_when_it_is_due() {
+        let profiles: Vec<ProfileEntry> = Vec::new();
+        let enabled = AutoRules {
+            enabled: true,
+            fallback_profile: None,
+            rules: Vec::new(),
+        };
+        let mut text = None;
+        let mut read_at = None;
+        let start = Instant::now();
+        let reads = std::cell::Cell::new(0);
+        // A fresh closure per call: the count is shared through the `Cell`,
+        // and `sync_auto_preview_text` takes its read by value.
+        let count_read = || {
+            reads.set(reads.get() + 1);
+            Snapshot::default()
+        };
+
+        sync_auto_preview_text(
+            &mut text,
+            &mut read_at,
+            start,
+            &enabled,
+            &profiles,
+            count_read,
+        );
+        assert_eq!(reads.get(), 1, "the first pass should read");
+        sync_auto_preview_text(
+            &mut text,
+            &mut read_at,
+            start + Duration::from_millis(500),
+            &enabled,
+            &profiles,
+            count_read,
+        );
+        assert_eq!(
+            reads.get(),
+            1,
+            "a pass inside the interval re-read the desktop"
+        );
+        sync_auto_preview_text(
+            &mut text,
+            &mut read_at,
+            start + Duration::from_secs(2),
+            &enabled,
+            &profiles,
+            count_read,
+        );
+        assert_eq!(reads.get(), 2, "the interval elapsed and nothing re-read");
+
+        // Off says nothing and costs nothing. The clock moves forward, as a
+        // real one does: a due check against a time that went backwards
+        // saturates rather than firing, and that is not the case under test.
+        let off = AutoRules::default();
+        sync_auto_preview_text(
+            &mut text,
+            &mut read_at,
+            start + Duration::from_secs(4),
+            &off,
+            &profiles,
+            count_read,
+        );
+        assert_eq!(reads.get(), 2, "switching off still enumerated the desktop");
+        assert_eq!(text, None);
+    }
+
+    /// The fallback a new rule set starts with is the `default` profile when
+    /// it exists, because that is the one every install has.
+    #[test]
+    fn a_new_rule_set_falls_back_to_default_when_it_exists() {
+        let with_default = vec![
+            ProfileEntry {
+                id: "gaming".to_string(),
+                name: "Gaming".to_string(),
+            },
+            ProfileEntry {
+                id: "default".to_string(),
+                name: "Default".to_string(),
+            },
+        ];
+        assert_eq!(default_fallback(&with_default, "gaming"), "default");
+
+        let without_default = vec![ProfileEntry {
+            id: "work".to_string(),
+            name: "Work".to_string(),
+        }];
+        assert_eq!(default_fallback(&without_default, "work"), "work");
+        assert_eq!(default_fallback(&[], "work"), "work");
+    }
+
+    /// Drawing the editor must not stage a draft by itself.
+    ///
+    /// Every widget in the section can report a change, and the caller turns
+    /// that into `rules_dirty`, which enables Save. A widget that fires on its
+    /// own — a combo that reports a change for merely being drawn, an id
+    /// collision between two rows — would make every visit to the Global page
+    /// stage a `rules.json` write. This runs the whole section headlessly with
+    /// a representative file, including a rule that cannot match, and holds
+    /// both halves: the drawing itself must not report a change.
+    #[test]
+    fn drawing_the_rules_editor_does_not_stage_a_draft() {
+        let profiles = vec![
+            ProfileEntry {
+                id: "default".to_string(),
+                name: "Default".to_string(),
+            },
+            ProfileEntry {
+                id: "gaming".to_string(),
+                name: "Gaming".to_string(),
+            },
+        ];
+        let mut draft = AutoRules {
+            enabled: true,
+            fallback_profile: Some("default".to_string()),
+            rules: vec![
+                Rule {
+                    name: "CS2".to_string(),
+                    scope: Scope::AnyWindow,
+                    combine: Combine::All,
+                    when: vec![
+                        Condition {
+                            part: Part::ProcessName,
+                            matcher: MatchMode::Exact,
+                            value: "cs2.exe".to_string(),
+                        },
+                        Condition {
+                            part: Part::Title,
+                            matcher: MatchMode::Regex,
+                            value: "(?i)counter".to_string(),
+                        },
+                    ],
+                    profile: "gaming".to_string(),
+                },
+                // A second rule, so the loop's ids are exercised more than
+                // once, carrying the incomplete condition the editor is
+                // expected to report rather than hide.
+                Rule {
+                    name: String::new(),
+                    scope: Scope::Foreground,
+                    combine: Combine::Any,
+                    when: vec![Condition::default()],
+                    profile: "gone".to_string(),
+                },
+            ],
+        };
+
+        let ctx = egui::Context::default();
+        let mut staged = true;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            staged = auto_switch_section(ui, &mut draft, &profiles, "default");
+        });
+        output.textures_delta.clear();
+
+        assert!(
+            !staged,
+            "drawing the rules editor staged a draft without being touched"
+        );
+    }
+
+    /// The editor's per-rule warning comes from the engine's own compiler.
+    #[test]
+    fn a_rule_that_cannot_match_says_why() {
+        let valid = Rule {
+            name: "CS2".to_string(),
+            scope: Scope::AnyWindow,
+            combine: Combine::All,
+            when: vec![Condition {
+                part: Part::ProcessName,
+                matcher: MatchMode::Exact,
+                value: "cs2.exe".to_string(),
+            }],
+            profile: "gaming".to_string(),
+        };
+        assert_eq!(rule_error(&valid), None);
+
+        let mut unfinished = valid.clone();
+        unfinished.when = vec![Condition::default()];
+        assert_eq!(
+            rule_error(&unfinished).as_deref(),
+            Some("condition 1 has an empty value")
+        );
+
+        let mut bad_regex = valid;
+        bad_regex.when[0].matcher = MatchMode::Regex;
+        bad_regex.when[0].value = "(".to_string();
+        assert!(rule_error(&bad_regex)
+            .as_deref()
+            .is_some_and(|error| error.contains("not a valid regular expression")));
     }
 
     /// No line on the About page may be smaller than the rest of the window's

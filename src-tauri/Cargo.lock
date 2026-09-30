@@ -2629,6 +2629,7 @@ dependencies = [
  "dirs 5.0.1",
  "log",
  "ping-rs",
+ "regex",
  "serde",
  "serde_json",
  "tiny-skia",
