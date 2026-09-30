@@ -5,7 +5,7 @@
 //! running, and relays menu choices to that renderer down the pipe. The
 //! configuration window is a *separate* process, started on demand, because a
 //! window that creates an OpenGL context costs tens of megabytes of driver
-//! memory for as long as it exists â€” memory this process used to pay for the
+//! memory for as long as it exists — memory this process used to pay for the
 //! whole session, including every session where the window was never opened.
 //!
 //! So the two things a user can lose by this process exiting are handled
@@ -435,7 +435,7 @@ impl App {
     /// way back. "Only ever stop a process you did not spawn" is about *killing*
     /// something that has state you might destroy. A dead process has no state,
     /// and not restarting it leaves the user with an app that silently does
-    /// nothing â€” which is worse than any rule this is protecting.
+    /// nothing — which is worse than any rule this is protecting.
     ///
     /// Losing the pipe is the signal, and it is a better one than a child
     /// handle anyway: a renderer that hung without exiting still holds the

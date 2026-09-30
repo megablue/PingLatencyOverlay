@@ -11,7 +11,7 @@
 //! `default` ships with the app and is **repaired, not protected**: its two files
 //! are embedded in the binary and written to disk at startup when the copy on
 //! disk is missing or unreadable. A file that parses is honoured, so editing one
-//! is a real thing you can do. The alternative Ã¢â‚¬â€ always overwriting Ã¢â‚¬â€ destroys
+//! is a real thing you can do. The alternative — always overwriting — destroys
 //! an edit without saying so, and a theme you cannot experiment with is not
 //! worth having on disk at all.
 //!
@@ -22,8 +22,8 @@
 //!
 //! The first is the `Visuals` **base**. `Visuals::light()` and `Visuals::dark()`
 //! are not the same palette with the ends swapped: much of egui's widget
-//! drawing Ã¢â‚¬â€ checkbox ticks, scrollbar grips, selection handles, shaded
-//! non-interactive text Ã¢â‚¬â€ is derived from that base rather than from the fields
+//! drawing — checkbox ticks, scrollbar grips, selection handles, shaded
+//! non-interactive text — is derived from that base rather than from the fields
 //! below. Repainting the fifteen colours onto a dark base produces a light
 //! background sitting on dark internals, which is the classic half-themed
 //! window. `visuals` switches the base and *then* applies the palette.
@@ -80,7 +80,7 @@ impl Mode {
 /// The user's Windows app theme, from the registry.
 ///
 /// Read on demand rather than cached at startup, so flipping Windows between
-/// light and dark follows through to the window while it is open Ã¢â‚¬â€ which is the
+/// light and dark follows through to the window while it is open — which is the
 /// point of `System` being the default.
 ///
 /// Declared here rather than taken from a crate: this is the application
@@ -415,7 +415,7 @@ impl Palette {
 ///
 /// Both, not just the one in use. A theme directory holding only whichever file
 /// the last launch happened to need is a directory whose contents depend on what
-/// the machine was set to that day, and `core.json` is the required one â€” a user
+/// the machine was set to that day, and `core.json` is the required one — a user
 /// opening the folder to look at it should find the light theme there whether or
 /// not they have ever run the app in light mode.
 ///
@@ -517,7 +517,7 @@ pub fn contrast_report(colors: &Palette) -> Vec<String> {
 ///
 /// So `set_visuals` on its own writes into one of two slots without choosing
 /// which. A theme change that crossed egui's own detection left widgets reading
-/// the other slot â€” one this app had never written â€” so they rendered with
+/// the other slot — one this app had never written — so they rendered with
 /// egui's stock light or dark defaults: light buttons on a dark window, white
 /// text on white. The painted half of the app was fine, because it reads the
 /// thread-local palette, which is why the failure looked partial.
@@ -815,8 +815,8 @@ mod tests {
         // A hand edit survives, because "immutable" means repaired, not
         // overwritten. A user who edits this is experimenting.
         //
-        // The edit is deliberately an unreadable one â€” near-black background
-        // under the inherited dark text â€” because that also pins the other half
+        // The edit is deliberately an unreadable one — near-black background
+        // under the inherited dark text — because that also pins the other half
         // of the contract: an edit that cannot be read is still honoured, and
         // the contrast check reports it rather than silently reverting it. A
         // theme that quietly undid your edit would be worse than one that
@@ -856,7 +856,7 @@ mod tests {
 
     /// A theme change has to reach the *widgets*, and stay there.
     ///
-    /// This drives `apply` â€” the same call `sync_theme` makes â€” and reads a real
+    /// This drives `apply` — the same call `sync_theme` makes — and reads a real
     /// button's resolved fill out of a frame, rather than checking that the mode
     /// changed or that `set_visuals` was called. Both of those passed while the
     /// window showed white text on white buttons, because the painted half reads
@@ -865,7 +865,7 @@ mod tests {
     /// The sequence is the one that actually happens. egui re-reads its own
     /// `theme_preference` from the OS on every pass, so the slot it picks can
     /// change *after* `apply` has already written. The window is momentarily
-    /// right â€” the palette is in the slot egui was using â€” and then the next
+    /// right — the palette is in the slot egui was using — and then the next
     /// pass switches slot and the widgets read one this app never wrote. So the
     /// test applies a theme, then lets egui switch slots, then reads a widget.
     #[test]
