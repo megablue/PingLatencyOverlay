@@ -5264,6 +5264,20 @@ fn edit_overlay(
             overlay.monitor_device = chosen;
             *changed = true;
         }
+        let mut wallpaper_mode = overlay.wallpaper_mode;
+        if ui
+            .checkbox(&mut wallpaper_mode, "Wallpaper mode")
+            .on_hover_text(
+                "Keeps the overlay on the desktop: above the wallpaper, below \
+                 the desktop icons and every normal window, with the taskbar \
+                 above it. It is not visible over fullscreen or borderless \
+                 apps — that is the mode, not a fault.",
+            )
+            .changed()
+        {
+            overlay.wallpaper_mode = wallpaper_mode;
+            *changed = true;
+        }
         Grid::new("position-offsets-grid")
             .num_columns(2)
             .spacing([12.0, 8.0])

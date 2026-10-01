@@ -186,6 +186,17 @@ pub struct OverlayConfig {
     /// screen to say why.
     #[serde(default)]
     pub monitor_device: Option<String>,
+    /// Whether the overlay sits on the desktop instead of always on top.
+    ///
+    /// On means above the wallpaper and below the desktop icons, covered by
+    /// normal windows and the taskbar: the window embeds into the desktop's own
+    /// hierarchy, which is also what keeps it visible when the desktop is
+    /// shown. Off is the original always-on-top overlay.
+    ///
+    /// Off by default, which `#[serde(default)]` is what carries: every profile
+    /// written before this field existed keeps today's behaviour.
+    #[serde(default)]
+    pub wallpaper_mode: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -410,6 +421,7 @@ impl OverlayConfig {
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
             monitor_device: None,
+            wallpaper_mode: false,
         }
     }
 
@@ -2194,6 +2206,43 @@ mod tests {
         let config: Config = serde_json::from_str(json).expect("a profile without a monitor field");
         assert_eq!(config.overlays[0].monitor_device, None);
         assert_eq!(OverlayConfig::new().monitor_device, None);
+    }
+
+    /// Wallpaper mode is off unless it is asked for, and it survives a save.
+    ///
+    /// Both halves matter: a profile written before the field existed must keep
+    /// the always-on-top behaviour, and a profile that turned it on must come
+    /// back on after a restart.
+    #[test]
+    fn wallpaper_mode_defaults_off_and_round_trips() {
+        let mut config = OverlayConfig::new();
+        assert!(
+            !config.wallpaper_mode,
+            "an overlay must stay on top unless wallpaper mode is asked for"
+        );
+
+        config.wallpaper_mode = true;
+        let json = serde_json::to_string(&config).expect("serialize");
+        assert!(
+            json.contains("\"wallpaperMode\":true"),
+            "the field did not reach the file: {json}"
+        );
+        let parsed: OverlayConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(parsed.wallpaper_mode);
+
+        // The pre-field case: the same file with the key removed has to load
+        // with today's behaviour rather than failing on a missing member.
+        let without = json
+            .replace("\"wallpaperMode\":true,", "")
+            .replace(",\"wallpaperMode\":true", "")
+            .replace("\"wallpaperMode\":true", "");
+        assert!(!without.contains("wallpaperMode"));
+        let parsed: OverlayConfig =
+            serde_json::from_str(&without).expect("a profile without the field");
+        assert!(
+            !parsed.wallpaper_mode,
+            "a profile written before wallpaper mode existed must stay on top"
+        );
     }
 
     #[test]

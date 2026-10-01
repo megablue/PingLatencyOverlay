@@ -777,6 +777,25 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
 - Overlays are not egui child viewports. Each is a native `WS_EX_LAYERED` popup
   rendered with `UpdateLayeredWindow`, so it has true per-pixel alpha, no DWM
   frame, no taskbar button, no focus, and mouse passthrough.
+- **Wallpaper mode parks the window above the desktop instead of embedding it,
+  and that is a measured decision, not a simplification.** A layered child of
+  the desktop presents nothing but a flash on the raised desktop (build 26100+
+  and this machine's 26300: the compositor does not hold the content of a child
+  under `Progman`), and the only recommended way to live in that layer is a GPU
+  present path — which the renderer deliberately does not have. The overlay
+  therefore stays an ordinary top-level layered window: created without
+  `WS_EX_TOPMOST`, and placed with `SetWindowPos(hwnd, host, …)` so it sits
+  directly above the shell's desktop window (`GetShellWindow`, i.e. Progman),
+  which puts it above the wallpaper and the desktop icons and below every
+  normal window and the taskbar. It is above the icons rather than below them —
+  the icons show through wherever the overlay draws nothing — and it is what
+  Rainmeter's on-desktop skins do. The re-assert that used to re-set topmost is
+  checked rather than unconditional (`GetWindow(hwnd, GW_HWNDNEXT) == host`),
+  because re-placing a window that is already in the right spot is churn the
+  user sees as a flicker; if the shell window cannot be found the window is
+  simply re-checked the next second. A wallpaper-mode window refuses
+  `SC_MINIMIZE` in its window procedure, so Show Desktop cannot take it away —
+  the absent topmost bit is also the mode's flag there.
 - `render.rs` writes premultiplied RGBA; `overlay.rs` swaps R/B to premultiplied
   BGRA before copying it into a 32-bit DIB. `bgOpacity=0` leaves the alpha byte
   at zero; positive values are composited by Windows.

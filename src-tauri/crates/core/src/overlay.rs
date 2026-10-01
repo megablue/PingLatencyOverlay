@@ -211,6 +211,9 @@ pub(crate) mod win {
         ) -> BOOL;
         pub fn TranslateMessage(lpmsg: *const MSG) -> BOOL;
         pub fn DispatchMessageW(lpmsg: *const MSG) -> LRESULT;
+        pub fn GetShellWindow() -> HWND;
+        pub fn GetWindow(hwnd: HWND, ucmd: UINT) -> HWND;
+        pub fn GetWindowLongPtrW(hwnd: HWND, nindex: i32) -> isize;
     }
 
     #[link(name = "gdi32")]
@@ -244,11 +247,11 @@ pub(crate) mod win {
 #[cfg(windows)]
 use win::{
     CreateCompatibleDC, CreateDIBSection, CreateWindowExW, DefWindowProcW, DeleteDC, DeleteObject,
-    DestroyWindow, DispatchMessageW, GetDC, GetModuleHandleW, GetStockObject, PeekMessageW,
-    RegisterClassW, ReleaseDC, SelectObject, SetProcessDpiAwarenessContext, SetWindowPos,
-    ShowWindow, TranslateMessage, UnregisterClassW, UpdateLayeredWindow, UpdateWindow,
-    ValidateRect, BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MSG,
-    POINT, RECT, SIZE, UINT, WNDCLASSW, WPARAM,
+    DestroyWindow, DispatchMessageW, GetDC, GetModuleHandleW, GetShellWindow, GetStockObject,
+    GetWindow, GetWindowLongPtrW, PeekMessageW, RegisterClassW, ReleaseDC, SelectObject,
+    SetProcessDpiAwarenessContext, SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW,
+    UpdateLayeredWindow, UpdateWindow, ValidateRect, BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ,
+    HINSTANCE, HWND, LPARAM, LRESULT, MSG, POINT, RECT, SIZE, UINT, WNDCLASSW, WPARAM,
 };
 
 #[cfg(windows)]
@@ -265,6 +268,23 @@ const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 #[cfg(windows)]
 const HWND_TOPMOST: HWND = -1isize as HWND;
+/// The z-order argument that takes a window out of the topmost band (and clears
+/// `WS_EX_TOPMOST`), which is how wallpaper mode starts.
+#[cfg(windows)]
+const HWND_NOTOPMOST: HWND = -2isize as HWND;
+#[cfg(windows)]
+const GWL_EXSTYLE: i32 = -20;
+/// `GetWindow` argument for the window directly below this one in z-order.
+#[cfg(windows)]
+const GW_HWNDNEXT: u32 = 3;
+/// The system-command message and the minimize request within it.
+///
+/// Show Desktop minimizes every window; a wallpaper-mode overlay refuses that
+/// instead of vanishing from the desktop it belongs to.
+#[cfg(windows)]
+const WM_SYSCOMMAND: u32 = 0x0112;
+#[cfg(windows)]
+const SC_MINIMIZE: usize = 0xF020;
 #[cfg(windows)]
 const SWP_NOSIZE: u32 = 0x0001;
 #[cfg(windows)]
@@ -840,6 +860,10 @@ impl OverlayManager {
                 }
             }
             let config_changed = window.config != *overlay;
+            // Captured before `window.config` is replaced below, and only when
+            // the mode actually moved: every other config edit is not a reason
+            // to touch the desktop hierarchy.
+            let wallpaper_changed = window.config.wallpaper_mode != overlay.wallpaper_mode;
             let border_selection_changed = window.border_selected != selected;
             window.border_selected = selected;
             // A target added, removed, disabled or reordered changes what the
@@ -911,8 +935,37 @@ impl OverlayManager {
                     }
                 }
             }
+            let moved = window.size != size || window.position != position;
             window.size = size;
             window.position = position;
+            if wallpaper_changed {
+                if overlay.wallpaper_mode {
+                    // Leaving the topmost band makes the window a neighbour of
+                    // the desktop instead of a layer over everything;
+                    // `park_above_desktop` then puts it directly above the
+                    // shell's desktop window, where the once-a-second check
+                    // keeps it.
+                    unsafe {
+                        SetWindowPos(
+                            window.hwnd,
+                            HWND_NOTOPMOST,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                        );
+                    }
+                    let _ = park_above_desktop(window);
+                } else {
+                    reassert_topmost(window.hwnd);
+                }
+            } else if moved && window.config.wallpaper_mode {
+                // A parked window keeps its screen coordinates, so a moved or
+                // resized overlay is only re-checked here; the paint below then
+                // uses the same rect.
+                let _ = park_above_desktop(window);
+            }
             let now = Instant::now();
             let border_was_active = window.border.needs_animation();
             window.border.update(&window.config, selected, now);
@@ -946,11 +999,22 @@ impl OverlayManager {
         }
 
         if self.last_topmost.elapsed() >= Duration::from_secs(1) {
-            for window in self.windows.values() {
-                // Hidden windows are skipped, and they have to be: this passes
-                // `SWP_SHOWWINDOW`, so reasserting a hidden overlay's z-order
-                // would put the graph back on screen and undo the pin.
-                if !window.hidden {
+            for window in self.windows.values_mut() {
+                // Hidden windows are skipped, and they have to be: the topmost
+                // reassert passes `SWP_SHOWWINDOW`, so reasserting a hidden
+                // overlay's z-order would put the graph back on screen and undo
+                // the pin.
+                if window.hidden {
+                    continue;
+                }
+                if window.config.wallpaper_mode {
+                    // The desktop's own windows come and go — Explorer
+                    // restarts, wallpaper changes, Show Desktop — so the
+                    // placement is re-checked on the same clock the topmost
+                    // reassert uses. It is a check rather than a placement:
+                    // re-ordering every second would be a flicker.
+                    let _ = park_above_desktop(window);
+                } else {
                     reassert_topmost(window.hwnd);
                 }
             }
@@ -993,13 +1057,16 @@ impl OverlayManager {
         selected: bool,
     ) -> Result<OverlayWindow, Box<dyn Error + Send + Sync>> {
         let title = wide(&format!("PingLatencyOverlay::{}", config.id))?;
+        // Wallpaper mode drops the topmost style at creation: the window is
+        // about to become a child of the desktop, and it is the parent's
+        // ordering that decides where a child sits.
+        let mut ex_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        if !config.wallpaper_mode {
+            ex_style |= WS_EX_TOPMOST;
+        }
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOPMOST
-                    | WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE,
+                ex_style,
                 self.class_name.as_ptr(),
                 title.as_ptr(),
                 WS_POPUP,
@@ -1057,21 +1124,31 @@ impl OverlayManager {
         // build it on its next pass, so the window would show one empty frame.
         window.sync_series(&config.targets);
         window.rebuild_history();
+        // Wallpaper mode parks the window directly above the shell's desktop
+        // window; there is no host to look for before the first paint, because
+        // the window stays an ordinary top-level popup that the once-a-second
+        // check moves as soon as the shell is there.
+        //
         // Give the layered window its first surface before making it visible.
         // Otherwise Windows can briefly retain the class background (white)
         // behind a fully transparent first frame.
         Self::render_window(&mut window, false);
 
+        let parked = config.wallpaper_mode && park_above_desktop(&window);
+        if !parked && !config.wallpaper_mode {
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    position.0,
+                    position.1,
+                    size.0,
+                    size.1,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+        }
         unsafe {
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                position.0,
-                position.1,
-                size.0,
-                size.1,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             UpdateWindow(hwnd);
         }
@@ -1241,6 +1318,20 @@ unsafe extern "system" fn overlay_wnd_proc(
             ValidateRect(hwnd, ptr::null());
             0
         }
+        // Show Desktop asks every window to minimize, and a wallpaper-mode
+        // overlay has to refuse: it would disappear from the desktop it belongs
+        // to, and the user has no window to bring back. The absent topmost bit
+        // is the mode's flag — an ordinary overlay always carries it, a parked
+        // one never does — so a window procedure with no route to the manager
+        // can still tell them apart.
+        WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_MINIMIZE => {
+            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            if ex_style & WS_EX_TOPMOST == 0 {
+                0
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
         // Windows is asking this process to close. Record it and return 0
         // WITHOUT calling DefWindowProcW, and that is the whole point.
         //
@@ -1260,6 +1351,54 @@ unsafe extern "system" fn overlay_wnd_proc(
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(windows)]
+fn non_null(hwnd: HWND) -> Option<HWND> {
+    (!hwnd.is_null()).then_some(hwnd)
+}
+
+/// The window a wallpaper-mode overlay is parked directly above.
+///
+/// The shell's desktop window is the one to sit on: it contains the wallpaper
+/// and the desktop icons on both desktop shapes, so one host is enough — and,
+/// crucially, a wallpaper window must stay an ordinary top-level one. A
+/// layered child of the desktop presents nothing but a flash on the raised
+/// desktop (measured on a 26100 build: the compositor does not hold its
+/// content), and the only recommended alternative there is a GPU present
+/// path, which this renderer deliberately does not have. Parking above this
+/// window therefore leaves the overlay above the wallpaper and below every
+/// ordinary window and the taskbar, with no GPU context.
+#[cfg(windows)]
+fn desktop_host() -> Option<HWND> {
+    unsafe { non_null(GetShellWindow()) }
+}
+
+/// Keep a wallpaper-mode overlay directly above the desktop window.
+///
+/// Checked rather than unconditional: the re-assert runs every second, and
+/// re-placing a window that is already in the right spot is churn the user
+/// can see as a flicker. Returns whether the window ends up there.
+#[cfg(windows)]
+fn park_above_desktop(window: &OverlayWindow) -> bool {
+    let Some(host) = desktop_host() else {
+        return false;
+    };
+    unsafe {
+        if GetWindow(window.hwnd, GW_HWNDNEXT) == host {
+            return true;
+        }
+        SetWindowPos(
+            window.hwnd,
+            host,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        );
+        GetWindow(window.hwnd, GW_HWNDNEXT) == host
     }
 }
 

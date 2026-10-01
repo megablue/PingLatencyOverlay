@@ -59,7 +59,8 @@
   writes the profile file; it is not what applies your edits. Out-of-range values
   are clamped as you type, so what the overlay shows while you drag is what gets
   written.
-- Frameless, transparent background, always on top.
+- Frameless and transparent. Always on top by default; **Wallpaper mode** puts
+  it on the desktop instead, as described under *Position* below.
 - Click-through: mouse events pass to the window underneath as if it did not exist.
 - Renders a live line graph of latency samples, one tick per ping.
 - Plot start: the first point is the first responding latency, not y0.
@@ -145,6 +146,16 @@
   overlay on a secondary display is positioned against that display's work area,
   including when its coordinates in the Windows desktop are negative (a display
   left of or above the primary).
+- **Wallpaper mode** is a checkbox in the Position section that puts an overlay
+  on the desktop instead of on top of everything: above the wallpaper and the
+  desktop icons, and below every normal window, with the taskbar staying above
+  it. It is never topmost; it keeps its ordinary window and is parked directly
+  above the shell's desktop window, so the desktop icons show through wherever
+  it does not draw. It stays visible when the desktop is shown (Win+D): a
+  wallpaper overlay refuses to be minimized. It is off by default, and the
+  anchor, the margins and the monitor pin are unchanged, so the overlay keeps
+  the same place on the same display. Because it is behind normal windows it is
+  not visible over a fullscreen or borderless app.
 - Position offsets are signed screen-axis values in logical pixels:
   `horizontalMarginPx` and `verticalMarginPx`, both defaulting to 0. Edge-facing
   axes measure inward from the work-area edge; centered axes measure from the
