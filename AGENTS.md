@@ -203,13 +203,20 @@ this way.
   the rules already loaded — compiling "no rules" would strand the user on the
   fallback because of a typo — while deleting the file means off. The
   window→tray channel is this file; there is no reverse pipe.
-- **The engine pauses while the Config window is open**
+- **The tray's engine pauses while the Config window is open**
   (`role_is_running(Role::Config)`), and `Engine::resume()` runs as it closes,
-  so one push always goes out afterwards. Both halves are load-bearing: the
-  window loads and pushes the active profile itself and can switch by hand, so
-  the engine cannot know what happened while it was not the authority — and two
-  writers racing over `activeProfile` is how the pointer and the screen stop
-  agreeing.
+  so one push always goes out afterwards. That pause is not a gap in switching
+  any more: while the window is open it runs an `Engine` of its own, on the same
+  one-second cadence, on **every page**, deciding from the **saved** rules — so
+  the window is the only writer of `activeProfile` in that time, which is
+  exactly why the tray standing down is safe. A settled switch is held while
+  `dirty || rules_dirty` and the engine is simply not told it applied, so the
+  hold is a retry rather than a dropped switch; it lands as soon as the drafts
+  are saved or discarded. `switch_profile` returns whether the profile is active
+  afterwards, and `mark_applied` is called only on `true`
+  (`the_window_engine_holds_a_switch_until_the_drafts_are_resolved`). The tray
+  applies straight away, because with the window closed there are no drafts to
+  disturb.
 - **An auto switch writes `activeProfile` too, and that is not bookkeeping.**
   The Config window loads that pointer at startup and pushes what it loaded, so
   a switch that did not record itself would be silently clobbered the moment
@@ -219,6 +226,29 @@ this way.
   (`a_failed_apply_is_retried_until_it_lands`).
 - **Profile files are never written and the pause state is never touched.** A
   switch is runtime state plus the pointer.
+- **Background tracking keeps a departure's probes alive, and only the sender
+  knows which departures are permanent.** `ui.backgroundTracking` (on by
+  default) rides every `SetConfig` beside the config, along with `retire`, the
+  removals a Save has committed. The renderer cannot tell "switched away from"
+  from "host the user just deleted", and must not guess: the window diffs the
+  last saved key set against the config being saved (`retired_targets`) and the
+  tray never retires anything. `ProbeManager` therefore holds three facts —
+  `active`, `background`, and `configs`, the merged map the probe loop reads —
+  so a kept target keeps measuring while its overlay does not exist. Turning
+  the setting off clears `background`; `a_departure_keeps_its_task_when_background_tracking_is_on`,
+  `a_saved_removal_retires_the_kept_target`,
+  `background_tracking_off_drops_what_was_kept` and
+  `a_returning_target_reuses_its_kept_task` pin the three-way rule, and
+  `a_save_retires_the_targets_it_removed` pins the diff.
+- **The background-tracking checkbox is written live *and* to the draft, like
+  the Appearance ones.** `sync_runtime_config` reads the live preference every
+  pass, so a draft-only write left the kept probes running after the box was
+  unticked — the setting looked dead until Save, which is the shape this class
+  of bug always has (`the_background_tracking_toggle_is_staged_and_live`;
+  `set_background_tracking` is the one place that writes both halves). A
+  removal a failed send could not deliver waits in `pending_retire` and rides
+  the next push, including the reconnection one
+  (`a_pending_removal_keeps_the_push_due`).
 - **A rule matches a window, not a set of independent facts.** Every condition
   is tested against the same candidate window
   (`every_condition_is_tested_against_the_same_window`): "cs2.exe **and** a
@@ -785,6 +815,21 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   first — invisible with one line, so it shipped into the first draft of this.
   `a_host_is_drawn_where_it_would_be_drawn_alone` compares each host's drawn
   pixels with the group against them alone.
+- **`draw_series` breaks the line on a data gap, and the threshold follows the
+  target's timeout.** The probe loop measures, writes a sample — including a
+  failed one — and then sleeps a whole tick, so the longest interval it can
+  produce is `timeout_ms` plus `SAMPLE_INTERVAL`; `sample_gap_threshold` adds
+  slack on top. A fixed threshold would either cut a slow-but-continuous line or
+  stay silent through a real hole. Everything longer is time nothing was probing
+  the target — a profile switched away, or Pause — and the segment ends and
+  resumes at the last known value exactly as the timeout path does. The buffers
+  deliberately survive a profile switch (that is what lets the graph come back
+  with its history); this break is what keeps them honest. `SAMPLE_INTERVAL`
+  lives in `render.rs` and `probes.rs` reads it, so the cadence samples are
+  written at and the cadence a gap is measured against cannot drift.
+  `a_data_gap_is_not_interpolated_in_smooth_mode`,
+  `a_data_gap_is_not_interpolated_in_index_mode` and
+  `a_one_second_cadence_is_not_a_gap` pin both halves.
 - **A host's visible window is cropped per series, not once for the overlay.**
   A newly added host has a handful of samples and none of the history the others
   have; cropping them at one index drops them or pushes them to the left of where

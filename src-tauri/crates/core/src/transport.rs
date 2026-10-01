@@ -34,6 +34,7 @@
 //! renderer started by hand and one started by the tray are the same thing.
 
 use crate::config::Config;
+use crate::probes::TaskKey;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -62,7 +63,23 @@ pub enum Message {
     /// The whole [`Config`] goes over rather than a patch, because the renderer
     /// holds no draft of its own: the configuration window is the only writer
     /// and it already holds the authoritative value.
-    SetConfig { config: Config },
+    ///
+    /// `background_tracking` and `retire` decide what happens to targets this
+    /// config no longer contains, and they are the sender's job to compute
+    /// because only the sender knows *why* a target left: a profile switched
+    /// away from, a draft edit that may yet be discarded, and a saved removal
+    /// all look identical here. With tracking on the first two keep being
+    /// probed; `retire` names the third, the removals a Save has committed.
+    ///
+    /// The enum's `rename_all` renames variants only, so this variant names its
+    /// own fields: the payload beside the config keeps the same casing as the
+    /// config itself.
+    #[serde(rename_all = "camelCase")]
+    SetConfig {
+        config: Config,
+        background_tracking: bool,
+        retire: Vec<TaskKey>,
+    },
     /// Pause or resume probing. The renderer keeps its windows; only the
     /// probes stop, so a pause freezes the graph instead of emptying it.
     SetPaused { paused: bool },
@@ -772,6 +789,8 @@ mod tests {
         for message in [
             Message::SetConfig {
                 config: one_overlay(),
+                background_tracking: true,
+                retire: vec![TaskKey::new("probe", "host-1")],
             },
             Message::SetPaused { paused: true },
             Message::SetBorderPreview {
@@ -797,7 +816,11 @@ mod tests {
     fn a_name_with_quotes_braces_and_newlines_survives() {
         let mut config = one_overlay();
         config.profile_name = "he said \"hi\"\n{ braces }\tend\t\\ backslash".to_string();
-        let message = Message::SetConfig { config };
+        let message = Message::SetConfig {
+            config,
+            background_tracking: false,
+            retire: Vec::new(),
+        };
         let line = encode(&message);
         assert_eq!(line.matches('\n').count(), 1, "the name broke the framing");
         assert_eq!(decode(&line), Some(message));
@@ -851,8 +874,20 @@ mod tests {
     fn the_wire_uses_the_profile_files_camel_case() {
         let line = encode(&Message::SetConfig {
             config: one_overlay(),
+            background_tracking: true,
+            retire: vec![TaskKey::new("probe", "host-1")],
         });
         assert!(line.contains("\"overlays\""), "config fields are camelCase");
+        // The two facts about departures travel beside the config, with the
+        // same casing as everything else on the wire.
+        assert!(
+            line.contains("\"backgroundTracking\":true"),
+            "the tracking flag is camelCase: {line}"
+        );
+        assert!(
+            line.contains("\"overlayId\":\"probe\""),
+            "a retired target key is camelCase: {line}"
+        );
         // `ProbeConfig` is internally tagged, so the discriminator travels
         // inside the `probe` object rather than beside it.
         assert!(line.contains("\"probe\":"), "{line}");
@@ -875,6 +910,8 @@ mod tests {
                 "setConfig",
                 Message::SetConfig {
                     config: Config::default(),
+                    background_tracking: false,
+                    retire: Vec::new(),
                 },
             ),
             ("setPaused", Message::SetPaused { paused: false }),

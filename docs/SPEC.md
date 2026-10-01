@@ -69,6 +69,12 @@
     (default red).
   - On resumption, the next segment starts at the next responding sample's X,
     using the last responding Y, then continues with actual samples.
+- A stretch with no samples at all is not drawn across either: a target whose
+  profile was switched away — unless **background tracking** keeps it probed —
+  or that **Pause** stopped, breaks the line and resumes at the last known value
+  exactly the way a timeout does. With tracking off, coming back shows the
+  history the profile collected before it was switched away with an honest hole
+  in it; with tracking on there is no hole to draw.
 - X axis:
   - User configures a time window (minimum 30 s) and an X-axis scale multiplier.
     The slider snaps from 1× through 10×; the numeric input also accepts larger
@@ -81,7 +87,7 @@
   - Optional smooth rendering scrolls the timestamped graph between probe
     samples. It is enabled by default at 60 FPS for new overlays and legacy
     configs without an explicit preference; the per-overlay smooth FPS controls
-    the intermediate redraw rate, and timeout gaps are never interpolated.
+    the intermediate redraw rate, and gaps in the data are never interpolated.
 - Startup behaviors:
   - `Cosmetic Startup Prefill` can show a deterministic fake latency graph
     before the first real probe result arrives.
@@ -209,14 +215,17 @@
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
   be stored. Preferences live under a single `ui` object, currently
-  `ui.railCollapsed`, `ui.showVersionInTitle`, `ui.selectionBorderAnimation`
-  and `ui.theme`; writing preferences rewrites that object and nothing else, so
-  the active profile pointer and any key a future version adds survive. A file
-  that is missing, unparseable or holds unrelated keys simply yields the
-  defaults. `ui.showVersionInTitle` is off by default, because the window title
-  is already long and the About page is where the version belongs;
-  `ui.selectionBorderAnimation` is on by default, because the border is what
-  ties the selected row to the window on screen.
+  `ui.railCollapsed`, `ui.showVersionInTitle`, `ui.selectionBorderAnimation`,
+  `ui.backgroundTracking` and `ui.theme`; writing preferences rewrites that
+  object and nothing else, so the active profile pointer and any key a future
+  version adds survive. A file that is missing, unparseable or holds unrelated
+  keys simply yields the defaults. `ui.showVersionInTitle` is off by default,
+  because the window title is already long and the About page is where the
+  version belongs; `ui.selectionBorderAnimation` is on by default, because the
+  border is what ties the selected row to the window on screen;
+  `ui.backgroundTracking` is on by default, because a profile you switch away
+  from should not come back with a hole in its graph (*Auto profile
+  switching*).
 - `~/.config/.PingLatencyOverlay/rules.json` holds the auto profile switching
   rules, app-wide like the preferences. It is a file of its own rather than a
   key in `globalconfig.json` because the tray re-reads it when it changes;
@@ -282,9 +291,28 @@
 - The switch is a full profile load: overlays are replaced exactly as if the
   profile had been chosen in the window, the active profile recorded in
   `globalconfig.json` is updated, and profile files are never written.
-- **While the Config window is open the rules are not applied.** The window is
-  the authority on the active profile; closing it puts the rules back in
-  charge, which may change the profile within a couple of seconds.
+- Coming back is the same as any other load: a profile's overlays show the
+  history it collected before it was switched away. With **background
+  tracking** on (the default) that history has no hole in it, because the
+  targets kept being probed; with it off, the line is broken across the time it
+  was not being probed rather than drawn through it.
+- **Background tracking** (Global page, under **Auto profile switching**, on by
+  default) keeps the targets of a profile you switch away from probed, so its
+  graph is continuous when you return. A host you disable or delete keeps
+  probing too, because the edit is unsaved: **Discard** brings it back with its
+  history, and **Save** stops it for good — and only the removals the active
+  profile's Save commits, so saving never touches the hosts another profile is
+  keeping. Turning the setting off stops every kept probe and takes effect the
+  moment it is clicked, like the Appearance settings; **Save** is what makes it
+  survive a restart. **Pause** still stops all probing, and a restarted renderer
+  starts with nothing kept.
+- **While the Config window is open, that window applies the rules.** The tray's
+  engine stands down for its whole lifetime; the window runs the same
+  one-second, two-tick debounce itself, on every page, deciding from the saved
+  rules. A settled switch waits while either the profile draft or the rules
+  draft has unsaved edits — the status bar says so once — and lands as soon as
+  everything is saved or discarded. Closing the window hands the rules back to
+  the tray, which may reapply its own decision within a couple of seconds.
 - The Global page shows what the rules as edited would decide right now.
 - The rules are read when `rules.json` changes, so hand-editing the file
   takes effect without a restart. A file that cannot be parsed leaves the
@@ -406,6 +434,10 @@ from the program, so a theme can be written, shared and edited without a build.
   stops that animation for every selection, including the first overlay a
   profile switch selects, while the per-overlay startup border effect is
   untouched. It previews immediately and is written only on Save, like the rest.
+  The page also carries the **Auto profile switching** section, and with it the
+  **Keep tracking profiles in the background** checkbox described under *Auto
+  profile switching*. Like the Appearance settings it previews immediately and
+  is written only on Save.
   The About page
   has no list either, so its detail pane spans the same full width, and is
   read-only and centred: the app icon, then one column of lines — the app name

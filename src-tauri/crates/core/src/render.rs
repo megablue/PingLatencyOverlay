@@ -24,6 +24,37 @@ pub struct Series<'a> {
     pub line_color: &'a str,
     pub timeout_color: &'a str,
     pub samples: &'a [SamplePoint],
+    /// An interval longer than this between consecutive samples is a period
+    /// nothing was measuring this target; see `sample_gap_threshold`.
+    pub max_sample_gap: Duration,
+}
+
+/// One graph tick: the rate the sampler writes samples at.
+///
+/// It lives here, next to the renderer that reads a gap between samples as a
+/// break, rather than in `probes.rs`; the probe loop reads it from here so the
+/// cadence samples are written at and the cadence a gap is measured against
+/// cannot drift apart.
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The longest interval between consecutive samples that the probe loop itself
+/// can produce.
+///
+/// The loop measures, writes a sample — including when the measurement failed —
+/// and then sleeps a whole tick, so an interval is a measurement plus a tick,
+/// and a measurement is bounded by the target's timeout. Anything longer means
+/// nothing was probing this target: the profile is switched away, or Pause is
+/// on. The renderer breaks the line there instead of drawing a slope over a
+/// period it never measured.
+///
+/// Derived from the timeout rather than fixed, because a long timeout is a
+/// deliberate statement that slow responses are expected; a threshold that
+/// ignored it would cut a line that is genuinely continuous.
+pub fn sample_gap_threshold(timeout_ms: u32) -> Duration {
+    /// Scheduling slack, and room for the ICMP path's name resolution, which
+    /// runs outside the `IcmpSendEcho2` timeout.
+    const SLACK: Duration = Duration::from_secs(2);
+    Duration::from_millis(u64::from(timeout_ms)) + SAMPLE_INTERVAL + SLACK
 }
 
 /// Render a graph into premultiplied RGBA bytes for a Win32 layered window.
@@ -75,6 +106,7 @@ pub fn render_graph_into_with_border(
         line_color: &target.line_color,
         timeout_color: &target.timeout_color,
         samples,
+        max_sample_gap: sample_gap_threshold(target.timeout_ms),
     }];
     render_series_into_with_border(width, height, config, &series, now, smooth, border, pixels)
 }
@@ -260,6 +292,7 @@ fn render_graph_into_internal(
         draw_series(
             &mut pixmap,
             samples,
+            entry.max_sample_gap,
             &real_line_paint,
             &prefill_line_paint,
             &stroke,
@@ -279,7 +312,8 @@ fn render_graph_into_internal(
     true
 }
 
-/// Stroke one target's line, breaking it at timeouts and prefill boundaries.
+/// Stroke one target's line, breaking it at timeouts, data gaps and prefill
+/// boundaries.
 ///
 /// Split out of the renderer so the per-target bookkeeping is written once
 /// rather than nested inside a loop over targets. The cost of that loop is that
@@ -289,6 +323,7 @@ fn render_graph_into_internal(
 fn draw_series(
     pixmap: &mut Pixmap,
     samples: &[SamplePoint],
+    max_sample_gap: Duration,
     real_line_paint: &Paint,
     prefill_line_paint: &Paint,
     stroke: &Stroke,
@@ -312,10 +347,37 @@ fn draw_series(
     let mut segment_prefill: Option<bool> = None;
     let mut last_y: Option<f32> = None;
     let mut last_point: Option<(f32, f32)> = None;
+    let mut last_timestamp: Option<Instant> = None;
     for (index, sample) in samples.iter().enumerate() {
         let Some(x) = map_x(index, sample) else {
             continue;
         };
+        // Two samples further apart than the probe loop can produce were not
+        // neighbours in time, so the segment ends here and the next one resumes
+        // at the last known value — exactly as it does after a timeout. Without
+        // this the line is drawn straight across a period nothing measured, so
+        // a profile switched away and back shows a slope over the time away.
+        let gap = last_timestamp.is_some_and(|previous| {
+            sample.timestamp.saturating_duration_since(previous) > max_sample_gap
+        });
+        last_timestamp = Some(sample.timestamp);
+        if gap {
+            if in_segment {
+                if let Some(path) = segment.finish() {
+                    pixmap.stroke_path(
+                        &path,
+                        paint_for(segment_prefill),
+                        stroke,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                segment = PathBuilder::new();
+            }
+            in_segment = false;
+            segment_prefill = None;
+            last_point = None;
+        }
         let Some(latency) = sample.value else {
             if in_segment {
                 if let Some(path) = segment.finish() {
@@ -488,6 +550,7 @@ pub fn render_prefill_into(
         line_color,
         timeout_color: &config.first_target().timeout_color,
         samples: points,
+        max_sample_gap: sample_gap_threshold(config.first_target().timeout_ms),
     }];
     render_series_into_with_border(width, height, config, &series, now, true, border, pixels)
 }
@@ -572,6 +635,19 @@ mod tests {
             .collect()
     }
 
+    /// Samples at explicit ages in seconds, for tests that care where the hole
+    /// is rather than only about the values.
+    fn aged_samples(now: Instant, entries: &[(u64, u32)]) -> Vec<SamplePoint> {
+        entries
+            .iter()
+            .map(|(age, value)| SamplePoint {
+                value: Some(*value),
+                timestamp: now - Duration::from_secs(*age),
+                is_prefill: false,
+            })
+            .collect()
+    }
+
     /// Where a colour was drawn: every `(row, column)` it covers.
     ///
     /// Positions rather than a pixel count, because two lines can overlap and
@@ -624,6 +700,7 @@ mod tests {
                 line_color: line,
                 timeout_color: timeout,
                 samples: points,
+                max_sample_gap: sample_gap_threshold(config.first_target().timeout_ms),
             })
             .collect();
         let mut pixels = Vec::new();
@@ -866,6 +943,142 @@ mod tests {
              older than {oldest_age}s in a 30s window belong at column \
              {expected_left} or further right — its history is being cropped \
              with the other host's"
+        );
+    }
+
+    /// A hole with no samples at all is not interpolated in smooth mode.
+    ///
+    /// This is the shape an auto profile switch leaves behind: targets that are
+    /// not in the active profile stop being probed, but their buffers survive,
+    /// so on the way back both sides of the hole are still in memory. Joining
+    /// them draws a slope over seconds that were never measured.
+    #[test]
+    fn a_data_gap_is_not_interpolated_in_smooth_mode() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        // Three samples at 100ms, an eight-second hole, three at 300ms. In a
+        // 300px / 30s window the sample before the hole is at column 200 and
+        // the one after it at column 280.
+        let samples = aged_samples(
+            now,
+            &[
+                (12, 100),
+                (11, 100),
+                (10, 100),
+                (2, 300),
+                (1, 300),
+                (0, 300),
+            ],
+        );
+
+        let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], now, true);
+        let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+        assert!(!green.is_empty(), "the host drew nothing");
+
+        let drawn_in_gap = green
+            .iter()
+            .filter(|(_, column)| (203..=277).contains(column))
+            .count();
+        assert_eq!(
+            drawn_in_gap, 0,
+            "a line was drawn across the eight-second hole (columns 200 to 280)"
+        );
+
+        // And it resumes at the last known value rather than jumping: the stub
+        // at the first sample after the hole spans the old and the new level.
+        let stub: Vec<usize> = green
+            .iter()
+            .filter(|(_, column)| (278..=282).contains(column))
+            .map(|(row, _)| *row)
+            .collect();
+        let span = match (stub.iter().min(), stub.iter().max()) {
+            (Some(min), Some(max)) => max - min,
+            _ => panic!("the line never came back after the hole"),
+        };
+        assert!(
+            span >= 12,
+            "the line jumped to the new value instead of resuming at the last \
+             known one (the stub spans {span}px)"
+        );
+    }
+
+    /// The same hole in index mode: the two sides are not joined by a diagonal.
+    ///
+    /// Index mode positions samples by their order rather than by their time,
+    /// so the break shows as a vertical seam at the first sample after the
+    /// hole. The timestamps still say the two sides are not neighbours.
+    #[test]
+    fn a_data_gap_is_not_interpolated_in_index_mode() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 10;
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        // Ages 9, 8, 7 then 2, 1, 0: a five-second hole between the neighbours
+        // at index 2 and index 3, which sit at columns 75 and 105 of a 300px
+        // window with ten visible samples.
+        let samples = aged_samples(
+            now,
+            &[(9, 100), (8, 100), (7, 100), (2, 300), (1, 300), (0, 300)],
+        );
+
+        let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], now, false);
+        let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+        assert!(!green.is_empty(), "the host drew nothing");
+
+        let drawn_in_gap = green
+            .iter()
+            .filter(|(_, column)| (78..=102).contains(column))
+            .count();
+        assert_eq!(
+            drawn_in_gap, 0,
+            "a diagonal was drawn between two samples five seconds apart"
+        );
+
+        let stub: Vec<usize> = green
+            .iter()
+            .filter(|(_, column)| (103..=107).contains(column))
+            .map(|(row, _)| *row)
+            .collect();
+        let span = match (stub.iter().min(), stub.iter().max()) {
+            (Some(min), Some(max)) => max - min,
+            _ => panic!("the line never came back after the hole"),
+        };
+        assert!(
+            span >= 12,
+            "the line jumped to the new value instead of resuming at the last \
+             known one (the stub spans {span}px)"
+        );
+    }
+
+    /// A one-second cadence is not a hole, and the line stays continuous.
+    ///
+    /// The threshold has to be loose enough that the cadence the probe loop
+    /// actually keeps — a measurement plus a tick — never breaks a healthy
+    /// line, and this is the half that would fail if it were tightened.
+    #[test]
+    fn a_one_second_cadence_is_not_a_gap() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        let entries: Vec<(u64, u32)> = (0..10u32)
+            .map(|index| (u64::from(9 - index), 100 + index * 20))
+            .collect();
+        let samples = aged_samples(now, &entries);
+
+        let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], now, true);
+        let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+        // Ages 9s down to 0s sit at columns 210 to 300; every column between
+        // them has to carry a pixel.
+        let missing: Vec<usize> = (212..=298)
+            .filter(|column| !green.iter().any(|(_, drawn)| drawn == column))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the line is broken at columns {missing:?} although every sample is \
+             one second from its neighbour"
         );
     }
 

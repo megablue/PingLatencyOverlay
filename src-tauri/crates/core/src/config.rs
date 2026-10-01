@@ -742,6 +742,14 @@ pub struct UiPrefs {
     /// setting, configured in the editor.
     #[serde(default = "default_true")]
     pub selection_border_animation: bool,
+    /// Whether a target that leaves the active configuration keeps being probed.
+    ///
+    /// On by default: a profile you switch away from keeps its history
+    /// continuous, and a host whose removal is still an unsaved edit keeps
+    /// measuring until the removal is saved. Off stops every departure
+    /// immediately, which is the behavior before this preference existed.
+    #[serde(default = "default_true")]
+    pub background_tracking: bool,
     /// Which of a theme's two files the window uses.
     ///
     /// `System` by default, so the window and the native tray menu agree without
@@ -751,11 +759,11 @@ pub struct UiPrefs {
     pub theme: ThemeMode,
 }
 
-/// Hand-written rather than derived because one field defaults to on.
+/// Hand-written rather than derived because some fields default to on.
 ///
 /// A derive can only produce `false` for a bool, so a derived `Default` would
-/// disagree with the serde default used when the key is missing from an
-/// existing `globalconfig.json`: `GlobalPrefs::default()` is what a missing or
+/// disagree with the serde default used when a key is missing from an existing
+/// `globalconfig.json`: `GlobalPrefs::default()` is what a missing or
 /// unreadable file yields.
 impl Default for UiPrefs {
     fn default() -> Self {
@@ -763,6 +771,7 @@ impl Default for UiPrefs {
             rail_collapsed: false,
             show_version_in_title: false,
             selection_border_animation: true,
+            background_tracking: true,
             theme: ThemeMode::System,
         }
     }
@@ -2679,6 +2688,40 @@ mod tests {
         std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
         assert!(
             store.read_global_prefs().ui.selection_border_animation,
+            "a ui key without the preference must fall back to the default"
+        );
+    }
+
+    #[test]
+    fn the_background_tracking_preference_defaults_on_and_round_trips() {
+        let root = TestDir::new("prefs-background-tracking");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+
+        assert!(
+            store.read_global_prefs().ui.background_tracking,
+            "background profiles are tracked unless the setting is turned off"
+        );
+
+        let prefs = GlobalPrefs {
+            ui: UiPrefs {
+                background_tracking: false,
+                ..UiPrefs::default()
+            },
+        };
+        store.write_global_prefs(&prefs).expect("write prefs");
+        assert!(
+            !store.read_global_prefs().ui.background_tracking,
+            "the preference did not survive a round trip"
+        );
+
+        // A file written before the preference existed must not fail to load,
+        // and must not silently stop probing profiles the user switched away
+        // from.
+        let raw = store.global_config_path().to_string_lossy().to_string();
+        std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
+        assert!(
+            store.read_global_prefs().ui.background_tracking,
             "a ui key without the preference must fall back to the default"
         );
     }

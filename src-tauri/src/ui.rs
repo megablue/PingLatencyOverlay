@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig, TargetConfig,
 };
 use ping_latency_overlay_core::monitors::{self, MonitorInfo};
+use ping_latency_overlay_core::probes::{enabled_target_keys, TaskKey};
 use ping_latency_overlay_core::rules::{
     self, AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot,
 };
@@ -968,6 +969,22 @@ pub struct PingApp {
     /// pure `rules::decide`, so what the preview says is what the engine does.
     auto_preview: Option<String>,
     auto_preview_at: Option<Instant>,
+    /// The debounced decision machine, run by the window itself while it is
+    /// open.
+    ///
+    /// The tray stands down for this process's whole lifetime, so this is the
+    /// only engine that can act in that time — and the window is then the only
+    /// writer of `activeProfile`, which is exactly why that is safe. Seeded
+    /// with the active profile so the first settled decision that names it is
+    /// not a pointless reload.
+    auto_engine: rules::Engine,
+    /// When the engine last looked at the desktop.
+    auto_switch_at: Option<Instant>,
+    /// The profile a settled decision is waiting to switch to.
+    ///
+    /// Kept so the status line can say a switch is held once, rather than
+    /// every second, while the user's unsaved edits are in the way.
+    auto_hold: Option<String>,
     config_visible: bool,
     running: bool,
     status: String,
@@ -976,6 +993,22 @@ pub struct PingApp {
     /// What the renderer was last told, so `sync_runtime_config` can tell a
     /// change from a frame that merely followed another.
     last_pushed: Config,
+    /// The enabled target keys the profile on disk has.
+    ///
+    /// A Save diffs the config being saved against this to find the removals it
+    /// commits, and those are the probes the renderer must stop keeping.
+    saved_keys: HashSet<TaskKey>,
+    /// Committed removals the renderer has not acknowledged yet.
+    ///
+    /// Attached to every config send until one lands. The disk already holds
+    /// the removal, so losing it to a failed write would leave a deleted host
+    /// probed until the two ends happened to be reconnected.
+    pending_retire: Vec<TaskKey>,
+    /// The background-tracking preference the renderer was last told.
+    ///
+    /// The preference is saved like the rest and the renderer learns it by
+    /// comparison each pass, so a change goes out once rather than every frame.
+    last_sent_background: bool,
     /// The connection to the renderer process, when one is running.
     ///
     /// `None` means the renderer is gone and could not be brought back, which is
@@ -1176,6 +1209,22 @@ fn set_selection_border_animation(
     prefs.ui.selection_border_animation = enabled;
 }
 
+/// Stage the background-tracking toggle, and make it the live value at the
+/// same time.
+///
+/// The same both-halves rule as `set_selection_border_animation`:
+/// `sync_runtime_config` compares the live preference against what the renderer
+/// was told, so a draft-only write left the kept probes running after the box
+/// was unticked — the setting looked live but only Save made it so.
+fn set_background_tracking(
+    prefs: &mut config::GlobalPrefs,
+    draft: &mut config::GlobalPrefs,
+    enabled: bool,
+) {
+    draft.ui.background_tracking = enabled;
+    prefs.ui.background_tracking = enabled;
+}
+
 impl PingApp {
     pub fn new(cc: &CreationContext<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let position_picker = PositionPicker::new(&cc.egui_ctx);
@@ -1247,6 +1296,13 @@ impl PingApp {
         let status = append_status_message(status, rules_error.as_deref());
         let running = true;
 
+        // The window runs the engine while it is open, because the tray stands
+        // down for this process's whole lifetime. Seeded with the profile that
+        // is already loaded — and pushed to the renderer just below — so the
+        // first settled decision that names it is not a pointless reload.
+        let mut auto_engine = rules::Engine::default();
+        auto_engine.mark_applied(&active_profile);
+
         cc.egui_ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
             egui::ViewportCommand::Visible(show_config),
@@ -1266,6 +1322,9 @@ impl PingApp {
             // more on the first frame, which is harmless but means the record
             // and the renderer disagree at startup for no reason.
             last_pushed: config.clone(),
+            saved_keys: enabled_target_keys(&config),
+            pending_retire: Vec::new(),
+            last_sent_background: prefs.ui.background_tracking,
             config,
             // Cloned before the id is moved into `active_profile`, so the
             // Profiles page opens on whatever is already loaded.
@@ -1288,6 +1347,9 @@ impl PingApp {
             rules_error,
             auto_preview: None,
             auto_preview_at: None,
+            auto_engine,
+            auto_switch_at: None,
+            auto_hold: None,
             config_visible: show_config,
             running,
             status,
@@ -1342,6 +1404,20 @@ impl PingApp {
         }
     }
 
+    /// The config push, carrying the two facts that decide the fate of targets
+    /// it no longer contains.
+    ///
+    /// `retire` is the removals a Save has committed and the renderer has not
+    /// acknowledged; it is empty for every other send. The preference is read
+    /// live, because it is staged like the rest and Save is what makes it so.
+    fn config_message(&self, retire: Vec<TaskKey>) -> Message {
+        Message::SetConfig {
+            config: self.config.clone(),
+            background_tracking: self.prefs.ui.background_tracking,
+            retire,
+        }
+    }
+
     /// Hand the current configuration to the renderer, and record that we did.
     ///
     /// `last_pushed` is updated here rather than only at the call sites so that
@@ -1351,10 +1427,18 @@ impl PingApp {
     /// about this profile; if it did not update the record, the next
     /// `sync_runtime_config` would either send a redundant copy or — if this
     /// send had failed — sit there convinced the renderer was already up to date.
+    ///
+    /// A committed removal rides this push too, so a renderer that reconnects
+    /// after a failed save still retires what the file already dropped.
     fn push_config(&mut self) {
-        self.send(Message::SetConfig {
-            config: self.config.clone(),
-        });
+        let retire = std::mem::take(&mut self.pending_retire);
+        match self.try_send(&self.config_message(retire.clone())) {
+            Ok(()) => self.last_sent_background = self.prefs.ui.background_tracking,
+            Err(error) => {
+                self.status = format!("The renderer is not responding: {error}");
+                self.pending_retire = retire;
+            }
+        }
         self.last_pushed = self.config.clone();
     }
 
@@ -1383,14 +1467,33 @@ impl PingApp {
     ///
     /// Returns whether anything was sent, which is what the test drives.
     fn sync_runtime_config(&mut self) -> bool {
-        if !runtime_config_changed(&mut self.config, &self.last_pushed) {
+        if !config_push_due(
+            &mut self.config,
+            &self.last_pushed,
+            self.prefs.ui.background_tracking,
+            self.last_sent_background,
+            !self.pending_retire.is_empty(),
+        ) {
             return false;
         }
-        self.send(Message::SetConfig {
-            config: self.config.clone(),
-        });
-        self.last_pushed = self.config.clone();
-        true
+        // Nothing to try without a client, and `reconnect_renderer` pushes
+        // everything the moment one answers again — pending removals included.
+        if self.renderer.is_none() {
+            return false;
+        }
+        let retire = std::mem::take(&mut self.pending_retire);
+        match self.try_send(&self.config_message(retire.clone())) {
+            Ok(()) => {
+                self.last_pushed = self.config.clone();
+                self.last_sent_background = self.prefs.ui.background_tracking;
+                true
+            }
+            Err(error) => {
+                self.pending_retire = retire;
+                self.status = format!("The renderer is not responding: {error}");
+                false
+            }
+        }
     }
 
     /// The window title, which names the profile that is currently loaded.
@@ -1607,6 +1710,9 @@ impl PingApp {
 
     fn apply_saved_config(&mut self, next: Config) {
         self.config = next;
+        // The saved state a later save diffs against. A profile load is not a
+        // removal, so nothing here is retired.
+        self.saved_keys = enabled_target_keys(&self.config);
         // A profile load changes what should be on screen, so it goes out now
         // rather than waiting for the next pass of `sync_runtime_config`. The
         // function would get there on the same frame, but a load is a discrete
@@ -1651,21 +1757,30 @@ impl PingApp {
             Ok(()) => {
                 self.config = next;
                 self.dirty = false;
+                // The removals this save just committed, diffed against what
+                // the file held a moment ago. The record then moves forward, so
+                // a second save does not name the same host again — while the
+                // pending list keeps one a failed send did not land.
+                let retired = retired_targets(&self.saved_keys, &self.config);
+                self.saved_keys = enabled_target_keys(&self.config);
+                self.pending_retire.extend(retired);
                 // Sent directly rather than through `push_config`, because this
                 // path has to tell the two failures apart: the file reached disk
                 // and the renderer was never told is a different thing from a
                 // confident "Saved.", and the caller is what reports it. The
                 // record is still updated, and only on success — a failed send
-                // has to leave `sync_runtime_config` wanting to try again.
-                match self.try_send(&Message::SetConfig {
-                    config: self.config.clone(),
-                }) {
+                // has to leave `sync_runtime_config` wanting to try again, with
+                // the removals still pending.
+                let retire = std::mem::take(&mut self.pending_retire);
+                match self.try_send(&self.config_message(retire.clone())) {
                     Ok(()) => {
                         self.last_pushed = self.config.clone();
+                        self.last_sent_background = self.prefs.ui.background_tracking;
                         self.status.clear();
                         true
                     }
                     Err(error) => {
+                        self.pending_retire = retire;
                         self.status = format!(
                             "Saved, but the overlays were not updated: {error}. Save again once the renderer is back."
                         );
@@ -1923,16 +2038,69 @@ impl PingApp {
         );
     }
 
+    /// One evaluation of the engine that switches profiles while this window is
+    /// open.
+    ///
+    /// Runs on every page, unlike the preview: the preview is only where it is
+    /// drawn, but a switch has to happen wherever the user is looking. Decides
+    /// from the **saved** rules — the preview is the draft — and holds while
+    /// the profile or the rules draft has unsaved edits, so a switch can never
+    /// land on top of a change in progress. Holding costs nothing: the engine
+    /// is simply not told it applied, so it keeps returning the same decision
+    /// and the switch lands by itself once the drafts are resolved.
+    fn sync_auto_switch(&mut self) {
+        let blocked = self.dirty || self.rules_dirty;
+        match auto_switch_step(
+            &mut self.auto_engine,
+            &mut self.auto_switch_at,
+            Instant::now(),
+            &self.rules,
+            blocked,
+            winwatch::snapshot,
+        ) {
+            AutoSwitchStep::Idle => self.auto_hold = None,
+            AutoSwitchStep::Held(profile) => {
+                if self.auto_hold.as_deref() != Some(profile.as_str()) {
+                    // The id is what the rules name; the display name is what
+                    // the user reads everywhere else.
+                    let name = self
+                        .profiles
+                        .iter()
+                        .find(|entry| entry.id == profile)
+                        .map(|entry| entry.name.as_str())
+                        .unwrap_or(profile.as_str());
+                    self.status = format!(
+                        "Auto switch to \"{name}\" is waiting for your unsaved changes to be \
+                         saved or discarded."
+                    );
+                    self.auto_hold = Some(profile);
+                }
+            }
+            AutoSwitchStep::Apply(profile) => {
+                self.auto_hold = None;
+                // Recorded only on success, so a failed load or a renderer that
+                // never took the config is retried on the next tick.
+                if self.switch_profile(&profile) {
+                    self.auto_engine.mark_applied(&profile);
+                }
+            }
+        }
+    }
+
     /// Make another profile the active one and remember the choice.
-    fn switch_profile(&mut self, id: &str) {
+    ///
+    /// Returns whether this profile is the active one afterwards, which is what
+    /// the window's engine records as applied: a refused or failed switch must
+    /// leave the engine wanting to retry rather than believing it landed.
+    fn switch_profile(&mut self, id: &str) -> bool {
         self.profile_menu_open = false;
         self.selected_profile = Some(id.to_string());
         if id == self.active_profile {
-            return;
+            return true;
         }
         if !can_switch_profile(self.dirty) {
             self.status = "Save or discard your changes before switching profiles.".to_string();
-            return;
+            return false;
         }
         match config::load_profile(id) {
             Ok(mut stored) => {
@@ -1951,9 +2119,11 @@ impl PingApp {
                 // file is the one reported.
                 self.refresh_profiles();
                 self.status = format!("Loaded profile \"{}\".", self.active_profile_name());
+                true
             }
             Err(error) => {
                 self.status = format!("Could not load profile \"{id}\": {error}");
+                false
             }
         }
     }
@@ -2765,6 +2935,27 @@ impl PingApp {
             )
             .color(UI_TEXT_SECONDARY()),
         );
+
+        // Live as well as staged, like the Appearance checkboxes: the renderer
+        // learns the value by comparing it against what it was told on every
+        // pass, so a draft-only write left kept probes running after the box
+        // was unticked. `set_background_tracking` is the one place that writes
+        // it, so the two halves cannot drift.
+        ui.add_space(4.0);
+        let mut background = self.prefs_draft.ui.background_tracking;
+        if ui
+            .checkbox(&mut background, "Keep tracking profiles in the background")
+            .on_hover_text(
+                "A profile you switch away from keeps probing, so its graph is continuous \
+                 when you switch back. A host you disable or delete keeps probing until you \
+                 save; saving the removal stops it for good. One probe per second per kept \
+                 host; Pause still stops all probing.",
+            )
+            .changed()
+        {
+            set_background_tracking(&mut self.prefs, &mut self.prefs_draft, background);
+            self.prefs_dirty = true;
+        }
 
         // An unreadable file is never rewritten silently, so the error stays
         // visible until the user either fixes the file or edits a rule and
@@ -4094,6 +4285,41 @@ fn runtime_config_changed(draft: &mut Config, last_pushed: &Config) -> bool {
     draft != last_pushed
 }
 
+/// Whether a pass has anything new to hand the renderer.
+///
+/// Three things count: an edit, a background-tracking change the renderer has
+/// not been told, and a committed removal it has not acknowledged. The first is
+/// what makes edits live; the other two are what make a Save's removals survive
+/// a failed send instead of being lost to it.
+fn config_push_due(
+    draft: &mut Config,
+    last_pushed: &Config,
+    background_tracking: bool,
+    last_sent_background: bool,
+    retiring: bool,
+) -> bool {
+    // `runtime_config_changed` first and on its own, so the draft is normalized
+    // in place on every pass that asks — a `||` chain short-circuiting around it
+    // would leave the editor showing values Save would clamp.
+    runtime_config_changed(draft, last_pushed)
+        || background_tracking != last_sent_background
+        || retiring
+}
+
+/// The enabled target keys a save removes: what the profile on disk has that
+/// the config being saved does not.
+///
+/// These are exactly the probes the renderer must stop keeping, because it
+/// keeps every departure probed while the setting is on. Sorted, because a
+/// `HashSet` has no order and the wire, the log and a test all read better when
+/// the list does.
+fn retired_targets(saved: &HashSet<TaskKey>, draft: &Config) -> Vec<TaskKey> {
+    let enabled = enabled_target_keys(draft);
+    let mut retired: Vec<TaskKey> = saved.difference(&enabled).cloned().collect();
+    retired.sort_by(|a, b| (&a.overlay_id, &a.target_id).cmp(&(&b.overlay_id, &b.target_id)));
+    retired
+}
+
 /// How a host is labelled in the detail pane's list.
 ///
 /// A blank host says so rather than showing nothing: a row with no text is a
@@ -4189,11 +4415,12 @@ fn sync_monitor_list(
     true
 }
 
-/// How often the auto switching preview re-reads the desktop, in seconds.
+/// How often the auto switching checks re-read the desktop, in seconds.
 ///
-/// One, matching the tray's own evaluation cadence, so the preview is never
-/// more than a second behind what the engine would do.
-const AUTO_PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
+/// One, matching the tray's own evaluation cadence, so neither the preview nor
+/// the window's engine is ever more than a second behind what the tray would
+/// do with the same rules.
+const AUTO_SWITCH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The body of `sync_auto_preview`, with the window enumeration passed in.
 ///
@@ -4209,7 +4436,7 @@ fn sync_auto_preview_text(
     profiles: &[config::ProfileEntry],
     read: impl FnOnce() -> Snapshot,
 ) {
-    let due = read_at.is_none_or(|at| now.duration_since(at) >= AUTO_PREVIEW_INTERVAL);
+    let due = read_at.is_none_or(|at| now.duration_since(at) >= AUTO_SWITCH_INTERVAL);
     if !due {
         return;
     }
@@ -4222,6 +4449,56 @@ fn sync_auto_preview_text(
     let snapshot = read();
     *text = Some(auto_preview_line(rules, &snapshot, profiles));
     *read_at = Some(now);
+}
+
+/// What one evaluation of the window-side engine decided.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AutoSwitchStep {
+    /// Nothing settled, or the settled decision is already applied.
+    Idle,
+    /// A settled decision is waiting for unsaved edits to be resolved.
+    Held(String),
+    /// Apply this profile, and record it as applied only if it lands.
+    Apply(String),
+}
+
+/// The body of `sync_auto_switch`, with the window enumeration passed in.
+///
+/// Same shape and the same reason as `sync_auto_preview_text`: the due check,
+/// the "only enumerate when a rule could match" gate and the debounce all live
+/// here, so a test can drive the whole mechanism without a desktop to look at.
+///
+/// `blocked` is the unsaved-edits hold, and it deliberately never reaches the
+/// engine: `step` returns `Apply` every tick until `mark_applied`, so a held
+/// switch is not lost — it lands by itself once the drafts are resolved.
+fn auto_switch_step(
+    engine: &mut rules::Engine,
+    read_at: &mut Option<Instant>,
+    now: Instant,
+    file: &AutoRules,
+    blocked: bool,
+    read: impl FnOnce() -> Snapshot,
+) -> AutoSwitchStep {
+    let due = read_at.is_none_or(|at| now.duration_since(at) >= AUTO_SWITCH_INTERVAL);
+    if !due {
+        return AutoSwitchStep::Idle;
+    }
+    *read_at = Some(now);
+    let compiled = rules::compile(file);
+    let decision = if compiled.enabled && compiled.rules.iter().any(|rule| rule.error.is_none()) {
+        // Only enumerate the desktop when a rule could use the answer: with
+        // switching off, or nothing usable, the decision is `None` whatever
+        // the windows are and the snapshot is the expensive half.
+        let snapshot = read();
+        rules::decide(&compiled, &snapshot)
+    } else {
+        None
+    };
+    match engine.step(decision.as_ref().map(|decision| decision.profile.as_str())) {
+        rules::Tick::Apply { profile } if !blocked => AutoSwitchStep::Apply(profile),
+        rules::Tick::Apply { profile } => AutoSwitchStep::Held(profile),
+        rules::Tick::Idle => AutoSwitchStep::Idle,
+    }
 }
 
 /// What the rules as edited would decide against this desktop.
@@ -4776,6 +5053,7 @@ impl App for PingApp {
         self.sync_profiles();
         self.sync_monitors();
         self.sync_auto_preview();
+        self.sync_auto_switch();
         self.sync_theme(ctx);
         self.sync_window_title(ctx);
         // The renderer owns every animation now: smooth rendering, the
@@ -5615,18 +5893,19 @@ pub fn run() {
 mod tests {
     use super::{
         about_page_lines, app_version, append_status_message, auto_preview_line,
-        auto_switch_section, can_switch_profile, choose_theme, config, config_notice_status,
-        config_notices_status, default_fallback, deselect_strip_rect, draw_pane_divider,
-        empty_editor, host_row_label, list_pane_column, list_pane_row_height,
-        list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
-        overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
-        page_has_list_pane, pending_edits, profile_name_width, profile_row_contents,
-        profile_row_label, rail_width, requested_url, row_inner, rule_error,
-        runtime_config_changed, selected_overlay_for_border, selected_target_in,
+        auto_switch_section, auto_switch_step, can_switch_profile, choose_theme, config,
+        config_notice_status, config_notices_status, config_push_due, default_fallback,
+        deselect_strip_rect, draw_pane_divider, empty_editor, enabled_target_keys, host_row_label,
+        list_pane_column, list_pane_row_height, list_pane_row_width_for, monitor_choice_label,
+        monitor_choices, overlay_count_label, overlay_name_width, overlay_row_contents,
+        overlay_row_label, page_has_detail_footer, page_has_list_pane, pending_edits,
+        profile_name_width, profile_row_contents, profile_row_label, rail_width, requested_url,
+        retired_targets, row_inner, rule_error, runtime_config_changed,
+        selected_overlay_for_border, selected_target_in, set_background_tracking,
         set_selection_border_animation, sync_auto_preview_text, sync_monitor_list,
         sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
-        window_title, AboutKind, Frame, Mode, Page, ProfileSnapshot, ThemeMode,
+        window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, ProfileSnapshot, ThemeMode,
         ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
         DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
         GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL,
@@ -5642,8 +5921,9 @@ mod tests {
         Anchor, Config, ConfigNotice, OverlayConfig, ProbeConfig, ProfileEntry, TargetConfig,
     };
     use ping_latency_overlay_core::monitors::{self, MonitorInfo};
+    use ping_latency_overlay_core::probes::TaskKey;
     use ping_latency_overlay_core::rules::{
-        AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot, WindowInfo,
+        AutoRules, Combine, Condition, Engine, MatchMode, Part, Rule, Scope, Snapshot, WindowInfo,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -5756,6 +6036,112 @@ mod tests {
             ping_latency_overlay_core::config::MIN_WINDOW_SECONDS,
             "the draft was not normalized in place, so the editor is still \
              showing a value Save would clamp"
+        );
+    }
+
+    /// A save retires exactly the removals it commits.
+    ///
+    /// This is the sender half of the retire list: the renderer cannot tell a
+    /// saved removal from a profile switched away from, so the window has to
+    /// tell it. A wrong diff would either stop a probe whose overlay is still
+    /// on screen or keep a deleted host measuring.
+    #[test]
+    fn a_save_retires_the_targets_it_removed() {
+        let mut before = Config::default();
+        before.overlays.push(OverlayConfig::new());
+        before.overlays[0].add_target();
+        let saved = enabled_target_keys(&before);
+
+        // Nothing changed: nothing to retire.
+        assert!(
+            retired_targets(&saved, &before).is_empty(),
+            "a save that changes nothing retired something"
+        );
+
+        // A removal is retired, and it is named.
+        let mut after = before.clone();
+        after.overlays[0].targets.truncate(1);
+        assert_eq!(
+            retired_targets(&saved, &after),
+            vec![TaskKey::new(
+                &after.overlays[0].id,
+                &before.overlays[0].targets[1].id
+            )],
+            "a removed host was not retired"
+        );
+
+        // An addition is not: the diff is one-directional, or adding a host
+        // would stop the probe the user just asked for.
+        let mut grown = before.clone();
+        grown.overlays[0].add_target();
+        assert!(
+            retired_targets(&saved, &grown).is_empty(),
+            "an added host was retired"
+        );
+
+        // Disabling is a removal too, because the renderer stops probing it.
+        let mut disabled = before.clone();
+        disabled.overlays[0].enabled = false;
+        assert_eq!(
+            retired_targets(&saved, &disabled).len(),
+            saved.len(),
+            "disabling an overlay did not retire its hosts"
+        );
+    }
+
+    /// A background-tracking change is sent once, not every frame.
+    ///
+    /// The preference is staged and the renderer learns it by comparison, so
+    /// the comparison has to settle: a version that did not record the send
+    /// would push a full config on every pass for as long as the window is
+    /// open — ten parses a second, with nothing to see but the CPU.
+    #[test]
+    fn a_background_tracking_change_is_sent_once_and_settles() {
+        let mut draft = Config::default();
+        let mut last_pushed = draft.clone();
+        let mut last_sent = true;
+        let mut sends = 0;
+
+        for _ in 0..20 {
+            if config_push_due(&mut draft, &last_pushed, true, last_sent, false) {
+                sends += 1;
+                last_sent = true;
+                last_pushed = draft.clone();
+            }
+        }
+        assert_eq!(sends, 0, "an untouched window kept sending");
+
+        // The setting is saved off: the renderer is told once, then the
+        // comparison matches and the window goes quiet again.
+        for _ in 0..20 {
+            if config_push_due(&mut draft, &last_pushed, false, last_sent, false) {
+                sends += 1;
+                last_sent = false;
+                last_pushed = draft.clone();
+            }
+        }
+        assert_eq!(
+            sends, 1,
+            "the preference change was sent {sends} times, not once"
+        );
+    }
+
+    /// A committed removal keeps the push due until it lands.
+    ///
+    /// The disk already dropped the host, so a send that never happened has to
+    /// be retried rather than forgotten; this is the half of the retire list
+    /// that makes "saved means stopped" true across a dead renderer.
+    #[test]
+    fn a_pending_removal_keeps_the_push_due() {
+        let mut draft = Config::default();
+        let last_pushed = draft.clone();
+        assert!(
+            !config_push_due(&mut draft, &last_pushed, true, true, false),
+            "nothing changed, so nothing is due"
+        );
+        assert!(
+            config_push_due(&mut draft, &last_pushed, true, true, true),
+            "a committed removal the renderer never took left the push idle"
         );
     }
 
@@ -6564,6 +6950,38 @@ mod tests {
         assert!(prefs.ui.selection_border_animation);
     }
 
+    /// The background-tracking toggle is written to the draft and to the live
+    /// preference, for the same reason the selection-border toggle is.
+    ///
+    /// `sync_runtime_config` reads the live preference every pass and sends the
+    /// difference to the renderer, so a draft-only write left kept probes
+    /// running after the box was unticked — the setting only worked on Save,
+    /// which is exactly the shape this class of bug always has.
+    #[test]
+    fn the_background_tracking_toggle_is_staged_and_live() {
+        let mut prefs = config::GlobalPrefs::default();
+        let mut draft = config::GlobalPrefs::default();
+        assert!(
+            prefs.ui.background_tracking,
+            "background tracking is on unless it is turned off"
+        );
+
+        set_background_tracking(&mut prefs, &mut draft, false);
+        assert!(
+            !draft.ui.background_tracking,
+            "the draft was not staged, so Save would write the old value"
+        );
+        assert!(
+            !prefs.ui.background_tracking,
+            "the live value was not set, so the renderer would keep the probes running"
+        );
+
+        // And the direction Enable has to work in.
+        set_background_tracking(&mut prefs, &mut draft, true);
+        assert!(draft.ui.background_tracking);
+        assert!(prefs.ui.background_tracking);
+    }
+
     /// The labels are the short ones the tiles use, and the tooltips carry what
     /// the labels cannot: what System follows and resolved to, and the tray-menu
     /// caveat for an override.
@@ -6957,6 +7375,126 @@ mod tests {
         );
         assert_eq!(reads.get(), 2, "switching off still enumerated the desktop");
         assert_eq!(text, None);
+    }
+
+    /// The window's engine debounces like the tray's, holds while the drafts
+    /// are dirty, and lands by itself once they are resolved.
+    ///
+    /// The hold is the point: it must not be a dropped switch. The engine is
+    /// simply not told it applied, so the same settled decision comes back on
+    /// every tick until the caller can take it.
+    #[test]
+    fn the_window_engine_holds_a_switch_until_the_drafts_are_resolved() {
+        let file = AutoRules {
+            enabled: true,
+            fallback_profile: None,
+            rules: vec![Rule {
+                name: "CS2".to_string(),
+                scope: Scope::AnyWindow,
+                combine: Combine::All,
+                when: vec![Condition {
+                    part: Part::ProcessName,
+                    matcher: MatchMode::Exact,
+                    value: "cs2.exe".to_string(),
+                }],
+                profile: "gaming".to_string(),
+            }],
+        };
+        let desktop = || Snapshot {
+            windows: vec![WindowInfo {
+                process: "cs2.exe".to_string(),
+                title: "Counter-Strike 2".to_string(),
+                class_name: "SDL_app".to_string(),
+            }],
+            foreground: None,
+        };
+        let start = Instant::now();
+
+        let mut engine = Engine::default();
+        let mut read_at = None;
+        assert_eq!(
+            auto_switch_step(&mut engine, &mut read_at, start, &file, false, desktop),
+            AutoSwitchStep::Idle,
+            "one evaluation only sets the candidate"
+        );
+        let settled = start + Duration::from_secs(1);
+        assert_eq!(
+            auto_switch_step(&mut engine, &mut read_at, settled, &file, false, desktop),
+            AutoSwitchStep::Apply("gaming".to_string()),
+            "the second consecutive evaluation settles the decision"
+        );
+        engine.mark_applied("gaming");
+        assert_eq!(
+            auto_switch_step(
+                &mut engine,
+                &mut read_at,
+                settled + Duration::from_secs(1),
+                &file,
+                false,
+                desktop
+            ),
+            AutoSwitchStep::Idle,
+            "an applied decision is not applied again"
+        );
+
+        // Dirty drafts: held rather than applied, and still held next tick.
+        let mut held = Engine::default();
+        let mut held_at = None;
+        assert_eq!(
+            auto_switch_step(&mut held, &mut held_at, start, &file, true, desktop),
+            AutoSwitchStep::Idle
+        );
+        let held_tick = start + Duration::from_secs(1);
+        assert_eq!(
+            auto_switch_step(&mut held, &mut held_at, held_tick, &file, true, desktop),
+            AutoSwitchStep::Held("gaming".to_string())
+        );
+        assert_eq!(
+            auto_switch_step(
+                &mut held,
+                &mut held_at,
+                held_tick + Duration::from_secs(1),
+                &file,
+                true,
+                desktop
+            ),
+            AutoSwitchStep::Held("gaming".to_string()),
+            "a held switch must keep coming back rather than be lost"
+        );
+        // Saving or discarding releases it on the next tick.
+        let free_tick = held_tick + Duration::from_secs(2);
+        assert_eq!(
+            auto_switch_step(&mut held, &mut held_at, free_tick, &file, false, desktop),
+            AutoSwitchStep::Apply("gaming".to_string())
+        );
+        held.mark_applied("gaming");
+        assert_eq!(
+            auto_switch_step(
+                &mut held,
+                &mut held_at,
+                free_tick + Duration::from_secs(1),
+                &file,
+                false,
+                desktop
+            ),
+            AutoSwitchStep::Idle
+        );
+
+        // Switching off decides nothing and never enumerates the desktop.
+        let off = AutoRules::default();
+        let mut off_engine = Engine::default();
+        let mut off_at = None;
+        assert_eq!(
+            auto_switch_step(
+                &mut off_engine,
+                &mut off_at,
+                start,
+                &off,
+                false,
+                || unreachable!("the desktop must not be read with switching off")
+            ),
+            AutoSwitchStep::Idle
+        );
     }
 
     /// The fallback a new rule set starts with is the `default` profile when

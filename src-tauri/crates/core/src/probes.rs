@@ -1,18 +1,19 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use crate::config::{Config, TargetConfig};
 use crate::probe;
-use crate::render::SamplePoint;
+use crate::render::{SamplePoint, SAMPLE_INTERVAL};
 
-/// One graph tick is one second. Probe tasks keep their own cadence and are
-/// never restarted just because the user saved a style or graph setting.
-const TICK: Duration = Duration::from_secs(1);
+/// Probe tasks keep their own cadence — `SAMPLE_INTERVAL`, the graph's one
+/// second tick — and are never restarted just because the user saved a style or
+/// graph setting.
 const MAX_BUFFERED_SAMPLES: usize = 86_400;
 
 #[derive(Default)]
@@ -37,7 +38,13 @@ pub type SampleStore = Arc<Mutex<HashMap<String, OverlaySamples>>>;
 /// task and a buffer. `TaskKey` is that pair, named because `HashMap` needs it
 /// to be one value and building the tuple at every lookup is how the two ends
 /// of it drift apart.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// It also travels on the wire, inside a `SetConfig`'s `retire` list: the
+/// removals a Save has committed, which are exactly the probes the renderer
+/// must stop keeping. Serialising it here rather than with a parallel
+/// `(String, String)` shape is what keeps the two ends naming the same target.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskKey {
     pub overlay_id: String,
     pub target_id: String,
@@ -50,6 +57,34 @@ impl TaskKey {
             target_id: target_id.to_string(),
         }
     }
+}
+
+/// Every enabled target with its key: exactly the set `ProbeManager` runs a
+/// task for.
+///
+/// The one definition of "enabled target", shared by `apply_config` and by
+/// `enabled_target_keys`, so the set the manager probes and the set the window
+/// diffs a save against cannot disagree.
+fn enabled_target_configs(config: &Config) -> impl Iterator<Item = (TaskKey, TargetConfig)> + '_ {
+    config
+        .overlays
+        .iter()
+        .filter(|overlay| overlay.enabled)
+        .flat_map(|overlay| {
+            overlay
+                .targets
+                .iter()
+                .filter(|target| target.enabled)
+                .map(|target| (TaskKey::new(&overlay.id, &target.id), target.clone()))
+        })
+}
+
+/// The keys of a config's enabled targets.
+///
+/// The window diffs a save against this: the keys the renderer was told to
+/// keep before the save, minus these, are exactly the probes a Save removes.
+pub fn enabled_target_keys(config: &Config) -> HashSet<TaskKey> {
+    enabled_target_configs(config).map(|(key, _)| key).collect()
 }
 
 /// Owns one long-lived task per enabled target.
@@ -69,6 +104,18 @@ pub struct ProbeManager {
     samples: SampleStore,
     tasks: HashMap<TaskKey, JoinHandle<()>>,
     running: Arc<AtomicBool>,
+    /// Targets that left the active config while background tracking was on.
+    ///
+    /// Their tasks keep running because `probe_loop` reads `configs`, which is
+    /// the active targets merged with this map. A profile switch moves the whole
+    /// profile it left behind in here; a removal the user saved arrives in
+    /// `retire` and leaves for good.
+    background: HashMap<TaskKey, TargetConfig>,
+    /// The enabled targets of the last applied config.
+    ///
+    /// Kept so an apply can tell a departure from a newcomer: only a key that
+    /// was here and is not in the new config is a departure worth backgrounding.
+    active: HashMap<TaskKey, TargetConfig>,
 }
 
 impl ProbeManager {
@@ -79,6 +126,8 @@ impl ProbeManager {
             samples: Arc::new(Mutex::new(HashMap::new())),
             tasks: HashMap::new(),
             running: Arc::new(AtomicBool::new(true)),
+            background: HashMap::new(),
+            active: HashMap::new(),
         }
     }
 
@@ -100,23 +149,43 @@ impl ProbeManager {
     /// timeout edits take effect without a Save-induced pause. Only targets that
     /// were deleted, disabled, or moved to another overlay are stopped, and
     /// newly enabled targets are started.
-    pub fn apply_config(&mut self, config: &Config) {
-        let enabled: HashMap<TaskKey, TargetConfig> = config
-            .overlays
-            .iter()
-            .filter(|overlay| overlay.enabled)
-            .flat_map(|overlay| {
-                overlay
-                    .targets
-                    .iter()
-                    .filter(|target| target.enabled)
-                    .map(|target| (TaskKey::new(&overlay.id, &target.id), target.clone()))
-            })
-            .collect();
+    ///
+    /// With `background_tracking` on, a target that leaves the config keeps its
+    /// task and its samples instead of being stopped — the window may still
+    /// discard the edit that removed it, and a profile left behind by a switch
+    /// is the case the setting exists for. `retire` names the removals a Save
+    /// has committed, and those are let go for good. With the setting off,
+    /// nothing is kept and anything kept before is dropped.
+    pub fn apply_config(&mut self, config: &Config, background_tracking: bool, retire: &[TaskKey]) {
+        let enabled: HashMap<TaskKey, TargetConfig> = enabled_target_configs(config).collect();
 
-        *self.configs.write().unwrap() = enabled.clone();
+        // What leaves this config stays probed only when the setting is on.
+        if background_tracking {
+            for (key, target) in &self.active {
+                if !enabled.contains_key(key) {
+                    self.background
+                        .entry(key.clone())
+                        .or_insert_with(|| target.clone());
+                }
+            }
+        } else {
+            self.background.clear();
+        }
+        for key in retire {
+            self.background.remove(key);
+        }
+        for key in enabled.keys() {
+            self.background.remove(key);
+        }
+        self.active = enabled.clone();
 
-        let wanted: std::collections::HashSet<TaskKey> = enabled.keys().cloned().collect();
+        // The tasks read this map per tick, so it is the merged view: kept
+        // targets keep measuring while they are out of the active config.
+        let mut running_configs = self.background.clone();
+        running_configs.extend(enabled);
+        *self.configs.write().unwrap() = running_configs;
+
+        let wanted: HashSet<TaskKey> = self.configs.read().unwrap().keys().cloned().collect();
         self.tasks.retain(|key, task| {
             if wanted.contains(key) {
                 true
@@ -126,7 +195,7 @@ impl ProbeManager {
             }
         });
 
-        for (key, _target) in enabled {
+        for key in wanted {
             if self.tasks.contains_key(&key) {
                 continue;
             }
@@ -180,7 +249,7 @@ async fn probe_loop(
                 }
             }
         }
-        tokio::time::sleep(TICK).await;
+        tokio::time::sleep(SAMPLE_INTERVAL).await;
     }
 }
 
@@ -188,6 +257,7 @@ async fn probe_loop(
 mod tests {
     use super::*;
     use crate::config::{OverlayConfig, ProbeConfig};
+    use std::time::Duration;
 
     fn overlay_with_targets(count: usize) -> OverlayConfig {
         let mut overlay = OverlayConfig::new();
@@ -220,7 +290,7 @@ mod tests {
             overlays: vec![overlay.clone()],
             ..Config::default()
         };
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
 
         assert_eq!(manager.tasks.len(), 3);
         for index in 0..3 {
@@ -245,7 +315,7 @@ mod tests {
             overlays: vec![overlay.clone()],
             ..Config::default()
         };
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
         let first: Vec<_> = (0..2)
             .map(|index| {
                 let key = key_of(&overlay, index);
@@ -255,7 +325,7 @@ mod tests {
 
         overlay.scale = 3;
         config.overlays[0] = overlay.clone();
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
 
         for (index, original) in first.iter().enumerate() {
             let key = key_of(&overlay, index);
@@ -280,12 +350,12 @@ mod tests {
             overlays: vec![overlay.clone()],
             ..Config::default()
         };
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
         let survivor = manager.tasks[&key_of(&overlay, 0)].id();
 
         overlay.targets[1].enabled = false;
         config.overlays[0] = overlay.clone();
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
 
         assert!(!manager.tasks.contains_key(&key_of(&overlay, 1)));
         assert_eq!(manager.tasks[&key_of(&overlay, 0)].id(), survivor);
@@ -308,7 +378,7 @@ mod tests {
             overlays: vec![first.clone(), second.clone()],
             ..Config::default()
         };
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
 
         assert_eq!(manager.tasks.len(), 2);
         assert_ne!(
@@ -331,7 +401,7 @@ mod tests {
             overlays: vec![overlay.clone()],
             ..Config::default()
         };
-        manager.apply_config(&config);
+        manager.apply_config(&config, false, &[]);
 
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -353,6 +423,156 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+        manager.stop_all();
+        runtime.shutdown_background();
+    }
+
+    /// A profile switch leaves the old profile's targets probed when the
+    /// setting is on: the tasks survive and the merged map still names them,
+    /// which is what `probe_loop` reads every tick.
+    #[test]
+    fn a_departure_keeps_its_task_when_background_tracking_is_on() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let mut manager = ProbeManager::new(runtime.handle().clone());
+        let left = overlay_with_targets(2);
+        let first_config = Config {
+            overlays: vec![left.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&first_config, true, &[]);
+        let original: Vec<_> = (0..2)
+            .map(|index| manager.tasks[&key_of(&left, index)].id())
+            .collect();
+
+        let other = overlay_with_targets(1);
+        let second_config = Config {
+            overlays: vec![other.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&second_config, true, &[]);
+
+        for (index, task) in original.iter().enumerate() {
+            let key = key_of(&left, index);
+            assert_eq!(
+                manager.tasks[&key].id(),
+                *task,
+                "the profile that was switched away from lost target {index}"
+            );
+            assert!(
+                manager.configs.read().unwrap().contains_key(&key),
+                "the kept target left the map the probe loop reads, so it \
+                 stopped measuring"
+            );
+        }
+        assert!(
+            manager.tasks.contains_key(&key_of(&other, 0)),
+            "the new profile was not probed"
+        );
+        manager.stop_all();
+        runtime.shutdown_background();
+    }
+
+    /// A saved removal is the one departure that does not stay: the key arrives
+    /// in `retire` and its task goes away for good.
+    #[test]
+    fn a_saved_removal_retires_the_kept_target() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let mut manager = ProbeManager::new(runtime.handle().clone());
+        let mut overlay = overlay_with_targets(2);
+        let config = Config {
+            overlays: vec![overlay.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&config, true, &[]);
+
+        // The user unticks host 1. The edit is unsaved, so it keeps probing.
+        overlay.targets[1].enabled = false;
+        let trimmed = Config {
+            overlays: vec![overlay.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&trimmed, true, &[]);
+        let kept = key_of(&overlay, 1);
+        assert!(
+            manager.tasks.contains_key(&kept),
+            "an unsaved removal stopped the probe"
+        );
+
+        // Then saves: the removal is committed, so it is retired.
+        manager.apply_config(&trimmed, true, std::slice::from_ref(&kept));
+        assert!(
+            !manager.tasks.contains_key(&kept),
+            "a saved removal was still being probed"
+        );
+        assert!(
+            manager.tasks.contains_key(&key_of(&overlay, 0)),
+            "the target that stayed was stopped too"
+        );
+        manager.stop_all();
+        runtime.shutdown_background();
+    }
+
+    /// Turning the setting off drops everything that was being kept, which is
+    /// the whole of the "off" promise: departures stop immediately.
+    #[test]
+    fn background_tracking_off_drops_what_was_kept() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let mut manager = ProbeManager::new(runtime.handle().clone());
+        let left = overlay_with_targets(1);
+        let first_config = Config {
+            overlays: vec![left.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&first_config, true, &[]);
+
+        let other = overlay_with_targets(1);
+        let second_config = Config {
+            overlays: vec![other.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&second_config, true, &[]);
+
+        manager.apply_config(&second_config, false, &[]);
+        assert!(
+            !manager.tasks.contains_key(&key_of(&left, 0)),
+            "a kept target outlived the setting being switched off"
+        );
+        assert!(
+            manager.tasks.contains_key(&key_of(&other, 0)),
+            "switching the setting off stopped the active profile too"
+        );
+        manager.stop_all();
+        runtime.shutdown_background();
+    }
+
+    /// Coming back is a return, not a restart: the task that kept probing is
+    /// reused, so the samples it collected land in the same buffer.
+    #[test]
+    fn a_returning_target_reuses_its_kept_task() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let mut manager = ProbeManager::new(runtime.handle().clone());
+        let profile = overlay_with_targets(1);
+        let config = Config {
+            overlays: vec![profile.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&config, true, &[]);
+        let id = manager.tasks[&key_of(&profile, 0)].id();
+
+        let other = overlay_with_targets(1);
+        let other_config = Config {
+            overlays: vec![other.clone()],
+            ..Config::default()
+        };
+        manager.apply_config(&other_config, true, &[]);
+        manager.apply_config(&config, true, &[]);
+
+        assert_eq!(
+            manager.tasks[&key_of(&profile, 0)].id(),
+            id,
+            "the returning target was restarted instead of reusing the task \
+             that kept probing"
+        );
         manager.stop_all();
         runtime.shutdown_background();
     }

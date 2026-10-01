@@ -525,7 +525,17 @@ impl App {
             }
         }
         let config = ping_latency_overlay_core::config::load().config;
-        match self.send(&Message::SetConfig { config }) {
+        // A fresh renderer starts with nothing probed, so there is nothing to
+        // keep; it still needs the preference, because the departures that
+        // follow this push are governed by it.
+        let background_tracking = ping_latency_overlay_core::config::read_global_prefs()
+            .ui
+            .background_tracking;
+        match self.send(&Message::SetConfig {
+            config,
+            background_tracking,
+            retire: Vec::new(),
+        }) {
             Ok(()) => {
                 diagnostics::log_line("tray", "the new renderer has its config");
                 self.starting = None;
@@ -684,7 +694,15 @@ impl App {
             }
         };
         loaded.normalize();
-        if let Err(error) = self.send(&Message::SetConfig { config: loaded }) {
+        // The profile being left behind keeps probing when the user asked for
+        // background tracking. The tray never retires: a switch is not a saved
+        // removal, and the window owns the difference between the two.
+        let background_tracking = config::read_global_prefs().ui.background_tracking;
+        if let Err(error) = self.send(&Message::SetConfig {
+            config: loaded,
+            background_tracking,
+            retire: Vec::new(),
+        }) {
             let message = format!(
                 "auto profile: could not reach the renderer to switch to \"{profile}\": {error}"
             );

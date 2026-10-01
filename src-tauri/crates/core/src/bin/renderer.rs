@@ -108,7 +108,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // this read is the cold-start path rather than a competing source of truth.
     let loaded = config::load();
     let mut probes = ProbeManager::new(runtime.handle().clone());
-    probes.apply_config(&loaded.config);
+    probes.apply_config(
+        &loaded.config,
+        config::read_global_prefs().ui.background_tracking,
+        &[],
+    );
     let mut overlays = OverlayManager::new()?;
     let mut state = State {
         config: loaded.config,
@@ -179,11 +183,17 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 /// Act on one command, returning whether the renderer should keep running.
 fn apply(message: Message, state: &mut State, probes: &mut ProbeManager) -> bool {
     match message {
-        Message::SetConfig { config } => {
+        Message::SetConfig {
+            config,
+            background_tracking,
+            retire,
+        } => {
             state.config = config;
             // Reuses the tasks that are already running, so a change to a colour
-            // or a line width does not interrupt a measurement in progress.
-            probes.apply_config(&state.config);
+            // or a line width does not interrupt a measurement in progress. The
+            // two departure facts decide what happens to the targets this config
+            // no longer contains.
+            probes.apply_config(&state.config, background_tracking, &retire);
         }
         Message::SetPaused { paused } => {
             state.running = !paused;

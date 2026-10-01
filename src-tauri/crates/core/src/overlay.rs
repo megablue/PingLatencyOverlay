@@ -12,7 +12,8 @@ use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig, Target
 use crate::monitors::MonitorInfo;
 use crate::probes::SampleStore;
 use crate::render::{
-    cosmetic_prefill_samples, render_series_into_with_border, SamplePoint, Series,
+    cosmetic_prefill_samples, render_series_into_with_border, sample_gap_threshold, SamplePoint,
+    Series,
 };
 
 #[cfg(test)]
@@ -1119,6 +1120,7 @@ impl OverlayManager {
                         line_color: &target.line_color,
                         timeout_color: &target.timeout_color,
                         samples: &entry.history,
+                        max_sample_gap: sample_gap_threshold(target.timeout_ms),
                     })
                     .collect();
                 render_series_into_with_border(
@@ -1154,6 +1156,7 @@ impl OverlayManager {
                         line_color: &target.line_color,
                         timeout_color: &target.timeout_color,
                         samples,
+                        max_sample_gap: sample_gap_threshold(target.timeout_ms),
                     })
                     .collect();
                 render_series_into_with_border(
@@ -1176,6 +1179,7 @@ impl OverlayManager {
                     line_color: &target.line_color,
                     timeout_color: &target.timeout_color,
                     samples: &entry.samples,
+                    max_sample_gap: sample_gap_threshold(target.timeout_ms),
                 })
                 .collect();
             render_series_into_with_border(
