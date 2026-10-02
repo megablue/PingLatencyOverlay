@@ -115,6 +115,36 @@ Installer (run from the repository root):
   friends are clippy-only, and `cargo test` compiles and passes with them
   present. The gate is `cargo fmt`, `cargo clippy --all-targets --all-features
   -- -D warnings`, `cargo test --all-features`, `cargo build --release`.
+- **The capture script is how the app gets looked at without a person at the
+  screen.** `scripts/capture-app.ps1` stops the three exes, runs a session of
+  its own (`plo-config` brings up the tray and renderer), photographs the
+  Config window with `PrintWindow` and each overlay by `BitBlt`-ing the desktop
+  DC with `CAPTUREBLT` (an `UpdateLayeredWindow` window presents nothing to
+  `PrintWindow`), and writes PNGs plus `manifest.txt` into `-OutDir`. It points
+  `PLO_CONFIG_DIR` at a sandbox copy of the live config by default, so a
+  session can never rewrite the user's settings or log.
+  `SetProcessDpiAwarenessContext(-4)` comes first so the window rects are
+  physical pixels. Two traps are paid for in it: `Graphics.CopyFromScreen`
+  returns an all-black image in this environment while the GDI call does not,
+  and winit keeps an 18x18 visible helper window beside the real Config window,
+  so the script picks that window by title and size rather than by "first
+  visible". A `PrintWindow` that comes back flat falls back to the screen copy,
+  because a black photograph is worse than an occluded one. Screenshots taken
+  this way are worth reading, but nothing can script a real click into the
+  running app, so a visual change still gets handed over as a build.
+- **The driving tests click through the window's real frame path.**
+  `PingApp::for_test` builds an app against a temp root with the tray and
+  renderer spawns skipped (`attach: false` in the shared `build` body), and
+  `frame_ui` is exactly what the eframe trait method calls, so the `drive` and
+  `click_text` helpers run the pass the host would. `text_rects` finds painted
+  labels by their galley text — the rail rows and the theme tiles are
+  `painter.text` and their hit targets cover the label — so a click is
+  addressed by label rather than by coordinates, and `click_text` asserts the
+  label is unique so a test cannot silently click the wrong control. Tests
+  drive `frame_ui` and deliberately not `frame_logic`: reconnection and the
+  `sync_*` methods talk to the machine. The tests module's `use super::{...}`
+  is an explicit list, so a new helper or constant a test touches must be added
+  to it.
 - **A manifest that is both a workspace root and a package narrows plain
   `cargo test` to that package alone.** The split into `crates/core` made
   `cargo test` report 35 passed against a 94-test suite and exit 0, silently

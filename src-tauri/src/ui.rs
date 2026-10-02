@@ -920,6 +920,15 @@ pub struct PingApp {
     /// The page shown on the previous pass, so a change can be noticed.
     last_page: Page,
     rail_collapsed: bool,
+    /// The store every profile, preference and rule read and write goes
+    /// through.
+    ///
+    /// The app keeps one for its whole lifetime rather than calling the free
+    /// `config::*` functions: a window pointed at a root must keep writing
+    /// there, so a capture session launched with `PLO_CONFIG_DIR` set cannot
+    /// stray back to the real config, and a test can drive the window against
+    /// a temp directory without moving the process's own root.
+    store: config::Store,
     config: Config,
     active_profile: String,
     profiles: Vec<config::ProfileEntry>,
@@ -1227,10 +1236,12 @@ fn set_background_tracking(
 
 impl PingApp {
     pub fn new(cc: &CreationContext<'_>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let position_picker = PositionPicker::new(&cc.egui_ctx);
+        // The one store this window writes through. It resolves the same
+        // `PLO_CONFIG_DIR` override `config::load` does, so a window launched
+        // against a sandbox (the capture script does this) reads and writes
+        // that root and can never stray back to the user's real config.
+        let store = config::Store::new(config::config_dir());
         let loaded = config::load();
-        let config = loaded.config;
-        let status = config_notices_status(&loaded.notices);
         // Loaded separately from the profile: it is app-wide and the tray is
         // already reading it. A parse failure is shown in the status bar and
         // the section, and never rewrites the file on its own.
@@ -1241,6 +1252,56 @@ impl PingApp {
                 Some(format!("rules.json could not be read: {error}")),
             ),
         };
+        Ok(Self::build(
+            &cc.egui_ctx,
+            store,
+            loaded,
+            rules,
+            rules_error,
+            true,
+        ))
+    }
+
+    /// The app a test drives: the real window minus the parts a test cannot
+    /// own.
+    ///
+    /// A bare `egui::Context` and no process spawns, so the whole frame path
+    /// runs headlessly, and `build` is shared with `new` so the two cannot
+    /// drift. The theme is pinned to light so no test depends on the machine's
+    /// Windows setting; the sandbox has no theme files, so the built-in light
+    /// theme loads and the position picker never reads the disk.
+    #[cfg(test)]
+    fn for_test(ctx: &Context, root: &std::path::Path) -> Self {
+        let mut loaded = config::load_rooted(root);
+        loaded.prefs.ui.theme = ThemeMode::Light;
+        Self::build(
+            ctx,
+            config::Store::new(root.to_path_buf()),
+            loaded,
+            AutoRules::default(),
+            None,
+            false,
+        )
+    }
+
+    /// The shared body of `new` and `for_test`.
+    ///
+    /// `attach` is the one difference: a real launch brings the tray up,
+    /// starts or attaches to the renderer, shows the window and pushes the
+    /// config, while a test does none of those and runs the same code for
+    /// everything else — the theme resolved from the loaded preference, the
+    /// global style, the position picker, the About logo, the engine seed.
+    fn build(
+        ctx: &Context,
+        store: config::Store,
+        loaded: config::ConfigLoad,
+        rules: AutoRules,
+        rules_error: Option<String>,
+        attach: bool,
+    ) -> Self {
+        let position_picker = PositionPicker::new(ctx);
+        let config = loaded.config;
+        let mut status = config_notices_status(&loaded.notices);
         let active_profile = loaded.active_profile;
         // The one place the rail's collapsed state survives a restart.
         let prefs = loaded.prefs;
@@ -1254,46 +1315,45 @@ impl PingApp {
         // The preference is read from `prefs`, not hardcoded to `System`: a
         // `globalconfig.json` a user edited by hand says `light`, and starting
         // up as System would override it on every launch and never say so.
-        let (system_mode, theme) = sync_theme(None, prefs.ui.theme, &config::themes_dir());
+        let (system_mode, theme) = sync_theme(None, prefs.ui.theme, &store.themes_dir());
         set_palette(theme.colors);
-        theme::apply(&cc.egui_ctx, &theme);
-        cc.egui_ctx.global_style_mut(|style| {
+        theme::apply(ctx, &theme);
+        ctx.global_style_mut(|style| {
             style.spacing.scroll.foreground_color = false;
         });
-        // Nothing is selected on the Overlays page until the user picks an
-        // overlay. Selecting the first one automatically meant a border was
-        // animating the moment the window opened, which read as the app doing
-        // something nobody asked for. The selection is view-only: staged edits
-        // live in `config.overlays`, so emptying pane 3 cannot lose any.
-        // This process is the window, and it is only ever started because
+        // A real launch is the window, and it is only ever started because
         // somebody asked for a window, so it starts visible. It used to start
         // hidden behind a `--show-config` flag, which was right when the tray
         // lived in this process and revealed it from its menu — and became a
         // window nobody could reach once the tray moved out. The flag is still
         // accepted below so the documented development command does not
         // become an error, but it no longer hides anything.
-        let show_config = true;
+        let show_config = attach;
         let _show_config_flag = std::env::args_os().any(|arg| arg == "--show-config");
 
-        // This process is the one thing that can bring the tray up with it: a
+        // A real launch is the one thing that can bring the tray up with it: a
         // user who double-clicks this executable should end up with a working
         // app, not a window and no tray. The renderer follows the same rule one
         // level down, and the renderer itself never starts either of them.
         // The tray is deliberately NOT tracked as a child to clean up: it is the
         // app, and it should outlive a window. Closing the window leaves it
         // running, which is the intended shape rather than a leak.
-        if let Some(failure) = start_or_attach_tray() {
-            log_line("config", &failure);
+        let mut renderer = None;
+        if attach {
+            if let Some(failure) = start_or_attach_tray() {
+                log_line("config", &failure);
+            }
+            // A renderer that is already running is somebody else's, and
+            // attaching to it is the whole point of the pipe being the
+            // rendezvous. Only when there is nothing listening does this shell
+            // start one, and only a process it started is ever stopped by it.
+            let (connection, _renderer_process, failure) = start_or_attach_renderer();
+            renderer = connection;
+            // Whatever the notices said at startup survives a renderer that
+            // would not start, because both are things the user needs to see.
+            status = append_status_message(status, failure.as_deref());
         }
-        // A renderer that is already running is somebody else's, and attaching
-        // to it is the whole point of the pipe being the rendezvous. Only when
-        // there is nothing listening does this shell start one, and only a
-        // process it started is ever stopped by it.
-        let (renderer, _renderer_process, failure) = start_or_attach_renderer();
-        // Whatever the notices said at startup survives a renderer that would
-        // not start, because both are things the user needs to see.
-        let status = append_status_message(status, failure.as_deref());
-        let status = append_status_message(status, rules_error.as_deref());
+        status = append_status_message(status, rules_error.as_deref());
         let running = true;
 
         // The window runs the engine while it is open, because the tray stands
@@ -1303,10 +1363,9 @@ impl PingApp {
         let mut auto_engine = rules::Engine::default();
         auto_engine.mark_applied(&active_profile);
 
-        cc.egui_ctx.send_viewport_cmd_to(
-            egui::ViewportId::ROOT,
-            egui::ViewportCommand::Visible(show_config),
-        );
+        if attach {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+        }
         // The static title in `run` cannot know the profile, so the real one
         // is sent as soon as the app state exists.
         let mut app = Self {
@@ -1315,12 +1374,13 @@ impl PingApp {
             // arrival and the startup is not spent reading every profile file.
             last_page: Page::Overlays,
             rail_collapsed,
+            store,
             // Cloned before it is moved, and seeded with what is loaded: the
-            // `push_config` at the end of `new` tells the renderer exactly this,
-            // so the first `sync_runtime_config` has nothing to say. Seeding it
-            // with `Config::default()` instead would send the whole file once
-            // more on the first frame, which is harmless but means the record
-            // and the renderer disagree at startup for no reason.
+            // `push_config` at the end of the launch tells the renderer exactly
+            // this, so the first `sync_runtime_config` has nothing to say.
+            // Seeding it with `Config::default()` instead would send the whole
+            // file once more on the first frame, which is harmless but means the
+            // record and the renderer disagree at startup for no reason.
             last_pushed: config.clone(),
             saved_keys: enabled_target_keys(&config),
             pending_retire: Vec::new(),
@@ -1336,6 +1396,12 @@ impl PingApp {
             profile_menu_open: false,
             profile_dialog: None,
             profile_name_focus: false,
+            // Nothing is selected on the Overlays page until the user picks an
+            // overlay. Selecting the first one automatically meant a border was
+            // animating the moment the window opened, which read as the app
+            // doing something nobody asked for. The selection is view-only:
+            // staged edits live in `config.overlays`, so emptying pane 3
+            // cannot lose any.
             selected_id: None,
             selected_target: None,
             prefs_draft: prefs.clone(),
@@ -1368,12 +1434,14 @@ impl PingApp {
             theme,
             system_mode,
             shutdown_state: ShutdownState::Running,
-            about_logo: about_logo_texture(&cc.egui_ctx),
+            about_logo: about_logo_texture(ctx),
         };
-        app.sync_window_title(&cc.egui_ctx);
-        app.push_config();
-        cc.egui_ctx.request_repaint();
-        Ok(app)
+        app.sync_window_title(ctx);
+        if attach {
+            app.push_config();
+        }
+        ctx.request_repaint();
+        app
     }
 
     /// Send a message to the renderer, reporting failure in the status bar.
@@ -1753,7 +1821,7 @@ impl PingApp {
         next.normalize();
         // Profiles are the only configuration storage now; the previous
         // single-file config.json was moved into the profiles directory.
-        match config::save_profile(&self.active_profile, &next) {
+        match self.store.save_profile(&self.active_profile, &next) {
             Ok(()) => {
                 self.config = next;
                 self.dirty = false;
@@ -1865,7 +1933,7 @@ impl PingApp {
         if !self.prefs_dirty {
             return true;
         }
-        match config::write_global_prefs(&self.prefs_draft) {
+        match self.store.write_global_prefs(&self.prefs_draft) {
             Ok(()) => {
                 self.prefs = self.prefs_draft.clone();
                 self.prefs_dirty = false;
@@ -1889,7 +1957,7 @@ impl PingApp {
         if !self.rules_dirty {
             return true;
         }
-        match config::save_rules(&self.rules_draft) {
+        match self.store.save_rules(&self.rules_draft) {
             Ok(()) => {
                 self.rules = self.rules_draft.clone();
                 self.rules_dirty = false;
@@ -1908,7 +1976,7 @@ impl PingApp {
     fn discard_edits(&mut self) {
         self.discard_prefs();
         self.discard_rules();
-        match config::load_profile(&self.active_profile) {
+        match self.store.load_profile(&self.active_profile) {
             Ok(mut stored) => {
                 stored.normalize();
                 self.apply_saved_config(stored);
@@ -1926,7 +1994,7 @@ impl PingApp {
 
     /// Put the preferences back the way disk has them, rail included.
     fn discard_prefs(&mut self) {
-        self.prefs = config::read_global_prefs();
+        self.prefs = self.store.read_global_prefs();
         self.prefs_draft = self.prefs.clone();
         self.rail_collapsed = self.prefs.ui.rail_collapsed;
         self.prefs_dirty = false;
@@ -1954,7 +2022,7 @@ impl PingApp {
     /// A profile whose file will not parse is left out of the count map rather
     /// than counted as zero, so it draws no number instead of a wrong one.
     fn refresh_profiles(&mut self) {
-        let snapshot = read_profile_snapshot();
+        let snapshot = read_profile_snapshot(&self.store);
         self.profiles = snapshot.profiles;
         self.profile_overlay_counts = snapshot.counts;
     }
@@ -1970,7 +2038,9 @@ impl PingApp {
         let page = self.page;
         let profiles = &mut self.profiles;
         let counts = &mut self.profile_overlay_counts;
-        sync_profile_cache(last_page, page, profiles, counts, read_profile_snapshot);
+        sync_profile_cache(last_page, page, profiles, counts, || {
+            read_profile_snapshot(&self.store)
+        });
     }
 
     /// Re-resolve the theme, and repaint the window when it changed.
@@ -1987,7 +2057,11 @@ impl PingApp {
     /// would mean watching a directory, which is phase 2's problem.
     fn sync_theme(&mut self, ctx: &Context) {
         let previous = (self.system_mode, &self.theme);
-        let (mode, theme) = sync_theme(Some(previous), self.prefs.ui.theme, &config::themes_dir());
+        let (mode, theme) = sync_theme(
+            Some(previous),
+            self.prefs.ui.theme,
+            &self.store.themes_dir(),
+        );
         if mode == self.system_mode {
             return;
         }
@@ -2102,11 +2176,11 @@ impl PingApp {
             self.status = "Save or discard your changes before switching profiles.".to_string();
             return false;
         }
-        match config::load_profile(id) {
+        match self.store.load_profile(id) {
             Ok(mut stored) => {
                 stored.normalize();
                 self.active_profile = id.to_string();
-                if let Err(error) = config::set_active_profile(&self.active_profile) {
+                if let Err(error) = self.store.set_active_profile(&self.active_profile) {
                     self.status = format!("Could not update globalconfig.json: {error}");
                 }
                 self.selected_id = stored.overlays.first().map(|overlay| overlay.id.clone());
@@ -2131,7 +2205,7 @@ impl PingApp {
     /// Create a new empty profile, then load it. Returns false when the name
     /// was rejected.
     fn create_profile(&mut self, display_name: &str) -> bool {
-        match config::create_profile(display_name) {
+        match self.store.create_profile(display_name) {
             Ok(created) => {
                 self.refresh_profiles();
                 self.selected_profile = Some(created.id.clone());
@@ -2154,14 +2228,14 @@ impl PingApp {
 
     /// Rename a profile. Returns false when the new name was rejected.
     fn rename_profile(&mut self, from: &str, display_name: &str) -> bool {
-        match config::rename_profile(from, display_name) {
+        match self.store.rename_profile(from, display_name) {
             Ok(renamed) => {
                 if self.active_profile == from {
                     self.active_profile = renamed.id.clone();
                     // Keep the draft in step with the file, so the next Save
                     // cannot write the previous name back into it.
                     self.config.profile_name = renamed.name.clone();
-                    if let Err(error) = config::set_active_profile(&self.active_profile) {
+                    if let Err(error) = self.store.set_active_profile(&self.active_profile) {
                         self.status = format!("Could not update globalconfig.json: {error}");
                     }
                 }
@@ -2195,7 +2269,7 @@ impl PingApp {
     /// The copy is not loaded: switching is a separate, deliberate action, and
     /// doing it here would discard nothing but would still be a surprise.
     fn duplicate_profile(&mut self, from: &str, display_name: &str) -> bool {
-        match config::duplicate_profile(from, display_name) {
+        match self.store.duplicate_profile(from, display_name) {
             Ok(created) => {
                 self.refresh_profiles();
                 self.selected_profile = Some(created.id.clone());
@@ -2229,7 +2303,7 @@ impl PingApp {
             return;
         }
         let name = self.profile_name(id);
-        if let Err(error) = config::delete_profile(id) {
+        if let Err(error) = self.store.delete_profile(id) {
             self.status = format!("Could not delete profile \"{id}\": {error}");
             return;
         }
@@ -2889,15 +2963,18 @@ impl PingApp {
                 for (label, path) in [
                     (
                         "Config folder",
-                        config::config_dir().to_string_lossy().to_string(),
+                        self.store.root().to_string_lossy().to_string(),
                     ),
                     (
                         "Profiles",
-                        config::profiles_dir().to_string_lossy().to_string(),
+                        self.store.profiles_dir().to_string_lossy().to_string(),
                     ),
                     (
                         "Global config",
-                        config::global_config_path().to_string_lossy().to_string(),
+                        self.store
+                            .global_config_path()
+                            .to_string_lossy()
+                            .to_string(),
                     ),
                 ] {
                     ui.horizontal(|ui| {
@@ -3062,7 +3139,7 @@ impl PingApp {
             .show(|ui| {
                 ui.set_width(PROFILE_POPUP_WIDTH);
                 let header = ui.label(RichText::new("Profiles").strong().color(UI_TEXT()));
-                header.on_hover_text(config::profiles_dir().display().to_string());
+                header.on_hover_text(self.store.profiles_dir().display().to_string());
                 ui.separator();
 
                 for profile in &profiles {
@@ -4249,10 +4326,14 @@ struct ProfileSnapshot {
 }
 
 /// Read every profile's name and overlay count from disk.
-fn read_profile_snapshot() -> ProfileSnapshot {
+///
+/// Takes the store because the snapshot must come from the root the window is
+/// pointed at: reading through the free functions would show a test the real
+/// profiles while it writes into its own sandbox.
+fn read_profile_snapshot(store: &config::Store) -> ProfileSnapshot {
     ProfileSnapshot {
-        profiles: config::list_profiles_detailed(),
-        counts: config::profile_overlay_counts(),
+        profiles: store.list_profiles_detailed(),
+        counts: store.profile_overlay_counts(),
     }
 }
 
@@ -5025,8 +5106,15 @@ fn deselect_strip_rect(
 use ping_latency_overlay_core::diagnostics::log_line;
 use ping_latency_overlay_core::transport::{start_or_attach_renderer, start_or_attach_tray};
 
-impl App for PingApp {
-    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+/// The per-frame path, split from the `App` trait so a test can drive it.
+///
+/// `eframe` hands the trait methods a `Frame`, and both ignored it: `logic` is
+/// all state work and `ui` is all drawing. A method without the frame is
+/// therefore the same code, and calling it directly is what lets the driving
+/// tests run the real per-frame path headlessly — no window, no GPU, and no
+/// `eframe::Frame` to construct, which a test cannot do.
+impl PingApp {
+    fn frame_logic(&mut self, ctx: &Context) {
         if self.shutdown_state == ShutdownState::ExitConfirmed {
             // Issued from a frame that did not also cancel, so this one gets
             // through and the process ends. If it somehow does not, the next
@@ -5064,7 +5152,7 @@ impl App for PingApp {
         ctx.request_repaint_after(REPAINT_INTERVAL);
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn frame_ui(&mut self, ui: &mut Ui) {
         self.handle_root_close(ui.ctx());
         if self.shutdown_state == ShutdownState::ExitConfirmed {
             // The close is on its way; drawing anything now would be a frame
@@ -5081,6 +5169,16 @@ impl App for PingApp {
         if self.shutdown_state == ShutdownState::ConfirmClose {
             self.show_close_prompt(ui.ctx());
         }
+    }
+}
+
+impl App for PingApp {
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.frame_logic(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.frame_ui(ui);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -5919,16 +6017,16 @@ mod tests {
         set_selection_border_animation, sync_auto_preview_text, sync_monitor_list,
         sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
-        window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, ProfileSnapshot, ThemeMode,
-        ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, DETAIL_FOOTER_BUTTON_HEIGHT,
-        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
-        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL,
-        OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
-        RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
-        STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, THEME_ICON_STROKE, THEME_MOON_BITE_OFFSET,
-        THEME_MOON_BITE_RADIUS, THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS, THEME_SUN_RAYS,
-        THEME_SUN_RAY_OUTER, THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND, WINDOW_MIN_HEIGHT,
-        WINDOW_MIN_WIDTH, WINDOW_WIDTH,
+        window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, PingApp, ProfileSnapshot,
+        ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
+        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
+        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
+        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
+        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, THEME_ICON_STROKE,
+        THEME_MOON_BITE_OFFSET, THEME_MOON_BITE_RADIUS, THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS,
+        THEME_SUN_RAYS, THEME_SUN_RAY_OUTER, THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND,
+        WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::config::{
@@ -8405,6 +8503,288 @@ mod tests {
         assert!(
             config_notice_status(&ConfigNotice::ProfileNamesBackfilled { count: 3 })
                 .contains("3 existing profiles")
+        );
+    }
+
+    // --- Driving the window -------------------------------------------------
+    //
+    // Everything below runs the window's *real* per-frame path against a
+    // sandbox: `PingApp::for_test` loads from a temp root and skips the tray and
+    // renderer, and `frame_ui` is the exact body the eframe trait method calls.
+    // A click here is the click a user makes, so a control that is unreachable,
+    // mis-sized or wired to the wrong handler fails the test instead of needing
+    // someone to look at a screenshot.
+
+    /// A sandbox root for a driving test, emptied first so a stale run cannot
+    /// decide what the window loads.
+    fn driving_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    /// Run one real UI pass at the real window size and with the given events.
+    ///
+    /// The texture deltas are dropped because nothing here uploads them and a
+    /// full delta list panics on drop, which is the same line the layout tests
+    /// carry.
+    fn drive(app: &mut PingApp, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
+        output.textures_delta.clear();
+        output
+    }
+
+    /// Every piece of `text` a pass painted, wherever it came from.
+    ///
+    /// This is what makes a control addressable without coordinates. The rail
+    /// rows, the theme tiles and the list rows are painted with `painter.text`
+    /// rather than built as buttons, and a row or tile's hit target covers its
+    /// label; a checkbox paints its label inside its own response. So finding
+    /// the label is finding the control, even for the painted half of the UI.
+    fn text_rects(output: &egui::FullOutput, text: &str) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, text: &str, found: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, text, found);
+                    }
+                }
+                egui::Shape::Text(piece) if piece.galley.job.text == text => {
+                    found.push(egui::Rect::from_min_size(piece.pos, piece.galley.size()));
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, text, &mut found);
+        }
+        found
+    }
+
+    /// Press and release the primary button at `pos`, across passes the way the
+    /// host delivers them (move, press, release).
+    fn click_at(app: &mut PingApp, ctx: &egui::Context, pos: egui::Pos2) {
+        drive(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+        drive(
+            app,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        drive(
+            app,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    /// Click the single match for `text` that `keep` accepts.
+    ///
+    /// The uniqueness assertion is the point: a locator that silently clicked
+    /// the first of two matches would let a test pass while clicking the wrong
+    /// control. `keep` exists for the label that legitimately appears twice in
+    /// one pass — an overlay's name on its list row and in the editor beside it.
+    fn click_text_where(
+        app: &mut PingApp,
+        ctx: &egui::Context,
+        text: &str,
+        keep: impl Fn(egui::Rect) -> bool,
+    ) {
+        let output = drive(app, ctx, Vec::new());
+        let rects: Vec<egui::Rect> = text_rects(&output, text)
+            .into_iter()
+            .filter(|rect| keep(*rect))
+            .collect();
+        assert_eq!(
+            rects.len(),
+            1,
+            "\"{text}\" matched {} clickable places, not one: {rects:?}",
+            rects.len()
+        );
+        click_at(app, ctx, rects[0].center());
+    }
+
+    /// Click the one place `text` appears in the current pass.
+    fn click_text(app: &mut PingApp, ctx: &egui::Context, text: &str) {
+        click_text_where(app, ctx, text, |_| true);
+    }
+
+    /// A tile click changes the theme live *and* stages it, and Save writes the
+    /// sandbox file.
+    ///
+    /// Both halves matter for the same reason `choose_theme` writes both: the
+    /// live value is what the next pass reads, and the draft is what Save
+    /// writes. A test that read only the file would pass with the setting dead
+    /// until Save.
+    #[test]
+    fn clicking_a_theme_tile_stages_and_saves() {
+        let root = driving_root("plo-drive-theme");
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+        assert_eq!(app.page, Page::Overlays, "the window opens on Overlays");
+
+        click_text(&mut app, &ctx, "Global");
+        assert_eq!(app.page, Page::Global, "the rail row did not switch pages");
+
+        click_text(&mut app, &ctx, "Dark Theme");
+        assert_eq!(
+            app.prefs.ui.theme,
+            ThemeMode::Dark,
+            "the live theme did not follow the tile, so the next pass would undo it"
+        );
+        assert_eq!(
+            app.prefs_draft.ui.theme,
+            ThemeMode::Dark,
+            "the tile did not stage the preference"
+        );
+        assert!(
+            app.prefs_dirty,
+            "the tile did not mark the preferences dirty"
+        );
+
+        click_text(&mut app, &ctx, "Save");
+        assert!(!app.prefs_dirty, "Save left the preference staged");
+        assert_eq!(
+            config::Store::new(root.clone())
+                .read_global_prefs()
+                .ui
+                .theme,
+            ThemeMode::Dark,
+            "Save did not write the theme"
+        );
+    }
+
+    /// A rail row switches pages, from wherever the window currently is.
+    #[test]
+    fn clicking_the_rail_switches_pages() {
+        let root = driving_root("plo-drive-rail");
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+
+        click_text(&mut app, &ctx, "Profiles");
+        assert_eq!(app.page, Page::Profiles);
+
+        click_text(&mut app, &ctx, "About");
+        assert_eq!(app.page, Page::About);
+
+        click_text(&mut app, &ctx, "Overlays");
+        assert_eq!(app.page, Page::Overlays);
+    }
+
+    /// The selection-border checkbox is staged and live at once; Discard puts
+    /// the live value back and writes nothing, Save writes the sandbox file.
+    #[test]
+    fn the_selection_border_checkbox_stages_live_and_discards() {
+        let root = driving_root("plo-drive-checkbox");
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+        click_text(&mut app, &ctx, "Global");
+
+        click_text(&mut app, &ctx, "Animate the selected overlay's border");
+        assert!(
+            !app.prefs.ui.selection_border_animation,
+            "the live value did not follow the box"
+        );
+        assert!(
+            !app.prefs_draft.ui.selection_border_animation,
+            "the box did not stage the preference"
+        );
+        assert!(
+            app.prefs_dirty,
+            "the box did not mark the preferences dirty"
+        );
+
+        click_text(&mut app, &ctx, "Discard");
+        assert!(
+            app.prefs.ui.selection_border_animation,
+            "Discard did not restore the live value"
+        );
+        assert!(
+            app.prefs_draft.ui.selection_border_animation,
+            "Discard left the draft behind"
+        );
+        assert!(!app.prefs_dirty, "Discard left the preferences dirty");
+        assert!(
+            config::Store::new(root.clone())
+                .read_global_prefs()
+                .ui
+                .selection_border_animation,
+            "Discard wrote the abandoned draft to the sandbox"
+        );
+
+        click_text(&mut app, &ctx, "Animate the selected overlay's border");
+        click_text(&mut app, &ctx, "Save");
+        assert!(!app.prefs_dirty, "Save left the preferences dirty");
+        assert!(
+            !config::Store::new(root.clone())
+                .read_global_prefs()
+                .ui
+                .selection_border_animation,
+            "Save did not write the preference"
+        );
+    }
+
+    /// A list row selects its overlay, and clicking the selected row again
+    /// clears it — the one deliberate way to stop the border preview.
+    #[test]
+    fn clicking_an_overlay_row_selects_and_reselecting_clears() {
+        let root = driving_root("plo-drive-select");
+        let store = config::Store::new(root.clone());
+        let mut config = Config::default();
+        config.overlays.push(OverlayConfig::new());
+        let overlay_id = config.overlays[0].id.clone();
+        store
+            .save_profile("default", &config)
+            .expect("seed the profile");
+        store
+            .set_active_profile("default")
+            .expect("seed the active profile");
+
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+        assert_eq!(app.page, Page::Overlays);
+        assert_eq!(
+            app.selected_id, None,
+            "nothing may select an overlay just because the window opened"
+        );
+
+        // The row label is in the list pane, left of the detail pane. The
+        // second click is why the filter exists: with the editor open, the
+        // overlay's name is painted there too.
+        let list_pane_right = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH;
+        click_text_where(&mut app, &ctx, "New overlay", |rect| {
+            rect.center().x < list_pane_right
+        });
+        assert_eq!(
+            app.selected_id.as_deref(),
+            Some(overlay_id.as_str()),
+            "the row did not select its overlay"
+        );
+
+        click_text_where(&mut app, &ctx, "New overlay", |rect| {
+            rect.center().x < list_pane_right
+        });
+        assert_eq!(
+            app.selected_id, None,
+            "clicking the selected row did not clear the selection"
         );
     }
 }

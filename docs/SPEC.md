@@ -223,6 +223,11 @@
   the id derived from the new name is taken, the file is stored with the first
   free postfix instead: `profile_home_2.json`, `profile_home_3.json`, and so
   on. A profile renamed to a name that resolves to its own id keeps its file.
+- The whole directory can be moved with the `PLO_CONFIG_DIR` environment
+  variable: profiles, themes, `globalconfig.json`, `rules.json` and the log all
+  follow it, and every executable honours it. An ordinary launch sets nothing;
+  it exists so a capture or test session can run against a sandbox copy
+  instead of the live settings.
 - `~/.config/.PingLatencyOverlay/globalconfig.json` holds app-wide
   preferences. It is created as `{}` and stays empty until something needs to
   be stored. Preferences live under a single `ui` object, currently

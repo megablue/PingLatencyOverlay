@@ -686,6 +686,7 @@ impl Config {
 
 const CONFIG_FILE: &str = "config.json";
 const PROFILES_DIR_NAME: &str = "profiles";
+const THEMES_DIR_NAME: &str = "themes";
 const PROFILE_PREFIX: &str = "profile_";
 const PROFILE_EXTENSION: &str = ".json";
 const GLOBAL_CONFIG_FILE: &str = "globalconfig.json";
@@ -864,18 +865,30 @@ enum ProfileImport {
 /// The on-disk configuration layout rooted at a single directory.
 ///
 /// Every path is derived from `root`, so the whole store can be pointed at a
-/// temporary directory in tests.
-struct Store {
+/// temporary directory in tests — and, through `PLO_CONFIG_DIR`, at a sandbox
+/// for a whole session. The Config window keeps one so every file it writes
+/// goes to the same root it loaded from.
+pub struct Store {
     root: PathBuf,
 }
 
 impl Store {
-    fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    fn profiles_dir(&self) -> PathBuf {
+    /// The directory every path below is derived from.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn profiles_dir(&self) -> PathBuf {
         self.root.join(PROFILES_DIR_NAME)
+    }
+
+    /// The theme directory this store reads from.
+    pub fn themes_dir(&self) -> PathBuf {
+        self.root.join(THEMES_DIR_NAME)
     }
 
     /// Only the migration source for the profiles directory; new
@@ -884,7 +897,7 @@ impl Store {
         self.root.join(CONFIG_FILE)
     }
 
-    fn global_config_path(&self) -> PathBuf {
+    pub fn global_config_path(&self) -> PathBuf {
         self.root.join(GLOBAL_CONFIG_FILE)
     }
 
@@ -951,7 +964,7 @@ impl Store {
     ///
     /// A file that cannot be read still appears in the list under a name
     /// derived from its id, so it can be selected and reported on.
-    fn list_profiles_detailed(&self) -> Vec<ProfileEntry> {
+    pub fn list_profiles_detailed(&self) -> Vec<ProfileEntry> {
         self.list_profiles()
             .into_iter()
             .map(|id| {
@@ -972,7 +985,7 @@ impl Store {
     ///
     /// This costs one file read per profile, so it belongs on a user action or on
     /// arrival at the page that shows the counts, never in a frame.
-    fn profile_overlay_counts(&self) -> HashMap<String, usize> {
+    pub fn profile_overlay_counts(&self) -> HashMap<String, usize> {
         self.list_profiles()
             .into_iter()
             .filter_map(|id| {
@@ -1042,7 +1055,7 @@ impl Store {
     }
 
     /// Read, validate and normalize one profile file.
-    fn load_profile(&self, name: &str) -> io::Result<Config> {
+    pub fn load_profile(&self, name: &str) -> io::Result<Config> {
         let path = self.profile_path(name)?;
         let raw = fs::read_to_string(&path)?;
         let mut config = parse_and_validate(&raw)
@@ -1052,7 +1065,7 @@ impl Store {
     }
 
     /// Write one profile file atomically.
-    fn save_profile(&self, name: &str, config: &Config) -> io::Result<()> {
+    pub fn save_profile(&self, name: &str, config: &Config) -> io::Result<()> {
         let json = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
         write_atomic(
             &self.profile_file_path(&canonical_profile_name(name)?),
@@ -1065,7 +1078,7 @@ impl Store {
     /// The display name is stored in the new file and does not have to be
     /// unique; only the id is, so a taken file name gets a postfix instead of
     /// an error.
-    fn create_profile(&self, display_name: &str) -> io::Result<ProfileEntry> {
+    pub fn create_profile(&self, display_name: &str) -> io::Result<ProfileEntry> {
         let base = canonical_profile_name(display_name)?;
         fs::create_dir_all(self.profiles_dir())?;
         let id = self.unique_profile_id(&base, None)?;
@@ -1084,7 +1097,7 @@ impl Store {
     ///
     /// The file is moved first so the overlays are never rewritten in place,
     /// and the new name is written afterwards because it lives in the file.
-    fn rename_profile(&self, from: &str, display_name: &str) -> io::Result<ProfileEntry> {
+    pub fn rename_profile(&self, from: &str, display_name: &str) -> io::Result<ProfileEntry> {
         let from_id = canonical_profile_name(from)?;
         let from_path = self.profile_file_path(&from_id);
         if !from_path.is_file() {
@@ -1111,7 +1124,7 @@ impl Store {
     ///
     /// The source file is only read, never moved, and the new id is postfixed
     /// when the name is taken, exactly like [`Store::create_profile`].
-    fn duplicate_profile(&self, from: &str, display_name: &str) -> io::Result<ProfileEntry> {
+    pub fn duplicate_profile(&self, from: &str, display_name: &str) -> io::Result<ProfileEntry> {
         let from_id = canonical_profile_name(from)?;
         if !self.profile_file_path(&from_id).is_file() {
             return Err(io::Error::new(
@@ -1130,7 +1143,7 @@ impl Store {
         Ok(ProfileEntry { id, name })
     }
 
-    fn delete_profile(&self, name: &str) -> io::Result<()> {
+    pub fn delete_profile(&self, name: &str) -> io::Result<()> {
         fs::remove_file(self.profile_path(name)?)
     }
 
@@ -1141,7 +1154,7 @@ impl Store {
     /// removed when the default profile is active, so a fresh install keeps
     /// `globalconfig.json` as an empty object until something is actually
     /// stored.
-    fn set_active_profile(&self, name: &str) -> io::Result<()> {
+    pub fn set_active_profile(&self, name: &str) -> io::Result<()> {
         let slug = canonical_profile_name(name)?;
         // Preserve any other keys so future global preferences are not lost.
         let mut value = self.read_global_config();
@@ -1206,7 +1219,7 @@ impl Store {
 
     /// The app-wide preferences, defaulting rather than failing when the file
     /// holds something unexpected.
-    fn read_global_prefs(&self) -> GlobalPrefs {
+    pub fn read_global_prefs(&self) -> GlobalPrefs {
         serde_json::from_value(self.read_global_config()).unwrap_or_default()
     }
 
@@ -1214,7 +1227,7 @@ impl Store {
     ///
     /// The merge is the whole point: the active profile pointer lives in the
     /// same file, so writing the preferences must not drop it.
-    fn write_global_prefs(&self, prefs: &GlobalPrefs) -> io::Result<()> {
+    pub fn write_global_prefs(&self, prefs: &GlobalPrefs) -> io::Result<()> {
         let ui = serde_json::to_value(&prefs.ui).map_err(io::Error::other)?;
         let mut value = self.read_global_config();
         let Some(object) = value.as_object_mut() else {
@@ -1229,7 +1242,7 @@ impl Store {
     }
 
     /// Path of `rules.json`.
-    fn rules_path(&self) -> PathBuf {
+    pub fn rules_path(&self) -> PathBuf {
         self.root.join(RULES_FILE)
     }
 
@@ -1240,7 +1253,7 @@ impl Store {
     /// than "empty rules pending". A file that exists but will not parse is an
     /// error, and its caller decides what to do — the tray keeps the last good
     /// rules it had and the window refuses to overwrite the file silently.
-    fn load_rules(&self) -> io::Result<AutoRules> {
+    pub fn load_rules(&self) -> io::Result<AutoRules> {
         let path = self.rules_path();
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -1261,7 +1274,7 @@ impl Store {
     ///
     /// Atomic because the tray watches this file's modification time: a
     /// half-written file would both parse as garbage and look like a change.
-    fn save_rules(&self, rules: &AutoRules) -> io::Result<()> {
+    pub fn save_rules(&self, rules: &AutoRules) -> io::Result<()> {
         let contents = serde_json::to_string_pretty(rules).map_err(io::Error::other)?;
         write_atomic(&self.rules_path(), &format!("{contents}\n"))
     }
@@ -1286,7 +1299,7 @@ impl Store {
     }
 
     /// Load the active profile, creating the profiles layout on first run.
-    fn load(&self, legacy_dir: &Path) -> ConfigLoad {
+    pub fn load(&self, legacy_dir: &Path) -> ConfigLoad {
         let mut notices = Vec::new();
 
         if !self.config_path().exists() {
@@ -1432,12 +1445,39 @@ fn store() -> Store {
     Store::new(config_dir())
 }
 
+/// Load the configuration as if the store were rooted at `root`.
+///
+/// The legacy migration is deliberately skipped: a rooted load is a sandbox
+/// (tests, capture sessions), and the user's `~/.PingLatencyOverlay` is none of
+/// its business.
+pub fn load_rooted(root: &Path) -> ConfigLoad {
+    Store::new(root.to_path_buf()).load(&root.join("missing-legacy"))
+}
+
 fn canonical_profile_name(name: &str) -> io::Result<String> {
     sanitize_profile_name(name).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
-/// `~/.config/.PingLatencyOverlay`
+/// `~/.config/.PingLatencyOverlay`, or `PLO_CONFIG_DIR` when that names one.
+///
+/// The override moves the profiles, the themes, `globalconfig.json`,
+/// `rules.json` and the log in one step, so a capture session or a portable
+/// run can work against a sandbox without touching the user's own files.
 pub fn config_dir() -> PathBuf {
+    resolve_config_dir(std::env::var_os("PLO_CONFIG_DIR").as_deref())
+}
+
+/// The decision `config_dir` makes, split out so a test can drive it without
+/// mutating the process environment.
+///
+/// `diagnostics::log_path` reads `config_dir` too, so a test that set the
+/// variable would be racing every other thread's log line.
+fn resolve_config_dir(override_value: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(value) = override_value {
+        if !value.is_empty() {
+            return PathBuf::from(value);
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
@@ -1455,7 +1495,7 @@ pub fn profiles_dir() -> PathBuf {
 /// it wants to override. `default` is the theme the app ships and repairs; the
 /// rest are the user's.
 pub fn themes_dir() -> PathBuf {
-    config_dir().join("themes")
+    store().themes_dir()
 }
 
 /// `~/.config/.PingLatencyOverlay/globalconfig.json`
@@ -1906,6 +1946,53 @@ mod tests {
 
     const VALID_CONFIG: &str =
         r#"{"overlays":[{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}]}"#;
+
+    /// `PLO_CONFIG_DIR` moves the whole configuration, and the resolver is a
+    /// function so this can be tested without mutating the process
+    /// environment `diagnostics::log_path` also reads.
+    #[test]
+    fn the_config_dir_override_applies_only_when_it_names_a_path() {
+        let fallback = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+            .join(".PingLatencyOverlay");
+        assert_eq!(resolve_config_dir(None), fallback);
+        assert_eq!(
+            resolve_config_dir(Some(std::ffi::OsStr::new(""))),
+            fallback,
+            "an empty override must not move the configuration to the current directory"
+        );
+        let sandbox = PathBuf::from(r"C:\plo-capture-sandbox");
+        assert_eq!(
+            resolve_config_dir(Some(sandbox.as_os_str())),
+            sandbox,
+            "a non-empty override has to be used as written"
+        );
+    }
+
+    /// A rooted load reads the sandbox it is handed and nothing else, which is
+    /// what lets a test or a capture session run without touching the user's
+    /// own profiles.
+    #[test]
+    fn a_rooted_load_reads_the_sandbox_it_was_given() {
+        let root = TestDir::new("load-rooted");
+        let store = store_at(root.path());
+        let config = Config {
+            overlays: vec![OverlayConfig::new()],
+            ..Config::default()
+        };
+        store
+            .save_profile("default", &config)
+            .expect("save sandbox profile");
+        store
+            .set_active_profile("default")
+            .expect("point at the sandbox profile");
+
+        let loaded = load_rooted(root.path());
+        assert_eq!(loaded.active_profile, "default");
+        assert_eq!(loaded.config.overlays.len(), 1);
+        assert_eq!(loaded.config.overlays[0].name, "New overlay");
+    }
 
     #[test]
     fn new_overlay_uses_documented_defaults() {
