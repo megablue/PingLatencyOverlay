@@ -51,9 +51,16 @@ pub mod monitors;
 // it runs against is `winwatch`.
 pub mod rules;
 
-// One snapshot of the desktop's windows, for `rules`. Win32, and deliberately
-// the only impure part: the split is what lets the matching be tested with
-// synthetic window lists.
+// The pure half of sticky mode: which window an overlay follows right now,
+// over the shapes `winwatch` reports. Pure for the same reason the matching
+// above is — the states worth testing (several windows of one process, a
+// minimized target, none at all) are ones a desktop may never produce while a
+// test runs.
+pub mod sticky;
+
+// One snapshot of the desktop's windows, for `rules` and `sticky`. Win32, and
+// deliberately the only impure part: the split is what lets the matching be
+// tested with synthetic window lists.
 pub mod winwatch;
 
 // The wire between this process and the configuration window: the pipe name,

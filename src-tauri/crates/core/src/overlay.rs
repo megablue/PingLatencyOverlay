@@ -7,14 +7,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::border::{border_frame_interval, BorderAnimator};
-use crate::config::{smooth_frame_interval, Anchor, Config, OverlayConfig, TargetConfig};
-#[cfg(windows)]
-use crate::monitors::MonitorInfo;
+use crate::config::{
+    smooth_frame_interval, Anchor, Config, DisplayMode, OverlayConfig, StickyTarget, StickyZOrder,
+    TargetConfig,
+};
+use crate::monitors::{MonitorInfo, Rect};
 use crate::probes::SampleStore;
 use crate::render::{
     cosmetic_prefill_samples, render_series_into_with_border, sample_gap_threshold, SamplePoint,
     Series,
 };
+use crate::rules::CompiledMatcher;
+use crate::sticky;
+use crate::winwatch;
 
 #[cfg(test)]
 use crate::render::cosmetic_prefill_values;
@@ -214,6 +219,8 @@ pub(crate) mod win {
         pub fn GetShellWindow() -> HWND;
         pub fn GetWindow(hwnd: HWND, ucmd: UINT) -> HWND;
         pub fn GetWindowLongPtrW(hwnd: HWND, nindex: i32) -> isize;
+        /// Sets the owner of a top-level window (or a value on it, by index).
+        pub fn SetWindowLongPtrW(hwnd: HWND, nindex: i32, value: isize) -> isize;
     }
 
     #[link(name = "gdi32")]
@@ -249,9 +256,10 @@ use win::{
     CreateCompatibleDC, CreateDIBSection, CreateWindowExW, DefWindowProcW, DeleteDC, DeleteObject,
     DestroyWindow, DispatchMessageW, GetDC, GetModuleHandleW, GetShellWindow, GetStockObject,
     GetWindow, GetWindowLongPtrW, PeekMessageW, RegisterClassW, ReleaseDC, SelectObject,
-    SetProcessDpiAwarenessContext, SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW,
-    UpdateLayeredWindow, UpdateWindow, ValidateRect, BITMAPINFO, BLENDFUNCTION, HDC, HGDIOBJ,
-    HINSTANCE, HWND, LPARAM, LRESULT, MSG, POINT, RECT, SIZE, UINT, WNDCLASSW, WPARAM,
+    SetProcessDpiAwarenessContext, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    UnregisterClassW, UpdateLayeredWindow, UpdateWindow, ValidateRect, BITMAPINFO, BLENDFUNCTION,
+    HDC, HGDIOBJ, HINSTANCE, HWND, LPARAM, LRESULT, MSG, POINT, RECT, SIZE, UINT, WNDCLASSW,
+    WPARAM,
 };
 
 #[cfg(windows)]
@@ -274,6 +282,11 @@ const HWND_TOPMOST: HWND = -1isize as HWND;
 const HWND_NOTOPMOST: HWND = -2isize as HWND;
 #[cfg(windows)]
 const GWL_EXSTYLE: i32 = -20;
+/// `GWLP_HWNDPARENT`, the index `SetWindowLongPtrW` takes to set a top-level
+/// window's owner — the relationship that puts a sticky overlay in its target's
+/// z-order band instead of above every window.
+#[cfg(windows)]
+const GWLP_HWNDPARENT: i32 = -8;
 /// `GetWindow` argument for the window directly below this one in z-order.
 #[cfg(windows)]
 const GW_HWNDNEXT: u32 = 3;
@@ -479,14 +492,15 @@ struct OverlayWindow {
     sample_generation: u64,
     size: (i32, i32),
     position: (i32, i32),
-    /// Set when the display this overlay is pinned to is not attached, so the
-    /// window is off screen but kept.
+    /// Set when the display this overlay is pinned to is not attached, or its
+    /// sticky target is closed or minimized, so the window is off screen but
+    /// kept.
     ///
     /// Kept rather than destroyed so the graph comes back at exactly the size
-    /// and position the user chose when the monitor returns. The field exists
-    /// because `ShowWindow(hwnd, SW_HIDE)` is not the only way a window ends up
-    /// invisible, and the two repaint intervals and the topmost reassert have to
-    /// all skip it rather than each guess.
+    /// and position the user chose when the display or target returns. The
+    /// field exists because `ShowWindow(hwnd, SW_HIDE)` is not the only way a
+    /// window ends up invisible, and the two repaint intervals and the z-order
+    /// reassert have to all skip it rather than each guess.
     hidden: bool,
     dirty: bool,
     last_rendered: Instant,
@@ -712,10 +726,43 @@ impl Drop for LayeredSurface {
     }
 }
 
+/// What one sticky overlay is following, and what it last saw.
+///
+/// Parallel to `windows` rather than a field on [`OverlayWindow`]: the window
+/// is destroyed and recreated — by a config edit, or by Windows itself when
+/// the window an overlay was owned by closes — while the target the user chose
+/// has to survive that. It is also the state that exists for an overlay that
+/// has no window at all, so the overlay can come back when its window does.
+#[derive(Default)]
+struct StickyFollow {
+    /// The conditions the handle was resolved with, rebuilt when the target is
+    /// edited. Empty conditions can never match, so an unconfigured target
+    /// resolves to nothing.
+    matcher: CompiledMatcher,
+    /// The target the matcher was built from, so an edit rebuilds it.
+    target: Option<StickyTarget>,
+    /// The window being followed, while it is still alive.
+    hwnd: Option<HWND>,
+    /// The target's client area in screen coordinates.
+    client: Rect,
+    /// The DPI scale of the display the target is on.
+    scale: f32,
+    /// The bounds of the display `scale` came from, so a window moving within
+    /// one display does not re-enumerate displays on every frame.
+    display: Option<Rect>,
+    /// Whether the last poll found somewhere to put the overlay.
+    placed: bool,
+    /// When the desktop was last swept for a match. A target that is not
+    /// running yet costs one sweep per second rather than one per frame.
+    scanned_at: Option<Instant>,
+}
+
 pub struct OverlayManager {
     instance: HINSTANCE,
     class_name: Vec<u16>,
     windows: HashMap<String, OverlayWindow>,
+    /// One entry per enabled sticky overlay, whether or not it has a window.
+    sticky: HashMap<String, StickyFollow>,
     last_topmost: Instant,
 }
 
@@ -740,6 +787,7 @@ impl OverlayManager {
             instance,
             class_name,
             windows: HashMap::new(),
+            sticky: HashMap::new(),
             last_topmost: Instant::now(),
         })
     }
@@ -780,33 +828,42 @@ impl OverlayManager {
         let connected = crate::monitors::enumerate();
         for overlay in config.overlays.iter().filter(|overlay| overlay.enabled) {
             let selected = selected_id == Some(overlay.id.as_str());
-            let Some(monitor) =
-                crate::monitors::resolve(overlay.monitor_device.as_deref(), &connected)
-            else {
-                // Pinned to a display that is not attached right now.
-                //
-                // The window is hidden rather than destroyed, and it is only
-                // hidden if it already exists: a monitor that is missing is not
-                // a reason to create a window nobody can see, and creating it
-                // would cost a layered surface and a DIB for the whole time the
-                // panel is unplugged.
-                //
-                // A hidden window is also excluded from the repaint intervals
-                // below and from the topmost reassert. Leaving a frozen prefill
-                // in those lists would have the renderer spin at display rate
-                // for a graph that is not on screen, and `SetWindowPos` carries
-                // `SWP_SHOWWINDOW`, so reasserting would quietly unhide it.
-                if let Some(window) = self.windows.get_mut(&overlay.id) {
-                    if !window.hidden {
-                        window.hidden = true;
-                        unsafe {
-                            ShowWindow(window.hwnd, SW_HIDE);
-                        }
+            // Where this overlay belongs, and — for a sticky overlay in its
+            // target's z-order band — what owns it. Decided before the window
+            // is touched, so an overlay with nowhere to go is hidden rather
+            // than created.
+            let (size, position, owner) = match overlay.display_mode {
+                DisplayMode::Sticky => {
+                    // `follow_sticky` runs before this on every renderer pass,
+                    // so an enabled sticky overlay has a state here.
+                    let Some(follow) = self.sticky.get(&overlay.id) else {
+                        hide(&mut self.windows, &overlay.id);
+                        continue;
+                    };
+                    if !follow.placed {
+                        // The target is closed or minimized, or the conditions
+                        // have never matched a window.
+                        hide(&mut self.windows, &overlay.id);
+                        continue;
                     }
+                    let (size, position) = layout_in_rect(overlay, follow.client, follow.scale);
+                    let owner = match overlay.sticky_z_order {
+                        StickyZOrder::FollowWindow => follow.hwnd,
+                        StickyZOrder::AboveEverything => None,
+                    };
+                    (size, position, owner)
                 }
-                continue;
+                DisplayMode::Global | DisplayMode::Wallpaper => {
+                    let Some(monitor) =
+                        crate::monitors::resolve(overlay.monitor_device.as_deref(), &connected)
+                    else {
+                        hide(&mut self.windows, &overlay.id);
+                        continue;
+                    };
+                    let (size, position) = layout_for(overlay, monitor);
+                    (size, position, None)
+                }
             };
-            let (size, position) = layout_for(overlay, monitor);
 
             // One lock for the whole overlay rather than one per target: the
             // renderer touches every target of this overlay on this frame, and a
@@ -832,8 +889,20 @@ impl OverlayManager {
                     .collect()
             };
 
+            // A window can die without this process asking: an overlay owned by
+            // its sticky target is destroyed by Windows when that target
+            // closes. Dropping the entry lets the creation path below rebuild
+            // it, owned by whatever the follow state resolves to next.
+            if self
+                .windows
+                .get(&overlay.id)
+                .is_some_and(|window| !winwatch::is_window(window.hwnd))
+            {
+                self.windows.remove(&overlay.id);
+            }
+
             if !self.windows.contains_key(&overlay.id) {
-                match self.create_window(overlay, size, position, selected) {
+                match self.create_window(overlay, size, position, selected, owner) {
                     Ok(window) => {
                         self.windows.insert(overlay.id.clone(), window);
                     }
@@ -848,11 +917,13 @@ impl OverlayManager {
                 continue;
             };
             if window.hidden {
-                // The monitor came back. Show it and force a redraw: a window
-                // that was hidden while a display change also moved it may hold
-                // a surface sized for the old one, and `changed` is computed
-                // from `size`/`position` rather than from visibility, so
-                // nothing else here would ask for a frame.
+                // Whatever took it away has come back — the pinned display, or
+                // a sticky target that was minimized or closed. Show it and
+                // force a redraw: a window that was hidden while a display
+                // change also moved it may hold a surface sized for the old
+                // one, and `changed` is computed from `size`/`position` rather
+                // than from visibility, so nothing else here would ask for a
+                // frame.
                 window.hidden = false;
                 window.dirty = true;
                 unsafe {
@@ -861,9 +932,12 @@ impl OverlayManager {
             }
             let config_changed = window.config != *overlay;
             // Captured before `window.config` is replaced below, and only when
-            // the mode actually moved: every other config edit is not a reason
-            // to touch the desktop hierarchy.
-            let wallpaper_changed = window.config.wallpaper_mode != overlay.wallpaper_mode;
+            // the placement actually moved: every other config edit is not a
+            // reason to touch the desktop hierarchy.
+            let placement_changed = window.config.display_mode != overlay.display_mode
+                || (overlay.display_mode == DisplayMode::Sticky
+                    && (window.config.sticky_z_order != overlay.sticky_z_order
+                        || window.config.sticky_target != overlay.sticky_target));
             let border_selection_changed = window.border_selected != selected;
             window.border_selected = selected;
             // A target added, removed, disabled or reordered changes what the
@@ -938,33 +1012,12 @@ impl OverlayManager {
             let moved = window.size != size || window.position != position;
             window.size = size;
             window.position = position;
-            if wallpaper_changed {
-                if overlay.wallpaper_mode {
-                    // Leaving the topmost band makes the window a neighbour of
-                    // the desktop instead of a layer over everything;
-                    // `park_above_desktop` then puts it directly above the
-                    // shell's desktop window, where the once-a-second check
-                    // keeps it.
-                    unsafe {
-                        SetWindowPos(
-                            window.hwnd,
-                            HWND_NOTOPMOST,
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-                        );
-                    }
-                    let _ = park_above_desktop(window);
-                } else {
-                    reassert_topmost(window.hwnd);
-                }
-            } else if moved && window.config.wallpaper_mode {
+            if placement_changed || (moved && window.config.display_mode == DisplayMode::Wallpaper)
+            {
                 // A parked window keeps its screen coordinates, so a moved or
-                // resized overlay is only re-checked here; the paint below then
-                // uses the same rect.
-                let _ = park_above_desktop(window);
+                // resized wallpaper overlay is re-checked here; the paint below
+                // then uses the same rect.
+                apply_placement(window, overlay, owner);
             }
             let now = Instant::now();
             let border_was_active = window.border.needs_animation();
@@ -1007,19 +1060,136 @@ impl OverlayManager {
                 if window.hidden {
                     continue;
                 }
-                if window.config.wallpaper_mode {
-                    // The desktop's own windows come and go — Explorer
-                    // restarts, wallpaper changes, Show Desktop — so the
-                    // placement is re-checked on the same clock the topmost
-                    // reassert uses. It is a check rather than a placement:
-                    // re-ordering every second would be a flicker.
-                    let _ = park_above_desktop(window);
-                } else {
-                    reassert_topmost(window.hwnd);
+                match (window.config.display_mode, window.config.sticky_z_order) {
+                    (DisplayMode::Wallpaper, _) => {
+                        // The desktop's own windows come and go — Explorer
+                        // restarts, wallpaper changes, Show Desktop — so the
+                        // placement is re-checked on the same clock the topmost
+                        // reassert uses. It is a check rather than a placement:
+                        // re-ordering every second would be a flicker.
+                        let _ = park_above_desktop(window);
+                    }
+                    (DisplayMode::Sticky, StickyZOrder::FollowWindow) => {
+                        // Windows keeps an owned window in its owner's band;
+                        // there is nothing to reassert, and reasserting topmost
+                        // would undo the ownership.
+                    }
+                    _ => reassert_topmost(window.hwnd),
                 }
             }
             self.last_topmost = Instant::now();
         }
+    }
+
+    /// Poll every sticky overlay's target, and report whether anything moved.
+    ///
+    /// Called on the renderer's fast wake-up (~16 ms, the same clock the
+    /// message pump uses) *before* the repaint decision, so following a dragged
+    /// window is smooth without a `SetWinEventHook` or a second thread. Kept
+    /// apart from `apply` because `apply` is the expensive pass — a sample
+    /// lock, a full config compare, a possible render — while this is a handful
+    /// of window-manager reads. The return value is what tells the caller to
+    /// bring its next layout pass forward; no overlay window is touched here.
+    pub fn follow_sticky(&mut self, config: &Config) -> bool {
+        self.sticky.retain(|id, _| {
+            config.overlays.iter().any(|overlay| {
+                overlay.enabled && overlay.id == *id && overlay.display_mode == DisplayMode::Sticky
+            })
+        });
+        let mut changed = false;
+        for overlay in config
+            .overlays
+            .iter()
+            .filter(|overlay| overlay.enabled && overlay.display_mode == DisplayMode::Sticky)
+        {
+            let follow = self.sticky.entry(overlay.id.clone()).or_default();
+            if follow.target != overlay.sticky_target {
+                // The conditions are a target's identity, so an edit is a new
+                // target rather than a tweak to the old one: two Chrome windows
+                // are told apart by the title box, and keeping the handle a
+                // title edit was meant to stop following would be wrong.
+                follow.matcher = overlay
+                    .sticky_target
+                    .as_ref()
+                    .map(|target| CompiledMatcher::compile(&target.when))
+                    .unwrap_or_default();
+                follow.target = overlay.sticky_target.clone();
+                follow.hwnd = None;
+                follow.placed = false;
+                changed = true;
+            }
+            if follow.hwnd.is_some_and(|hwnd| !winwatch::is_window(hwnd)) {
+                // The target closed. Windows also destroys an owned overlay
+                // with it, which `apply` repairs; this is only the follow state
+                // letting go.
+                follow.hwnd = None;
+                follow.placed = false;
+                changed = true;
+            }
+            if let Some(hwnd) = follow.hwnd {
+                // A minimized target has no client area on screen, and one an
+                // app hid — Steam closing to the tray does this — has none
+                // either. The overlay hides rather than following a window
+                // nobody can see, and this is re-read on every wake-up so it
+                // comes back the moment the window does.
+                let placed = !winwatch::is_iconic(hwnd) && winwatch::is_visible(hwnd);
+                if placed {
+                    match winwatch::client_rect(hwnd) {
+                        Some(client) => {
+                            if client != follow.client {
+                                follow.client = client;
+                                changed = true;
+                            }
+                            // The scale follows the display the target is on,
+                            // and the bounds are cached so a window that is only
+                            // moving does not re-enumerate displays every
+                            // frame.
+                            let crossed = !follow
+                                .display
+                                .is_some_and(|bounds| contains(bounds, centre(client)));
+                            if crossed {
+                                let (scale, bounds) = scale_for_rect(client);
+                                if follow.scale != scale || follow.display != bounds {
+                                    follow.scale = scale;
+                                    follow.display = bounds;
+                                    changed = true;
+                                }
+                            }
+                        }
+                        None => {
+                            // The client area went unreadable, which is a window
+                            // on its way out. The sweep below finds whatever
+                            // replaced it.
+                            follow.hwnd = None;
+                            follow.placed = false;
+                            changed = true;
+                        }
+                    }
+                }
+                if follow.placed != placed {
+                    follow.placed = placed;
+                    changed = true;
+                }
+            } else if follow
+                .scanned_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+            {
+                // At most one sweep a second: a target that is not running yet
+                // costs a desktop enumeration per second, not one per frame.
+                follow.scanned_at = Some(Instant::now());
+                let shapes = winwatch::shapes();
+                if let Some(shape) = sticky::resolve(&shapes, &follow.matcher) {
+                    let (scale, bounds) = scale_for_rect(shape.client);
+                    follow.hwnd = Some(shape.hwnd);
+                    follow.client = shape.client;
+                    follow.scale = scale;
+                    follow.display = bounds;
+                    follow.placed = true;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// How fast the renderer must redraw for the startup prefill.
@@ -1055,13 +1225,15 @@ impl OverlayManager {
         size: (i32, i32),
         position: (i32, i32),
         selected: bool,
+        owner: Option<HWND>,
     ) -> Result<OverlayWindow, Box<dyn Error + Send + Sync>> {
         let title = wide(&format!("PingLatencyOverlay::{}", config.id))?;
-        // Wallpaper mode drops the topmost style at creation: the window is
-        // about to become a child of the desktop, and it is the parent's
-        // ordering that decides where a child sits.
+        // Wallpaper mode drops the topmost style at creation: it is about to be
+        // parked above the desktop rather than layered over everything. A
+        // sticky overlay owned by its target drops it too: the owner's band
+        // decides where it sits.
         let mut ex_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-        if !config.wallpaper_mode {
+        if config.display_mode != DisplayMode::Wallpaper && owner.is_none() {
             ex_style |= WS_EX_TOPMOST;
         }
         let hwnd = unsafe {
@@ -1124,19 +1296,37 @@ impl OverlayManager {
         // build it on its next pass, so the window would show one empty frame.
         window.sync_series(&config.targets);
         window.rebuild_history();
-        // Wallpaper mode parks the window directly above the shell's desktop
+        // A wallpaper-mode window is parked directly above the shell's desktop
         // window; there is no host to look for before the first paint, because
         // the window stays an ordinary top-level popup that the once-a-second
-        // check moves as soon as the shell is there.
+        // check moves as soon as the shell is there. A sticky window in its
+        // target's band is owned before it is shown instead.
         //
         // Give the layered window its first surface before making it visible.
         // Otherwise Windows can briefly retain the class background (white)
         // behind a fully transparent first frame.
         Self::render_window(&mut window, false);
 
-        let parked = config.wallpaper_mode && park_above_desktop(&window);
-        if !parked && !config.wallpaper_mode {
-            unsafe {
+        match owner {
+            Some(owner) => unsafe {
+                // Owned rather than topmost: the overlay shares the target's
+                // z-order band, so switching to another app takes it off the
+                // screen with the window it belongs to.
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner as isize);
+                SetWindowPos(
+                    hwnd,
+                    owner,
+                    position.0,
+                    position.1,
+                    size.0,
+                    size.1,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            },
+            None if config.display_mode == DisplayMode::Wallpaper => {
+                let _ = park_above_desktop(&window);
+            }
+            None => unsafe {
                 SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
@@ -1146,7 +1336,7 @@ impl OverlayManager {
                     size.1,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
-            }
+            },
         }
         unsafe {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -1417,6 +1607,119 @@ fn reassert_topmost(hwnd: HWND) {
     }
 }
 
+/// Hide an overlay's window because there is nowhere to put it.
+///
+/// The two causes — a pinned display that is not attached, and a sticky target
+/// that is closed or minimized — behave the same: the window is hidden rather
+/// than destroyed, so the graph comes back at exactly the size and position the
+/// user chose, and it is only hidden if it already exists, because a missing
+/// target is not a reason to create a window nobody can see.
+///
+/// A hidden window is also excluded from the repaint intervals and from the
+/// z-order reassert, for the same reason [`OverlayWindow::hidden`] exists:
+/// leaving a frozen prefill in those lists would have the renderer spin at
+/// display rate for a graph that is not on screen, and `SetWindowPos` carries
+/// `SWP_SHOWWINDOW`, so reasserting would quietly unhide it.
+#[cfg(windows)]
+fn hide(windows: &mut HashMap<String, OverlayWindow>, id: &str) {
+    if let Some(window) = windows.get_mut(id) {
+        if !window.hidden {
+            window.hidden = true;
+            unsafe {
+                ShowWindow(window.hwnd, SW_HIDE);
+            }
+        }
+    }
+}
+
+/// Put a window where its display mode and z-order choice say it belongs.
+///
+/// Called only when that decision changed, so the Win32 calls here are not a
+/// per-frame cost. The wallpaper arm is checked rather than unconditional — see
+/// [`park_above_desktop`] — and ownership is idempotent but still only
+/// re-applied when the mode, the choice or the target moved.
+#[cfg(windows)]
+fn apply_placement(window: &OverlayWindow, overlay: &OverlayConfig, owner: Option<HWND>) {
+    match (overlay.display_mode, overlay.sticky_z_order, owner) {
+        (DisplayMode::Wallpaper, _, _) => {
+            unsafe {
+                SetWindowPos(
+                    window.hwnd,
+                    HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                );
+            }
+            let _ = park_above_desktop(window);
+        }
+        (DisplayMode::Sticky, StickyZOrder::FollowWindow, Some(owner)) => unsafe {
+            // Out of the topmost band first: a topmost window stays over
+            // everything however it is owned, so the style has to go before the
+            // band can take it.
+            SetWindowPos(
+                window.hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+            );
+            SetWindowLongPtrW(window.hwnd, GWLP_HWNDPARENT, owner as isize);
+            // Directly above the window it follows, in that window's band.
+            SetWindowPos(
+                window.hwnd,
+                owner,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+            );
+        },
+        _ => unsafe {
+            // Every other combination floats: clear any ownership a previous
+            // target left behind, then take the topmost band again.
+            SetWindowLongPtrW(window.hwnd, GWLP_HWNDPARENT, 0);
+            reassert_topmost(window.hwnd);
+        },
+    }
+}
+
+/// The centre of a rectangle, which is the point a display is picked by.
+fn centre(rect: Rect) -> (i32, i32) {
+    (rect.left + rect.width() / 2, rect.top + rect.height() / 2)
+}
+
+/// Whether a point is inside a rectangle. Half-open, so a point on the far
+/// edge belongs to the next display rather than to two.
+fn contains(rect: Rect, point: (i32, i32)) -> bool {
+    point.0 >= rect.left && point.0 < rect.right && point.1 >= rect.top && point.1 < rect.bottom
+}
+
+/// The DPI scale of the display a rectangle's centre sits on, and that
+/// display's bounds.
+///
+/// Read from the display rather than from the system, because a sticky target
+/// dragged between a 100% and a 150% panel must resize the graph as it crosses;
+/// `GetDpiForSystem` answers for the primary whatever the caller does. Falls
+/// back to the first display when the point is in the gap between two monitors.
+fn scale_for_rect(rect: Rect) -> (f32, Option<Rect>) {
+    let monitors = crate::monitors::enumerate();
+    let point = centre(rect);
+    let monitor = monitors
+        .iter()
+        .find(|monitor| contains(monitor.bounds, point))
+        .or_else(|| monitors.first());
+    match monitor {
+        Some(monitor) => (monitor.scale(), Some(monitor.bounds)),
+        None => (1.0, None),
+    }
+}
+
 #[cfg(windows)]
 fn position_for_anchor(
     anchor: Anchor,
@@ -1463,7 +1766,18 @@ fn position_for_anchor(
 /// unreachable monitor never reaches here.
 #[cfg(windows)]
 fn layout_for(config: &OverlayConfig, monitor: &MonitorInfo) -> ((i32, i32), (i32, i32)) {
-    let dpi_scale = monitor.scale();
+    layout_in_rect(config, monitor.work, monitor.scale())
+}
+
+/// Size and place an overlay inside one rectangle on one display.
+///
+/// The rectangle is a pinned display's work area for Global and Wallpaper
+/// modes, and a target window's client area for Sticky mode — which is what
+/// makes "stick to the window as if it were the screen" literal: every anchor
+/// and margin applies inside it, and the scale comes from the display the
+/// rectangle is actually on.
+#[cfg(windows)]
+fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, i32), (i32, i32)) {
     let long_logical =
         (config.window_seconds.max(1) as f64 * config.scale.max(1) as f64).clamp(1.0, 8192.0);
     let short_logical = (config.graph_height_px.max(10) as f64).clamp(1.0, 8192.0);
@@ -1485,10 +1799,10 @@ fn layout_for(config: &OverlayConfig, monitor: &MonitorInfo) -> ((i32, i32), (i3
     // carrying it around: the overlay maths has always spoken `RECT` and
     // `position_for_anchor` is left exactly as it was.
     let work = RECT {
-        left: monitor.work.left,
-        top: monitor.work.top,
-        right: monitor.work.right,
-        bottom: monitor.work.bottom,
+        left: work.left,
+        top: work.top,
+        right: work.right,
+        bottom: work.bottom,
     };
     let width = size.0 as i64;
     let height = size.1 as i64;

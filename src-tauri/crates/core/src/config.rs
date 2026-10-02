@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::rules::AutoRules;
+use crate::rules::{AutoRules, Condition};
 
 /// Minimum graph time window, in seconds. Mirrors the spec.
 pub const MIN_WINDOW_SECONDS: u32 = 30;
@@ -186,17 +186,78 @@ pub struct OverlayConfig {
     /// screen to say why.
     #[serde(default)]
     pub monitor_device: Option<String>,
-    /// Whether the overlay sits on the desktop instead of always on top.
+    /// Which of the three placements this overlay uses.
     ///
-    /// On means above the wallpaper and below the desktop icons, covered by
-    /// normal windows and the taskbar: the window embeds into the desktop's own
-    /// hierarchy, which is also what keeps it visible when the desktop is
-    /// shown. Off is the original always-on-top overlay.
-    ///
-    /// Off by default, which `#[serde(default)]` is what carries: every profile
-    /// written before this field existed keeps today's behaviour.
+    /// One enum rather than a flag per strategy: Global, Sticky and Wallpaper
+    /// are alternatives for the same window, and two booleans could say
+    /// "wallpaper and sticky", which means nothing.
     #[serde(default)]
-    pub wallpaper_mode: bool,
+    pub display_mode: DisplayMode,
+    /// The window a Sticky Mode overlay follows.
+    ///
+    /// `None`, or a matcher with nothing usable in it, hides the overlay until
+    /// a target is configured — a sticky overlay without a window has no
+    /// position, and the editor says so where the user can see it.
+    #[serde(default)]
+    pub sticky_target: Option<StickyTarget>,
+    /// How a Sticky Mode overlay orders itself against other windows.
+    ///
+    /// Only Sticky reads it: Global and Wallpaper are always on top of
+    /// everything but the desktop, and a choice they cannot honour would be a
+    /// setting that looks inert.
+    #[serde(default)]
+    pub sticky_z_order: StickyZOrder,
+    /// Legacy `wallpaperMode` boolean, folded into `display_mode` by
+    /// `normalize`.
+    ///
+    /// A field rather than a serde rename on the enum, because the old key
+    /// held a boolean and the new one names a mode: mapping `true` to
+    /// `Wallpaper` at load time is the only translation, and
+    /// `skip_serializing` stops the old key reappearing in files a new build
+    /// writes.
+    #[serde(rename = "wallpaperMode", default, skip_serializing)]
+    legacy_wallpaper_mode: Option<bool>,
+}
+
+/// How an overlay decides where it lives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisplayMode {
+    /// Anchored inside a display's work area, chosen in the monitor picker.
+    #[default]
+    Global,
+    /// Placed inside the client area of a matched window, and moved with it.
+    Sticky,
+    /// Parked directly above the shell's desktop window: above the wallpaper
+    /// and below the desktop icons, covered by ordinary windows.
+    Wallpaper,
+}
+
+/// The window a Sticky Mode overlay follows.
+///
+/// The conditions are the auto-switch rules' own [`Condition`] type, so
+/// "matches" cannot come to mean two things in one app, and the editor's
+/// three boxes are exactly the process, title and class parts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickyTarget {
+    /// Every condition must match the same window. Blank values are dropped in
+    /// `normalize`, so a half-typed box cannot match everything.
+    #[serde(default)]
+    pub when: Vec<Condition>,
+}
+
+/// Where a Sticky Mode overlay sits in the z-order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StickyZOrder {
+    /// Above every other window, like the other display modes.
+    #[default]
+    AboveEverything,
+    /// In the followed window's z-order band: the overlay is owned by the
+    /// target, so switching to another app takes it off the screen with the
+    /// window it belongs to.
+    FollowWindow,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -421,7 +482,10 @@ impl OverlayConfig {
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
             monitor_device: None,
-            wallpaper_mode: false,
+            display_mode: DisplayMode::Global,
+            sticky_target: None,
+            sticky_z_order: StickyZOrder::AboveEverything,
+            legacy_wallpaper_mode: None,
         }
     }
 
@@ -680,6 +744,22 @@ impl Config {
                 .take()
                 .map(|device| device.trim().to_string())
                 .filter(|device| !device.is_empty());
+            // A file from before Display Mode says `"wallpaperMode": true`, and
+            // the legacy key is folded in only while the mode is still the
+            // default: a file that names a mode explicitly has already said
+            // what it wants, and a stale key must not override it.
+            if o.legacy_wallpaper_mode.take() == Some(true) && o.display_mode == DisplayMode::Global
+            {
+                o.display_mode = DisplayMode::Wallpaper;
+            }
+            // A half-typed condition must not match every window. The editor
+            // drops emptied boxes as they are cleared, and this is the same
+            // statement for a file that was hand-edited.
+            if let Some(target) = &mut o.sticky_target {
+                target
+                    .when
+                    .retain(|condition| !condition.value.trim().is_empty());
+            }
         }
     }
 }
@@ -1909,6 +1989,7 @@ fn directory_contains_only_config(directory: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::{Condition, MatchMode, Part};
 
     struct TestDir(PathBuf);
 
@@ -2295,41 +2376,136 @@ mod tests {
         assert_eq!(OverlayConfig::new().monitor_device, None);
     }
 
-    /// Wallpaper mode is off unless it is asked for, and it survives a save.
+    /// Display Mode says where an overlay is placed, and only one way at a time.
     ///
-    /// Both halves matter: a profile written before the field existed must keep
-    /// the always-on-top behaviour, and a profile that turned it on must come
-    /// back on after a restart.
+    /// It used to be a wallpaper boolean; an enum makes "wallpaper and sticky"
+    /// unrepresentable rather than a combination someone has to remember to
+    /// refuse.
     #[test]
-    fn wallpaper_mode_defaults_off_and_round_trips() {
-        let mut config = OverlayConfig::new();
-        assert!(
-            !config.wallpaper_mode,
-            "an overlay must stay on top unless wallpaper mode is asked for"
-        );
+    fn display_mode_defaults_to_global_and_round_trips() {
+        assert_eq!(OverlayConfig::new().display_mode, DisplayMode::Global);
 
-        config.wallpaper_mode = true;
-        let json = serde_json::to_string(&config).expect("serialize");
-        assert!(
-            json.contains("\"wallpaperMode\":true"),
-            "the field did not reach the file: {json}"
-        );
-        let parsed: OverlayConfig = serde_json::from_str(&json).expect("deserialize");
-        assert!(parsed.wallpaper_mode);
+        for (mode, json_name) in [
+            (DisplayMode::Global, "\"displayMode\":\"global\""),
+            (DisplayMode::Sticky, "\"displayMode\":\"sticky\""),
+            (DisplayMode::Wallpaper, "\"displayMode\":\"wallpaper\""),
+        ] {
+            let mut config = OverlayConfig::new();
+            config.display_mode = mode;
+            let json = serde_json::to_string(&config).expect("serialize");
+            assert!(
+                json.contains(json_name),
+                "the mode did not reach the file: {json}"
+            );
+            let parsed: OverlayConfig = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed.display_mode, mode, "the mode did not survive a save");
+        }
 
-        // The pre-field case: the same file with the key removed has to load
-        // with today's behaviour rather than failing on a missing member.
-        let without = json
-            .replace("\"wallpaperMode\":true,", "")
-            .replace(",\"wallpaperMode\":true", "")
-            .replace("\"wallpaperMode\":true", "");
-        assert!(!without.contains("wallpaperMode"));
+        // A profile written before the field existed must load on top of
+        // everything, not fail on a missing member.
+        let json = serde_json::to_string(&OverlayConfig::new()).expect("serialize");
+        let without = json.replace("\"displayMode\":\"global\",", "");
         let parsed: OverlayConfig =
             serde_json::from_str(&without).expect("a profile without the field");
-        assert!(
-            !parsed.wallpaper_mode,
-            "a profile written before wallpaper mode existed must stay on top"
+        assert_eq!(parsed.display_mode, DisplayMode::Global);
+    }
+
+    /// The old `wallpaperMode` key still means what it meant, and the new key
+    /// wins when both are present.
+    ///
+    /// The translation is one-way: the legacy field is skipped when writing, so
+    /// a save cannot produce a file that says both things.
+    #[test]
+    fn a_legacy_wallpaper_key_still_turns_wallpaper_mode_on() {
+        let legacy = |wallpaper: bool| {
+            let mut value = serde_json::to_value(OverlayConfig::new()).expect("serialize");
+            value["wallpaperMode"] = serde_json::json!(wallpaper);
+            serde_json::from_value::<OverlayConfig>(value).expect("the legacy key")
+        };
+
+        let mut on = Config {
+            overlays: vec![legacy(true)],
+            ..Config::default()
+        };
+        on.normalize();
+        assert_eq!(
+            on.overlays[0].display_mode,
+            DisplayMode::Wallpaper,
+            "wallpaperMode:true must still mean wallpaper"
         );
+
+        let mut off = Config {
+            overlays: vec![legacy(false)],
+            ..Config::default()
+        };
+        off.normalize();
+        assert_eq!(off.overlays[0].display_mode, DisplayMode::Global);
+
+        // An explicit mode is not overridden by the stale key.
+        let mut value = serde_json::to_value(OverlayConfig::new()).expect("serialize");
+        value["displayMode"] = serde_json::json!("sticky");
+        value["wallpaperMode"] = serde_json::json!(true);
+        let mut explicit = Config {
+            overlays: vec![serde_json::from_value(value).expect("both keys")],
+            ..Config::default()
+        };
+        explicit.normalize();
+        assert_eq!(explicit.overlays[0].display_mode, DisplayMode::Sticky);
+
+        // And a save never writes the legacy key back.
+        let mut mode = OverlayConfig::new();
+        mode.display_mode = DisplayMode::Wallpaper;
+        let json = serde_json::to_string(&mode).expect("serialize");
+        assert!(
+            !json.contains("wallpaperMode"),
+            "the legacy key leaked into a save: {json}"
+        );
+    }
+
+    /// A sticky target survives a save, and a blank box does not become a
+    /// condition that matches everything.
+    #[test]
+    fn sticky_targets_round_trip_and_drop_blank_boxes() {
+        let condition = |part, matcher, value: &str| Condition {
+            part,
+            matcher,
+            value: value.to_string(),
+        };
+        let mut config = Config {
+            overlays: vec![OverlayConfig {
+                display_mode: DisplayMode::Sticky,
+                sticky_target: Some(StickyTarget {
+                    when: vec![
+                        condition(Part::ProcessName, MatchMode::Exact, "chrome.exe"),
+                        condition(Part::Title, MatchMode::Contains, "   "),
+                        condition(Part::ClassName, MatchMode::Exact, "Chrome_WidgetWin_1"),
+                    ],
+                }),
+                ..OverlayConfig::new()
+            }],
+            ..Config::default()
+        };
+
+        config.normalize();
+        let target = config.overlays[0]
+            .sticky_target
+            .as_ref()
+            .expect("a target survived normalization");
+        assert_eq!(
+            target.when.len(),
+            2,
+            "a blank value became a condition that matches everything"
+        );
+        assert_eq!(target.when[0].part, Part::ProcessName);
+        assert_eq!(target.when[1].part, Part::ClassName);
+
+        let json = serde_json::to_string(&config.overlays[0]).expect("serialize");
+        assert!(
+            json.contains("\"stickyTarget\""),
+            "the target did not reach the file: {json}"
+        );
+        let parsed: OverlayConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.sticky_target, config.overlays[0].sticky_target);
     }
 
     #[test]

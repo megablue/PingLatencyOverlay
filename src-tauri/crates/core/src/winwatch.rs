@@ -21,7 +21,8 @@
 mod win32 {
     use std::collections::HashMap;
 
-    use crate::overlay::win::{BOOL, DWORD, HANDLE, HWND, LPARAM};
+    use crate::monitors::Rect;
+    use crate::overlay::win::{BOOL, DWORD, HANDLE, HWND, LPARAM, POINT, RECT};
     use crate::rules::{Snapshot, WindowInfo};
 
     /// `WS_EX_TOOLWINDOW`, the style that marks a window as a helper rather
@@ -37,6 +38,10 @@ mod win32 {
     const MAX_CLASS_NAME: usize = 256;
     /// The value `CreateToolhelp32Snapshot` returns on failure.
     const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+    /// `DWMWA_CLOAKED`, which reports a window its own app has hidden — the
+    /// ghost windows UWP apps keep around, which would otherwise match a rule
+    /// by process or class while being invisible to the user.
+    const DWMWA_CLOAKED: DWORD = 14;
 
     /// `PROCESSENTRY32W`, laid out field by field rather than named like the
     /// header: only the offsets matter, and the SDK's spelling would need a
@@ -72,12 +77,26 @@ mod win32 {
     unsafe extern "system" {
         fn EnumWindows(enumerator: WndEnumProc, data: LPARAM) -> BOOL;
         fn IsWindowVisible(hwnd: HWND) -> BOOL;
+        fn IsIconic(hwnd: HWND) -> BOOL;
         fn GetWindowLongW(hwnd: HWND, index: i32) -> i32;
         fn GetWindowTextLengthW(hwnd: HWND) -> i32;
         fn GetWindowTextW(hwnd: HWND, text: *mut u16, max_count: i32) -> i32;
         fn GetClassNameW(hwnd: HWND, class: *mut u16, max_count: i32) -> i32;
         fn GetWindowThreadProcessId(hwnd: HWND, process_id: *mut DWORD) -> DWORD;
         fn GetForegroundWindow() -> HWND;
+        fn IsWindow(hwnd: HWND) -> BOOL;
+        fn GetClientRect(hwnd: HWND, rect: *mut RECT) -> BOOL;
+        fn ClientToScreen(hwnd: HWND, point: *mut POINT) -> BOOL;
+    }
+
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: HWND,
+            attribute: DWORD,
+            data: *mut core::ffi::c_void,
+            size: DWORD,
+        ) -> i32;
     }
 
     #[link(name = "kernel32")]
@@ -163,12 +182,166 @@ mod win32 {
         })
     }
 
-    unsafe extern "system" fn collect_window(hwnd: HWND, data: LPARAM) -> BOOL {
-        let collect = &mut *(data as *mut Collect);
+    /// The visibility and style gate every enumeration shares.
+    ///
+    /// One function rather than the same tests in two callbacks: a window that
+    /// `snapshot()` reports and `shapes()` does not (or the other way round)
+    /// would be a rule that matches while sticky mode cannot follow it.
+    unsafe fn candidate(hwnd: HWND) -> bool {
         if IsWindowVisible(hwnd) == 0 {
-            return 1;
+            return false;
         }
         if GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW != 0 {
+            return false;
+        }
+        !is_cloaked(hwnd)
+    }
+
+    /// Whether the app has cloaked the window — the ghosts UWP apps keep.
+    unsafe fn is_cloaked(hwnd: HWND) -> bool {
+        let mut cloaked: DWORD = 0;
+        let result = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut DWORD as *mut core::ffi::c_void,
+            std::mem::size_of::<DWORD>() as DWORD,
+        );
+        result == 0 && cloaked != 0
+    }
+
+    /// A window for sticky mode: what a matcher reads, and where it is.
+    #[derive(Clone, Debug)]
+    pub struct WindowShape {
+        /// The window itself, for following and for owning.
+        pub hwnd: HWND,
+        /// What a sticky target matches against.
+        pub window: WindowInfo,
+        /// The client area in screen coordinates — the rectangle sticky mode
+        /// treats as the screen.
+        pub client: Rect,
+        /// A minimized window has no usable client rectangle, so it is left
+        /// out of a resolution.
+        pub iconic: bool,
+        /// Whether this was the focused window when the sweep ran, so a target
+        /// with several windows picks the one the user is looking at.
+        pub focused: bool,
+    }
+
+    /// The client area in screen coordinates, or `None` while it cannot be
+    /// read.
+    unsafe fn read_client_rect(hwnd: HWND) -> Option<Rect> {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+        let mut origin = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        if ClientToScreen(hwnd, &mut origin) == 0 {
+            return None;
+        }
+        Some(Rect {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + (rect.right - rect.left),
+            bottom: origin.y + (rect.bottom - rect.top),
+        })
+    }
+
+    /// Whether the handle still names a window.
+    ///
+    /// A sticky overlay can lose its window without anything in this process
+    /// asking: owning the target means Windows destroys it when the target
+    /// closes, and a dead handle is what this answers.
+    ///
+    /// `pub(crate)` because the handle type is a raw pointer: the functions are
+    /// for the overlay manager, which already lives in that world, not for a
+    /// caller outside the crate to hand arbitrary pointers to.
+    pub(crate) fn is_window(hwnd: HWND) -> bool {
+        unsafe { IsWindow(hwnd) != 0 }
+    }
+
+    /// Whether the window is minimized.
+    ///
+    /// A minimized window has no client area on screen, so a sticky overlay
+    /// hides rather than following its window somewhere off screen.
+    pub(crate) fn is_iconic(hwnd: HWND) -> bool {
+        unsafe { IsIconic(hwnd) != 0 }
+    }
+
+    /// Whether Windows considers the window visible.
+    ///
+    /// An app that closes to the tray — Steam is the one that made this
+    /// necessary — *hides* its window rather than destroying or minimizing it,
+    /// so a sticky overlay must treat "hidden" the same way it treats
+    /// "minimized": hide until the window is shown again.
+    pub(crate) fn is_visible(hwnd: HWND) -> bool {
+        unsafe { IsWindowVisible(hwnd) != 0 }
+    }
+
+    /// The client area in screen coordinates, or `None` while it cannot be
+    /// read.
+    pub(crate) fn client_rect(hwnd: HWND) -> Option<Rect> {
+        unsafe { read_client_rect(hwnd) }
+    }
+
+    /// What the shape sweep collects: the process map and the foreground
+    /// window, so each shape can say whether it was the focused one.
+    struct Shapes {
+        shapes: Vec<WindowShape>,
+        processes: HashMap<DWORD, String>,
+        foreground: HWND,
+    }
+
+    unsafe extern "system" fn collect_shape(hwnd: HWND, data: LPARAM) -> BOOL {
+        let collect = &mut *(data as *mut Shapes);
+        if !candidate(hwnd) {
+            return 1;
+        }
+        let Some(info) = describe(hwnd, &collect.processes) else {
+            return 1;
+        };
+        let Some(client) = read_client_rect(hwnd) else {
+            return 1;
+        };
+        collect.shapes.push(WindowShape {
+            hwnd,
+            window: info,
+            client,
+            iconic: IsIconic(hwnd) != 0,
+            focused: hwnd == collect.foreground,
+        });
+        1 // Keep enumerating.
+    }
+
+    /// Every visible top-level window with its client area, topmost first.
+    ///
+    /// The same candidates `snapshot()` reports and the same ordering
+    /// `EnumWindows` gives, which is z-order from the top, so "the first match"
+    /// is the one a user can actually see over the others.
+    pub fn shapes() -> Vec<WindowShape> {
+        let processes = unsafe { process_names() };
+        let foreground = unsafe { GetForegroundWindow() };
+        let mut collect = Shapes {
+            shapes: Vec::new(),
+            processes,
+            foreground,
+        };
+        unsafe {
+            EnumWindows(Some(collect_shape), &mut collect as *mut Shapes as LPARAM);
+        }
+        collect.shapes
+    }
+
+    unsafe extern "system" fn collect_window(hwnd: HWND, data: LPARAM) -> BOOL {
+        let collect = &mut *(data as *mut Collect);
+        if !candidate(hwnd) {
             return 1;
         }
         if let Some(info) = describe(hwnd, &collect.processes) {
@@ -210,10 +383,52 @@ mod win32 {
 }
 
 #[cfg(windows)]
-pub use win32::snapshot;
+pub(crate) use win32::{client_rect, is_iconic, is_visible, is_window};
+#[cfg(windows)]
+pub use win32::{shapes, snapshot, WindowShape};
 
 /// On a platform without these windows there are none to report.
 #[cfg(not(windows))]
 pub fn snapshot() -> crate::rules::Snapshot {
     crate::rules::Snapshot::default()
+}
+
+/// On a platform without these windows there is nothing to follow.
+#[cfg(not(windows))]
+pub fn shapes() -> Vec<WindowShape> {
+    Vec::new()
+}
+
+/// There are no handles away from Windows; these exist so the renderer's
+/// resolver still compiles.
+#[cfg(not(windows))]
+pub(crate) fn is_window(_hwnd: isize) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_iconic(_hwnd: isize) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_visible(_hwnd: isize) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub(crate) fn client_rect(_hwnd: isize) -> Option<crate::monitors::Rect> {
+    None
+}
+
+/// On a platform without these windows there is nothing to follow; the type
+/// exists so the resolver still compiles.
+#[cfg(not(windows))]
+#[derive(Clone, Debug)]
+pub struct WindowShape {
+    pub hwnd: isize,
+    pub window: crate::rules::WindowInfo,
+    pub client: crate::monitors::Rect,
+    pub iconic: bool,
+    pub focused: bool,
 }

@@ -198,8 +198,27 @@ fn compile_rule(rule: &Rule) -> CompiledRule {
     } else if rule.when.is_empty() {
         error = Some("the rule has no conditions".to_string());
     }
+    let (checks, check_error) = compile_checks(&rule.when);
+    let error = error.or(check_error);
+    CompiledRule {
+        name: rule.name.clone(),
+        profile: rule.profile.clone(),
+        scope: rule.scope,
+        combine: rule.combine,
+        checks,
+        error,
+    }
+}
+
+/// Turn conditions into the checks a window is asked about.
+///
+/// Split out of `compile_rule` so sticky mode's matcher compiles conditions the
+/// same way: two implementations of "what a condition means" is how two
+/// consumers come to disagree about whether a window matches.
+fn compile_checks(conditions: &[Condition]) -> (Vec<Check>, Option<String>) {
+    let mut error = None;
     let mut checks = Vec::new();
-    for (index, condition) in rule.when.iter().enumerate() {
+    for (index, condition) in conditions.iter().enumerate() {
         if condition.value.trim().is_empty() {
             error.get_or_insert(format!("condition {} has an empty value", index + 1));
             continue;
@@ -225,13 +244,46 @@ fn compile_rule(rule: &Rule) -> CompiledRule {
             },
         }
     }
-    CompiledRule {
-        name: rule.name.clone(),
-        profile: rule.profile.clone(),
-        scope: rule.scope,
-        combine: rule.combine,
-        checks,
-        error,
+    (checks, error)
+}
+
+/// Whether a compiled set of checks is satisfied by one window.
+fn checks_match(checks: &[Check], combine: Combine, window: &WindowInfo) -> bool {
+    let mut checks = checks.iter();
+    match combine {
+        Combine::All => checks.all(|check| check.matches(window)),
+        Combine::Any => checks.any(|check| check.matches(window)),
+    }
+}
+
+/// A window matcher for something other than a profile switch rule.
+///
+/// Sticky mode asks the same question auto switching does — "does this window
+/// match these conditions" — so it compiles and evaluates through the same code
+/// the rules do, and the two cannot drift apart.
+///
+/// Conditions are combined with `Combine::All`: the sticky editor offers three
+/// boxes and treats every non-empty one as required. `Default` is the matcher
+/// that was never built, and it matches nothing.
+#[derive(Clone, Debug, Default)]
+pub struct CompiledMatcher {
+    checks: Vec<Check>,
+    error: Option<String>,
+}
+
+impl CompiledMatcher {
+    pub fn compile(conditions: &[Condition]) -> Self {
+        let (checks, error) = compile_checks(conditions);
+        Self { checks, error }
+    }
+
+    /// A matcher that cannot mean anything matches nothing: a typo must not
+    /// turn into "the first window on the desktop", the same way a half-typed
+    /// rule is inert rather than a fallback.
+    pub fn matches(&self, window: &WindowInfo) -> bool {
+        self.error.is_none()
+            && !self.checks.is_empty()
+            && checks_match(&self.checks, Combine::All, window)
     }
 }
 
@@ -281,11 +333,7 @@ impl CompiledRule {
     /// The same-window half of the model: every condition is asked about the
     /// window handed in, and `combine` decides how their answers combine.
     fn matches_window(&self, window: &WindowInfo) -> bool {
-        let mut checks = self.checks.iter();
-        match self.combine {
-            Combine::All => checks.all(|check| check.matches(window)),
-            Combine::Any => checks.any(|check| check.matches(window)),
-        }
+        checks_match(&self.checks, self.combine, window)
     }
 }
 
@@ -440,6 +488,58 @@ mod tests {
 
     fn explorer() -> WindowInfo {
         window("explorer.exe", "File Explorer", "CabinetWClass")
+    }
+
+    /// The matcher sticky mode uses is the one auto switching uses.
+    ///
+    /// Same condition list, same compiler, so "process is chrome.exe and the
+    /// title mentions GitHub" cannot mean one thing to a rule and another to a
+    /// sticky target.
+    #[test]
+    fn a_compiled_matcher_requires_every_condition_it_holds() {
+        let matcher = CompiledMatcher::compile(&[
+            condition(Part::ProcessName, MatchMode::Exact, "chrome.exe"),
+            condition(Part::Title, MatchMode::Contains, "github"),
+        ]);
+        assert!(matcher.matches(&window(
+            "chrome.exe",
+            "GitHub — PR #1",
+            "Chrome_WidgetWin_1"
+        )));
+        assert!(
+            !matcher.matches(&window("chrome.exe", "YouTube", "Chrome_WidgetWin_1")),
+            "a title without the needle must not match"
+        );
+        assert!(
+            !matcher.matches(&window("firefox.exe", "GitHub", "MozillaWindowClass")),
+            "a process that does not match must not match"
+        );
+    }
+
+    /// A matcher that cannot mean anything matches nothing, the same way an
+    /// errored rule never switches: an empty list and a blank value are both
+    /// "no target yet".
+    #[test]
+    fn a_matcher_that_cannot_mean_anything_matches_nothing() {
+        assert!(!CompiledMatcher::compile(&[]).matches(&explorer()));
+        assert!(
+            !CompiledMatcher::compile(&[condition(Part::Title, MatchMode::Contains, "  ")])
+                .matches(&explorer())
+        );
+        assert!(!CompiledMatcher::default().matches(&explorer()));
+    }
+
+    /// Regex conditions compile through the same path, including the failure
+    /// case: an invalid pattern is an error, not a match.
+    #[test]
+    fn a_matcher_compiles_regex_conditions_like_a_rule_does() {
+        let matcher =
+            CompiledMatcher::compile(&[condition(Part::Title, MatchMode::Regex, "(?i)explor")]);
+        assert!(matcher.matches(&explorer()));
+        assert!(
+            !CompiledMatcher::compile(&[condition(Part::Title, MatchMode::Regex, "[")])
+                .matches(&explorer())
+        );
     }
 
     #[test]

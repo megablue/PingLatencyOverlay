@@ -1187,12 +1187,19 @@ mod tests {
     /// sample; both numbers are what made it read as a pacemaker. The walk
     /// with jitter and spikes should flip sign far more often than that, and
     /// a spike's attack has to clear the old generator's biggest step.
+    ///
+    /// The window is the full sample cap rather than a minute because spikes
+    /// are sparse and seeded from the overlay's id: over sixty samples there
+    /// is roughly a one-in-ten chance that no attack is big enough, which is
+    /// a flake about the draw, not about the generator. Over 512 samples the
+    /// same threshold is met many times over.
     #[test]
     fn the_cosmetic_prefill_is_jagged_rather_than_a_curve() {
         let mut config = OverlayConfig::new();
-        config.window_seconds = 60;
+        config.window_seconds = 600;
         config.max_y_ms = 1_000;
         let values = cosmetic_prefill_values(&config, "t");
+        assert_eq!(values.len(), 512, "the long window should fill the cap");
 
         let deltas: Vec<i64> = values
             .windows(2)

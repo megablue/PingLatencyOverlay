@@ -143,6 +143,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             break;
         }
         let now = Instant::now();
+        // Sticky targets are polled on this wake-up rather than on the repaint
+        // deadline, because following a dragged window needs the fast clock and
+        // nothing else in the pass does. A moved target brings the next layout
+        // pass forward instead of waiting out the repaint interval.
+        if overlays.follow_sticky(&state.config) {
+            next_repaint = Instant::now();
+        }
         if now >= next_repaint {
             overlays.apply(
                 &state.config,

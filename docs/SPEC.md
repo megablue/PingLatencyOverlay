@@ -59,8 +59,9 @@
   writes the profile file; it is not what applies your edits. Out-of-range values
   are clamped as you type, so what the overlay shows while you drag is what gets
   written.
-- Frameless and transparent. Always on top by default; **Wallpaper mode** puts
-  it on the desktop instead, as described under *Position* below.
+- Frameless and transparent. Always on top by default; a Sticky Overlay can sit
+  in front of the followed window only, and **Wallpaper Mode** puts it on the
+  desktop instead — both described under *Display Mode* below.
 - Click-through: mouse events pass to the window underneath as if it did not exist.
 - Renders a live line graph of latency samples, one tick per ping.
 - Plot start: the first point is the first responding latency, not y0.
@@ -124,16 +125,46 @@
   - Background color (`bgColor`, default `#0f172a`) and opacity (`bgOpacity`,
     0–100, default 0 = fully transparent), drawn behind the graph and not
     rotated with it.
-- Position: one of 9 anchors within the monitor's **work area** (which excludes
-  the taskbar / other appbars), so bottom and right overlays aren't hidden behind
-  the taskbar.
-- Monitor: which display the overlay belongs to, as a **monitor** row in the
-  Position section. The choices are "Primary monitor (follow automatically)" and
-  one entry per other attached display, labelled with its resolution, its
-  scaling and where it sits relative to the primary (`left of the primary`).
-  The default follows the primary, so an overlay created before this existed
-  behaves the same as it always did and moves with whichever display Windows
-  treats as primary.
+- **Display Mode** is one of three exclusive placements, chosen in a **Display
+  Mode** section under Position and defaulting to **Global Overlay**:
+  - **Global Overlay** places the overlay on a display. Position is one of 9
+    anchors within that monitor's **work area** (which excludes the taskbar /
+    other appbars), so bottom and right overlays aren't hidden behind the
+    taskbar. The **monitor** row in this branch chooses which display: "Primary
+    monitor (follow automatically)" and one entry per other attached display,
+    labelled with its resolution, its scaling and where it sits relative to the
+    primary (`left of the primary`). The default follows the primary, so an
+    overlay created before this existed behaves the same as it always did and
+    moves with whichever display Windows treats as primary.
+  - **Sticky Overlay** follows a window. The overlay keeps its size and anchor,
+    but the window's **client area** is the placement rect instead of a
+    monitor's work area, so all 9 anchors and the margins apply inside the
+    window. It follows the window as it moves and resizes. The target is a
+    process name (matched exactly), a title substring, and/or a window class
+    (matched exactly); every non-empty box has to match, and empty boxes are
+    ignored. When several windows match, the focused one wins, otherwise the
+    topmost. The overlay **hides while the target is minimized, hidden, closed,
+    or not matched at all**, and comes back with it. A **Pick window** crosshair
+    fills the process and class boxes from a window the user points at and
+    leaves the title box empty — a title is true only for the moment it was
+    read, and most change with the document or the page, which would strand the
+    overlay on a window right in front of the user; the click is swallowed, so
+    it never reaches the window being picked.
+  - **Wallpaper Mode** puts an overlay on the desktop instead of on top of
+    everything: above the wallpaper and the desktop icons, and below every
+    normal window, with the taskbar staying above it. It is never topmost; it
+    keeps its ordinary window and is parked directly above the shell's desktop
+    window, so the desktop icons show through wherever it does not draw. It
+    stays visible when the desktop is shown (Win+D): a wallpaper overlay
+    refuses to be minimized. The anchor, the margins and the monitor pin are
+    unchanged, so the overlay keeps the same place on the same display. Because
+    it is behind normal windows it is not visible over a fullscreen or
+    borderless app.
+- A Sticky Overlay is **always above other windows** by default, or can be
+  **in front of the followed window** instead: it then shares that window's
+  place in the z-order, so switching to another app takes it off the screen with
+  the window it belongs to. That choice is under Display Mode, and only Sticky
+  uses it.
 - **An overlay pinned to a display that is not attached is hidden, not moved.**
   The pin is kept, the overlay comes back where it was when that display
   returns, and the entry stays in the list marked "not connected" so a graph
@@ -141,21 +172,16 @@
 - A display's scaling is read **from that display**, so the same overlay is
   sized and margined in physical pixels for the panel it is on. Overlays on
   differently-scaled monitors do not match in physical size, and that is
-  correct: matching in physical size is what a wrong number looks like.
-- The anchor, the margins and the monitor pin are the whole position. An
-  overlay on a secondary display is positioned against that display's work area,
-  including when its coordinates in the Windows desktop are negative (a display
-  left of or above the primary).
-- **Wallpaper mode** is a checkbox in the Position section that puts an overlay
-  on the desktop instead of on top of everything: above the wallpaper and the
-  desktop icons, and below every normal window, with the taskbar staying above
-  it. It is never topmost; it keeps its ordinary window and is parked directly
-  above the shell's desktop window, so the desktop icons show through wherever
-  it does not draw. It stays visible when the desktop is shown (Win+D): a
-  wallpaper overlay refuses to be minimized. It is off by default, and the
-  anchor, the margins and the monitor pin are unchanged, so the overlay keeps
-  the same place on the same display. Because it is behind normal windows it is
-  not visible over a fullscreen or borderless app.
+  correct: matching in physical size is what a wrong number looks like. A
+  sticky overlay takes the scaling of the display its target window is on.
+- The anchor, the margins and the placement rect are the whole position: a
+  monitor's work area in Global Overlay mode, the target window's client area in
+  Sticky Overlay mode. An overlay on a secondary display is positioned against
+  that display's work area, including when its coordinates in the Windows
+  desktop are negative (a display left of or above the primary).
+- Existing profiles that turned on `wallpaperMode` open in Wallpaper Mode; the
+  key is read once and never written again, and the file it came from is
+  rewritten with `displayMode` on the next save.
 - Position offsets are signed screen-axis values in logical pixels:
   `horizontalMarginPx` and `verticalMarginPx`, both defaulting to 0. Edge-facing
   axes measure inward from the work-area edge; centered axes measure from the

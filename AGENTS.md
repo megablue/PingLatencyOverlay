@@ -445,6 +445,49 @@ in `docs/SPEC.md` under *Config window layout*. This is the wiring behind it.
 - `show_status_bar` takes `&self` and is paint-only, so unlike the rest of the
   window layout no test can hold its shape. That is a known gap, not an
   oversight.
+- **The sticky crosshair holds the mouse capture instead of installing a hook.**
+  `StickyPicker` calls `SetCapture` on the Config window when a pick starts and
+  then polls `GetCursorPos`/`GetAsyncKeyState` every pass rather than waiting for
+  its own mouse events, so it works over other processes' windows and the click
+  that ends the pick is swallowed — the target app never sees it. A
+  `WH_MOUSE_LL` hook would do the same job while looking like a keylogger to
+  every scanner, for a control used once per overlay. The candidates are
+  `winwatch::shapes()` minus this process's own windows, i.e. exactly what the
+  renderer's matcher can see, so a window that cannot be picked could not have
+  been followed either. The three boxes are conditions in a fixed order
+  (process exact, title contains, class exact); writing one box normalizes only
+  that box and leaves the others' conditions verbatim, so a hand-edited regex
+  title survives editing a different field. **A pick fills the process and the
+  class and leaves the title empty** (`fill_sticky_target`): the picked title is
+  true only for the moment it was read — Windows 11's Notepad reopens its last
+  document, a browser's title follows the page — and since the boxes are ANDed,
+  a stale title hides the overlay and nothing matches, so it never comes back
+  (`a_picked_window_fills_process_and_class_but_not_the_title`). The title box
+  stays for narrowing a target on purpose. **A lost capture is not a cancel.**
+  winit's Windows backend calls `ReleaseCapture()` on every mouse-button-up once
+  its own capture count reaches zero, so the release that ends a pick always
+  drops the capture before the next pass; `poll` therefore commits on the
+  release edge first and re-takes the capture afterwards. Cancelling on
+  `GetCapture() != capture` — which is what shipped first — meant the boxes
+  could never fill, and the next click went to the window under the cursor
+  instead. The edge tracking is the pure `pick_step`, so the click sequence is
+  tested without a mouse (`a_pick_commits_on_the_release_after_its_press`), and
+  the capture window is checked to be this process's own
+  (`own_capture_window`), because capturing a foreign window would send the
+  pick's clicks there instead of swallowing them. **The window is displaced,
+  not hidden, while the pick runs.** Hiding it — the first version — costs the
+  pick three things at once: Windows hands the foreground back to the previous
+  window, the hidden window loses the capture, and a hidden window stops
+  receiving frames, so the polling sleeps; the first click then only focuses
+  the target and the second one picks. `displace`/`restore_displaced` move it
+  to `(-32000, -32000)` and back instead. The crosshair cursor belongs to the
+  window: `poll` sets it only while the pointer is inside the window's rect,
+  and the ordinary arrow comes back the moment it leaves — except while the
+  window is displaced, when the crosshair is the only sign a pick is still
+  running (`pick_cursor` is that rule, as a table). The button is the Save
+  button's size, fill and label colour (`PICK_BUTTON_WIDTH` is wider so the
+  painted crosshair and the label both fit), and the glyph is painted like the
+  rail's, not an asset (`draw_crosshair_icon`, `the_pick_glyph_stays_inside_its_box`).
 
 ## The Config window's theme
 Behavior — what a theme may set, and where the files live — is in
@@ -834,6 +877,51 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   simply re-checked the next second. A wallpaper-mode window refuses
   `SC_MINIMIZE` in its window procedure, so Show Desktop cannot take it away —
   the absent topmost bit is also the mode's flag there.
+- **Display mode is an enum, not a pair of flags, because the three placements
+  are mutually exclusive by construction.** `DisplayMode { Global, Sticky,
+  Wallpaper }` replaced `wallpaper_mode: bool`; the old key is still read —
+  `legacy_wallpaper_mode` is `skip_serializing` and `normalize` folds
+  `wallpaperMode: true` into `DisplayMode::Wallpaper` only when the file names
+  no mode of its own, the same one-way pattern as `legacy_margin_px`. Two
+  booleans could express "wallpaper and sticky", which has no meaning, and the
+  monitor pin is kept rather than cleared so switching back to Global restores
+  the display the user chose.
+- **Sticky mode is followed by the renderer's own poll, not by a hook and not
+  by the tray.** `OverlayManager::follow_sticky` runs at the top of every loop
+  tick (the loop already wakes every `MESSAGE_POLL_INTERVAL`, 16 ms): per live
+  target it reads `IsWindow`/`IsIconic`/`IsWindowVisible`/`GetClientRect`/
+  `ClientToScreen`, all window-manager getters that cannot block on the target
+  process, and only when there is no handle does it sweep `winwatch::shapes()`
+  — at most once a second — and resolve. **A target is placeable only while it
+  is neither minimized nor hidden**: Steam closing to the tray hides its window
+  instead of destroying it, so `IsWindow` alone said the overlay should keep
+  following a window nobody can see. It returns whether anything changed so the
+  loop pulls its next layout pass forward, which is the whole follow latency.
+  The tray would have
+  had to poll the same getters and then ship coordinates down the pipe at up to
+  display rate; the work is a handful of syscalls, so the hop would only add
+  moving parts. `sticky::resolve` is pure over a `&[WindowShape]` (focused
+  match first, else topmost; a minimized window is never a target), which is
+  what makes the multi-window rules testable with synthetic lists — the same
+  split as `monitors::enumerate` vs `monitors::resolve`.
+- **The sticky matcher is `rules`' matcher.** `CompiledMatcher` compiles a
+  `Condition` list with the same `compile_checks`/`checks_match` the auto-switch
+  rules use, so "chrome.exe and a title mentioning GitHub" cannot mean one thing
+  to a rule and another to a target; a matcher that cannot mean anything (empty,
+  blank value, bad regex) matches nothing, exactly like an errored rule.
+- **An owned overlay is the FollowWindow z-order's one sharp edge.** With
+  `StickyZOrder::FollowWindow` the overlay drops `WS_EX_TOPMOST` and is owned by
+  the target (`SetWindowLongPtrW(GWLP_HWNDPARENT, target)`), so Windows keeps it
+  in the owner's z-order band — and destroys it when the owner is destroyed.
+  That is expected: `apply` notices the dead window and the ordinary creation
+  path rebuilds it. The once-a-second re-assert skips FollowWindow on purpose;
+  re-setting topmost there would break the mode.
+- **A hidden overlay now has two causes, and they are one flag on purpose.**
+  `OverlayWindow::hidden` was "the pinned display is not attached"; it is also
+  "the sticky target is minimized, closed, or matched by nothing". Both mean the
+  same three things — do not repaint on the prefill/border clocks, do not
+  re-assert topmost, keep the series so the graph comes back with its history —
+  so the flag stayed one flag and its doc names both.
 - `render.rs` writes premultiplied RGBA; `overlay.rs` swaps R/B to premultiplied
   BGRA before copying it into a 32-bit DIB. `bgOpacity=0` leaves the alpha byte
   at zero; positive values are composited by Windows.

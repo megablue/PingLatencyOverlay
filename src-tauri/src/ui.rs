@@ -15,15 +15,16 @@ use eframe::{App, CreationContext, NativeOptions};
 // named pipe rather than touching either of those types directly, which is the
 // whole point — nothing in this binary can draw a graph.
 use ping_latency_overlay_core::config::{
-    self, Anchor, BorderEffect, Config, OverlayConfig, ProbeConfig, TargetConfig,
+    self, Anchor, BorderEffect, Config, DisplayMode, OverlayConfig, ProbeConfig, StickyTarget,
+    StickyZOrder, TargetConfig,
 };
 use ping_latency_overlay_core::monitors::{self, MonitorInfo};
 use ping_latency_overlay_core::probes::{enabled_target_keys, TaskKey};
 use ping_latency_overlay_core::rules::{
-    self, AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot,
+    self, AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot, WindowInfo,
 };
 use ping_latency_overlay_core::transport::{Client, Message};
-use ping_latency_overlay_core::winwatch;
+use ping_latency_overlay_core::winwatch::{self, WindowShape};
 
 use crate::theme::{self, windows_app_mode, Mode, Theme, ThemeMode};
 
@@ -45,6 +46,19 @@ const SIDEBAR_HEADER_HEIGHT: f32 = 40.0;
 const DETAIL_FOOTER_HEIGHT: f32 = 44.0;
 const DETAIL_FOOTER_BUTTON_HEIGHT: f32 = 32.0;
 const DETAIL_FOOTER_BUTTON_WIDTH: f32 = 96.0;
+/// The pick button matches the footer's height and colours; it is wider
+/// because the painted crosshair and the label both have to fit inside it.
+const PICK_BUTTON_WIDTH: f32 = 128.0;
+/// The pick crosshair's box, as a fraction of the button's height, and its
+/// inset from the button's left edge in pixels.
+const PICK_ICON_BOX: f32 = 0.5;
+const PICK_ICON_INSET: f32 = 10.0;
+/// The pick crosshair's geometry, all as fractions of its box: the ring's
+/// stroke weight and radius, and how far the four ticks reach from and to.
+const PICK_ICON_STROKE: f32 = 0.1;
+const PICK_ICON_RADIUS: f32 = 0.24;
+const PICK_ICON_TICK_INNER: f32 = 0.32;
+const PICK_ICON_TICK_OUTER: f32 = 0.44;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PROFILE_ROW_HEIGHT: f32 = 26.0;
 const PROFILE_ACTION_WIDTH: f32 = 200.0;
@@ -752,6 +766,449 @@ impl PositionPicker {
     }
 }
 
+/// How often the crosshair re-reads the window list while it is armed.
+///
+/// The list costs a Toolhelp sweep and an `EnumWindows`, so it is refreshed on
+/// a clock rather than on every pass; the cursor and the button are polled
+/// every pass, which is free by comparison.
+const PICK_CANDIDATE_REFRESH: Duration = Duration::from_millis(250);
+
+/// The crosshair that fills the sticky target's boxes from a real window.
+///
+/// Pointing at a window without a global mouse hook: while a pick is armed
+/// this window holds the mouse capture, so the click that ends the pick lands
+/// here instead of in whatever is under the cursor, and every pass polls the
+/// cursor and the button directly rather than waiting for this window's own
+/// events — which is what makes it work over another process's windows.
+///
+/// The candidates are exactly the windows [`winwatch::shapes`] reports, which
+/// is also exactly what the renderer's matcher will see, so a window that
+/// cannot be picked could not have been followed either.
+#[derive(Default)]
+struct StickyPicker {
+    /// The window holding the capture while a pick is in progress.
+    capture: Option<windows_sys::Win32::Foundation::HWND>,
+    /// Where the window sat before the pick moved it out of the way; `Some`
+    /// exactly while it is displaced.
+    saved_rect: Option<windows_sys::Win32::Foundation::RECT>,
+    /// Whether the click that started the pick has been released yet; the
+    /// next press is the one that picks.
+    armed: bool,
+    /// A press has been seen, so the next release commits the pick.
+    held: bool,
+    /// The candidate under the cursor on the last pass.
+    hover: Option<WindowShape>,
+    /// The candidate list, refreshed on `PICK_CANDIDATE_REFRESH`.
+    candidates: Vec<WindowShape>,
+    candidates_read_at: Option<Instant>,
+}
+
+impl StickyPicker {
+    /// Draws the pick button, or the running hint, and returns a window when
+    /// the user completed a pick on this pass.
+    fn show(&mut self, ui: &mut Ui) -> Option<WindowShape> {
+        if self.capture.is_none() {
+            let button = ui
+                .add_sized(
+                    [PICK_BUTTON_WIDTH, DETAIL_FOOTER_BUTTON_HEIGHT],
+                    egui::Button::new(RichText::new("Pick window").color(UI_TEXT()))
+                        .fill(UI_ACCENT_STRONG()),
+                )
+                .on_hover_text(
+                    "Point at a window and click, like a screen spy. Escape \
+                     cancels, and the click is swallowed so it never reaches \
+                     the window you are pointing at.",
+                );
+            draw_crosshair_icon(ui.painter(), pick_icon_rect(button.rect), UI_TEXT());
+            if button.clicked() {
+                self.start();
+                ui.ctx().request_repaint();
+            }
+            return None;
+        }
+
+        self.poll(ui)
+    }
+
+    fn start(&mut self) {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetCapture;
+
+        // The click that got here focused this window, so the capture belongs
+        // to it. It is checked rather than trusted, and the fallback is our own
+        // window: capturing a foreign window would send the pick's clicks
+        // there instead of swallowing them.
+        let Some(hwnd) = own_capture_window() else {
+            return;
+        };
+        unsafe { SetCapture(hwnd) };
+        self.capture = Some(hwnd);
+        self.saved_rect = displace(hwnd);
+        self.armed = false;
+        self.held = false;
+        self.hover = None;
+        self.candidates_read_at = None;
+    }
+
+    fn release(&mut self) {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+
+        unsafe { ReleaseCapture() };
+        if let (Some(hwnd), Some(rect)) = (self.capture, self.saved_rect.take()) {
+            restore_displaced(hwnd, rect);
+        }
+        self.capture = None;
+        self.armed = false;
+        self.held = false;
+        self.hover = None;
+    }
+
+    /// One pass of the crosshair: the candidate under the cursor and the
+    /// button state, both read from Win32 rather than from egui's events.
+    fn poll(&mut self, ui: &mut Ui) -> Option<WindowShape> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, SetCapture, VK_ESCAPE, VK_LBUTTON,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetCursorPos, GetWindowRect, WindowFromPoint, GA_ROOT,
+        };
+
+        let capture = self.capture.expect("polled only while picking");
+        // Escape is the only cancel. A lost capture is not one: winit releases
+        // the capture on every button-up, so the release that ends a pick always
+        // arrives with the capture already gone, and treating that as a cancel
+        // is what made the boxes impossible to fill.
+        if unsafe { GetAsyncKeyState(VK_ESCAPE as i32) } < 0 {
+            self.release();
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+            return None;
+        }
+
+        if self
+            .candidates_read_at
+            .is_none_or(|read_at| read_at.elapsed() >= PICK_CANDIDATE_REFRESH)
+        {
+            self.candidates = pickable_windows();
+            self.candidates_read_at = Some(Instant::now());
+        }
+
+        let mut point = POINT { x: 0, y: 0 };
+        self.hover = (unsafe { GetCursorPos(&mut point) } != 0)
+            .then(|| unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) })
+            .and_then(|root| {
+                self.candidates
+                    .iter()
+                    .find(|shape| shape.hwnd == root)
+                    .cloned()
+            });
+
+        // The crosshair belongs to the Config window: the moment the pointer
+        // leaves it the ordinary arrow comes back. While the window is
+        // displaced for a pick there is nothing to leave, so the crosshair
+        // stays — it is the only feedback that a pick is running.
+        let mut window_rect = windows_sys::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let inside = unsafe { GetWindowRect(capture, &mut window_rect) } != 0
+            && point.x >= window_rect.left
+            && point.x < window_rect.right
+            && point.y >= window_rect.top
+            && point.y < window_rect.bottom;
+        ui.ctx()
+            .set_cursor_icon(pick_cursor(self.saved_rect.is_some(), inside));
+
+        // The edges come before the capture is repaired, because a release is
+        // also the moment winit takes the capture away.
+        let down = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } < 0;
+        if pick_step(&mut self.armed, &mut self.held, down) {
+            let picked = self.hover.take();
+            self.release();
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+            ui.ctx().request_repaint();
+            return picked;
+        }
+
+        // While the button is up nothing else wants the capture, so taking it
+        // back every pass keeps the next press ours to swallow. The press that
+        // is down right now was already ours: the capture was held when it went
+        // down, and the only drop is the up that commits.
+        unsafe { SetCapture(capture) };
+        ui.ctx().request_repaint();
+        None
+    }
+}
+
+/// Advances the pick's button tracking by one pass and reports whether this
+/// pass completes a pick.
+///
+/// A free function over two flags, not a method, so the whole sequence — start,
+/// release, press, release — is testable without Win32 and without a capture.
+/// The capture is deliberately not part of the decision: winit releases it on
+/// every button-up, so a pick that required it to still be held could never
+/// commit.
+fn pick_step(armed: &mut bool, held: &mut bool, down: bool) -> bool {
+    if !*armed {
+        // The click that started the pick has to be released first, or its own
+        // press would be the one that picks.
+        if !down {
+            *armed = true;
+        }
+        false
+    } else if down {
+        *held = true;
+        false
+    } else if *held {
+        *held = false;
+        true
+    } else {
+        false
+    }
+}
+
+/// The cursor for a running pick: the crosshair while the window is displaced
+/// (there is no rect to leave, and it is the only feedback a pick is running),
+/// and otherwise the crosshair only while the pointer is inside the window.
+fn pick_cursor(displaced: bool, inside: bool) -> egui::CursorIcon {
+    if displaced || inside {
+        egui::CursorIcon::Crosshair
+    } else {
+        egui::CursorIcon::Default
+    }
+}
+
+/// Moves the Config window out of the way for a pick, returning where it was.
+///
+/// The window is moved rather than hidden. Hiding it — which is what shipped
+/// first — costs the pick three things at once: Windows hands the foreground
+/// back to the previous window, the hidden window loses the mouse capture, and
+/// a hidden window stops receiving frames, so the polling that drives the pick
+/// sleeps. The first click then only focuses the window under the cursor and
+/// the second one picks.
+fn displace(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+) -> Option<windows_sys::Win32::Foundation::RECT> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    let mut rect = windows_sys::Win32::Foundation::RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return None;
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        )
+    };
+    Some(rect)
+}
+
+/// Puts the Config window back where [`displace`] found it.
+fn restore_displaced(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    rect: windows_sys::Win32::Foundation::RECT,
+) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            rect.left,
+            rect.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        )
+    };
+}
+
+/// The window a pick captures with: the foreground window when it belongs to
+/// this process, otherwise this process's first visible top-level window.
+///
+/// `GetForegroundWindow` is normally the Config window by the time a pick
+/// starts — the click that starts it focused the window — but it is checked
+/// rather than trusted, because capturing a window of another process would
+/// send the pick's clicks there instead of swallowing them.
+fn own_capture_window() -> Option<windows_sys::Win32::Foundation::HWND> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    let own_pid = std::process::id();
+    let belongs_to_us = |hwnd: HWND| {
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        pid == own_pid
+    };
+
+    let foreground = unsafe { GetForegroundWindow() };
+    if belongs_to_us(foreground) {
+        return Some(foreground);
+    }
+
+    unsafe extern "system" fn first_visible(hwnd: HWND, data: isize) -> i32 {
+        let found = &mut *(data as *mut Option<HWND>);
+        if found.is_some() {
+            return 0;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == std::process::id() && IsWindowVisible(hwnd) != 0 {
+            *found = Some(hwnd);
+            return 0;
+        }
+        1
+    }
+
+    let mut found: Option<HWND> = None;
+    unsafe {
+        EnumWindows(
+            Some(first_visible),
+            &mut found as *mut Option<HWND> as isize,
+        )
+    };
+    found
+}
+
+/// The box the pick button's crosshair is painted in: a square against the
+/// button's left edge, vertically centred, sized from the button's height.
+fn pick_icon_rect(button: egui::Rect) -> egui::Rect {
+    let side = button.height() * PICK_ICON_BOX;
+    egui::Rect::from_center_size(
+        egui::pos2(
+            button.left() + PICK_ICON_INSET + side / 2.0,
+            button.center().y,
+        ),
+        egui::vec2(side, side),
+    )
+}
+
+/// The pick button's crosshair, painted rather than shipped as artwork: a
+/// stroked ring with four ticks, like a screen spy's target.
+///
+/// The same reasoning as the rail and theme glyphs — no asset, and it takes
+/// whatever colour the button's label does, so a theme cannot strand it.
+fn draw_crosshair_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let unit = rect.width().min(rect.height());
+    let centre = rect.center();
+    let stroke = egui::Stroke::new(PICK_ICON_STROKE * unit, color);
+    painter.circle_stroke(centre, PICK_ICON_RADIUS * unit, stroke);
+    for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        painter.line_segment(
+            [
+                egui::pos2(
+                    centre.x + dx * PICK_ICON_TICK_INNER * unit,
+                    centre.y + dy * PICK_ICON_TICK_INNER * unit,
+                ),
+                egui::pos2(
+                    centre.x + dx * PICK_ICON_TICK_OUTER * unit,
+                    centre.y + dy * PICK_ICON_TICK_OUTER * unit,
+                ),
+            ],
+            stroke,
+        );
+    }
+}
+
+/// The windows a pick may offer: everything the matcher could see, minus this
+/// process's own windows — following the configuration window is never what
+/// the user meant.
+fn pickable_windows() -> Vec<WindowShape> {
+    let own = std::env::current_exe().ok().and_then(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+    });
+    winwatch::shapes()
+        .into_iter()
+        .filter(|shape| own.as_ref() != Some(&shape.window.process.to_ascii_lowercase()))
+        .collect()
+}
+
+/// The text one of the sticky boxes shows: the value of the condition with
+/// that part, or empty when there is none.
+fn sticky_value(target: Option<&StickyTarget>, part: Part) -> String {
+    target
+        .and_then(|target| target.when.iter().find(|condition| condition.part == part))
+        .map(|condition| condition.value.clone())
+        .unwrap_or_default()
+}
+
+/// The mode a sticky box writes for its part.
+///
+/// Process and class are exact strings an executable and a window class are
+/// already unique under; a title is not, so it matches as a substring.
+fn sticky_mode(part: Part) -> MatchMode {
+    match part {
+        Part::Title => MatchMode::Contains,
+        Part::ProcessName | Part::ClassName => MatchMode::Exact,
+    }
+}
+
+/// Writes one sticky box.
+///
+/// The box being written takes the mode its part implies, but the other boxes
+/// keep their conditions verbatim — a hand-edited matcher (a regex title, say)
+/// survives editing a different box, and only the box the user actually types
+/// in is normalized. An emptied box drops its condition, and a target left
+/// with nothing to match goes back to `None`: an empty matcher means "no
+/// target", which is what the editor's empty boxes mean too.
+fn set_sticky_value(target: &mut Option<StickyTarget>, part: Part, value: String) {
+    const KNOWN: [Part; 3] = [Part::ProcessName, Part::Title, Part::ClassName];
+    let existing = target.take().map(|target| target.when).unwrap_or_default();
+    let mut when: Vec<Condition> = Vec::new();
+    for known in KNOWN {
+        if known == part {
+            if !value.trim().is_empty() {
+                when.push(Condition {
+                    part: known,
+                    matcher: sticky_mode(known),
+                    value: value.clone(),
+                });
+            }
+        } else if let Some(condition) = existing.iter().find(|condition| condition.part == known) {
+            when.push(condition.clone());
+        }
+    }
+    *target = (!when.is_empty()).then_some(StickyTarget { when });
+}
+
+/// Fills a sticky target from a picked window: the process and the class, and
+/// deliberately **not** the title.
+///
+/// The picked title is true only for the moment it was read. Windows 11's
+/// Notepad reopens the document it last had, a browser's title follows the
+/// page, a game's follows its state — and since the boxes are ANDed, a title
+/// that has moved on is what strands an overlay on a window that is right in
+/// front of the user (the overlay hides and never comes back, because nothing
+/// matches). The title box stays editable for narrowing a target on purpose;
+/// it is just not filled in for them.
+fn fill_sticky_target(target: &mut Option<StickyTarget>, window: &WindowInfo) {
+    set_sticky_value(target, Part::ProcessName, window.process.clone());
+    set_sticky_value(target, Part::ClassName, window.class_name.clone());
+    set_sticky_value(target, Part::Title, String::new());
+}
+
 fn load_position_texture(ctx: &Context, name: &str, bytes: &[u8]) -> egui::TextureHandle {
     let image = image::load_from_memory(bytes)
         .expect("bundled position picker asset must be valid")
@@ -1035,6 +1492,10 @@ pub struct PingApp {
     /// frame for no reason.
     border_preview: Option<String>,
     position_picker: PositionPicker,
+    /// The sticky target's crosshair, alive only while a pick is armed. Kept
+    /// on the app rather than in the editor so the capture survives a pass
+    /// that redraws the section.
+    sticky_picker: StickyPicker,
     /// The displays attached right now, and when they were last read.
     ///
     /// Cached because `EnumDisplayMonitors` is a round trip into the window
@@ -1427,6 +1888,7 @@ impl PingApp {
             // accurate rather than merely unknown and needs no first send.
             border_preview: None,
             position_picker,
+            sticky_picker: StickyPicker::default(),
             monitors: Vec::new(),
             // `None` so the first `sync_monitors` reads, rather than showing an
             // empty monitor list until the clock comes round.
@@ -3398,6 +3860,7 @@ impl PingApp {
                     selected_target.as_deref(),
                     &mut changed,
                     &mut self.position_picker,
+                    &mut self.sticky_picker,
                     &self.monitors,
                     &self.theme,
                 );
@@ -5291,12 +5754,100 @@ fn edit_target_colors(ui: &mut Ui, target: &mut TargetConfig, changed: &mut bool
         });
 }
 
+/// The Sticky Overlay controls: the crosshair, the three boxes that are the
+/// target, and the z-order choice.
+fn show_sticky_editor(
+    ui: &mut Ui,
+    overlay: &mut OverlayConfig,
+    sticky_picker: &mut StickyPicker,
+    changed: &mut bool,
+) {
+    Grid::new("sticky-target-grid")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            let boxes = [
+                (
+                    "Process",
+                    Part::ProcessName,
+                    "The executable's file name, matched exactly.",
+                ),
+                (
+                    "Window title",
+                    Part::Title,
+                    "A substring of the title. Titles change with the document or \
+                     the page, so an empty box is the durable choice.",
+                ),
+                (
+                    "Window class",
+                    Part::ClassName,
+                    "The Win32 class name, matched exactly.",
+                ),
+            ];
+            for (label, part, hint) in boxes {
+                ui.label(label).on_hover_text(hint);
+                let mut text = sticky_value(overlay.sticky_target.as_ref(), part);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut text)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("(any)"),
+                    )
+                    .changed()
+                {
+                    set_sticky_value(&mut overlay.sticky_target, part, text);
+                    *changed = true;
+                }
+                ui.end_row();
+            }
+        });
+    ui.add_space(6.0);
+    if let Some(picked) = sticky_picker.show(ui) {
+        fill_sticky_target(&mut overlay.sticky_target, &picked.window);
+        *changed = true;
+    }
+    if overlay.sticky_target.is_none() {
+        ui.label(
+            RichText::new(
+                "No target yet: the overlay hides until a window matches. \
+                 Pick a window, or fill in a box.",
+            )
+            .color(UI_TEXT_SECONDARY()),
+        );
+    }
+    ui.add_space(6.0);
+    let mut z_order = overlay.sticky_z_order;
+    ui.radio_value(
+        &mut z_order,
+        StickyZOrder::AboveEverything,
+        "Always above other windows",
+    )
+    .on_hover_text("The overlay floats above everything, focused or not.");
+    ui.radio_value(
+        &mut z_order,
+        StickyZOrder::FollowWindow,
+        "In front of the followed window",
+    )
+    .on_hover_text(
+        "The overlay shares the window's place in the z-order, so switching \
+         to another app takes it off the screen with the window it belongs to.",
+    );
+    if z_order != overlay.sticky_z_order {
+        overlay.sticky_z_order = z_order;
+        *changed = true;
+    }
+}
+
+// The parameters are the editor's borrowed contexts and its draft, one each;
+// bundling them into a struct would only move the same list somewhere else.
+#[allow(clippy::too_many_arguments)]
 fn edit_overlay(
     ui: &mut Ui,
     overlay: &mut OverlayConfig,
     selected_target: Option<&str>,
     changed: &mut bool,
     position_picker: &mut PositionPicker,
+    sticky_picker: &mut StickyPicker,
     attached: &[MonitorInfo],
     theme: &Theme,
 ) {
@@ -5341,40 +5892,6 @@ fn edit_overlay(
                 overlay.position = anchor;
                 *changed = true;
             }
-        }
-        let mut chosen = overlay.monitor_device.clone();
-        ComboBox::from_id_salt("monitor-device")
-            .selected_text(monitor_choice_label(attached, chosen.as_deref()))
-            .show_ui(ui, |ui| {
-                for choice in monitor_choices(attached, chosen.as_deref()) {
-                    let picked = choice.is(chosen.as_deref());
-                    if ui
-                        .selectable_label(picked, choice.label)
-                        .on_hover_text(choice.hint)
-                        .clicked()
-                        && !picked
-                    {
-                        chosen = choice.device;
-                    }
-                }
-            });
-        if chosen != overlay.monitor_device {
-            overlay.monitor_device = chosen;
-            *changed = true;
-        }
-        let mut wallpaper_mode = overlay.wallpaper_mode;
-        if ui
-            .checkbox(&mut wallpaper_mode, "Wallpaper mode")
-            .on_hover_text(
-                "Keeps the overlay on the desktop: above the wallpaper, below \
-                 the desktop icons and every normal window, with the taskbar \
-                 above it. It is not visible over fullscreen or borderless \
-                 apps — that is the mode, not a fault.",
-            )
-            .changed()
-        {
-            overlay.wallpaper_mode = wallpaper_mode;
-            *changed = true;
         }
         Grid::new("position-offsets-grid")
             .num_columns(2)
@@ -5422,6 +5939,61 @@ fn edit_overlay(
                 }
                 ui.end_row();
             });
+    });
+
+    section(ui, "Display Mode", |ui| {
+        let mut mode = overlay.display_mode;
+        ui.radio_value(&mut mode, DisplayMode::Global, "Global Overlay")
+            .on_hover_text("Placed on a display, pinned by name when you choose one.");
+        ui.radio_value(&mut mode, DisplayMode::Sticky, "Sticky Overlay")
+            .on_hover_text(
+                "Follows a window: the overlay moves and resizes with its \
+                 client area, and hides while the window is minimized or gone.",
+            );
+        ui.radio_value(&mut mode, DisplayMode::Wallpaper, "Wallpaper Mode")
+            .on_hover_text(
+                "Keeps the overlay on the desktop: above the wallpaper, below \
+                 the desktop icons and every normal window, with the taskbar \
+                 above it. It is not visible over fullscreen or borderless \
+                 apps — that is the mode, not a fault.",
+            );
+        if mode != overlay.display_mode {
+            overlay.display_mode = mode;
+            *changed = true;
+        }
+        ui.add_space(6.0);
+
+        match overlay.display_mode {
+            DisplayMode::Global => {
+                let mut chosen = overlay.monitor_device.clone();
+                ComboBox::from_id_salt("monitor-device")
+                    .selected_text(monitor_choice_label(attached, chosen.as_deref()))
+                    .show_ui(ui, |ui| {
+                        for choice in monitor_choices(attached, chosen.as_deref()) {
+                            let picked = choice.is(chosen.as_deref());
+                            if ui
+                                .selectable_label(picked, choice.label)
+                                .on_hover_text(choice.hint)
+                                .clicked()
+                                && !picked
+                            {
+                                chosen = choice.device;
+                            }
+                        }
+                    });
+                if chosen != overlay.monitor_device {
+                    overlay.monitor_device = chosen;
+                    *changed = true;
+                }
+            }
+            DisplayMode::Sticky => show_sticky_editor(ui, overlay, sticky_picker, changed),
+            DisplayMode::Wallpaper => {
+                ui.label(
+                    RichText::new("The overlay sits on the desktop itself.")
+                        .color(UI_TEXT_SECONDARY()),
+                );
+            }
+        }
     });
 
     section(ui, "Graph", |ui| {
@@ -6007,14 +6579,15 @@ mod tests {
         about_page_lines, app_version, append_status_message, auto_preview_line,
         auto_switch_section, auto_switch_step, can_switch_profile, choose_theme, config,
         config_notice_status, config_notices_status, config_push_due, default_fallback,
-        deselect_strip_rect, draw_pane_divider, empty_editor, enabled_target_keys, host_row_label,
-        list_pane_column, list_pane_row_height, list_pane_row_width_for, monitor_choice_label,
-        monitor_choices, overlay_count_label, overlay_name_width, overlay_row_contents,
-        overlay_row_label, page_has_detail_footer, page_has_list_pane, pending_edits,
-        profile_name_width, profile_row_contents, profile_row_label, rail_width, requested_url,
-        retired_targets, row_inner, rule_error, runtime_config_changed,
-        selected_overlay_for_border, selected_target_in, set_background_tracking,
-        set_selection_border_animation, sync_auto_preview_text, sync_monitor_list,
+        deselect_strip_rect, draw_pane_divider, empty_editor, enabled_target_keys,
+        fill_sticky_target, host_row_label, list_pane_column, list_pane_row_height,
+        list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
+        overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
+        page_has_list_pane, pending_edits, pick_cursor, pick_step, profile_name_width,
+        profile_row_contents, profile_row_label, rail_width, requested_url, retired_targets,
+        row_inner, rule_error, runtime_config_changed, selected_overlay_for_border,
+        selected_target_in, set_background_tracking, set_selection_border_animation,
+        set_sticky_value, sticky_value, sync_auto_preview_text, sync_monitor_list,
         sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
         window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, PingApp, ProfileSnapshot,
@@ -6022,6 +6595,7 @@ mod tests {
         DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
         GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
         MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
+        PICK_ICON_RADIUS, PICK_ICON_STROKE, PICK_ICON_TICK_INNER, PICK_ICON_TICK_OUTER,
         PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
         SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, THEME_ICON_STROKE,
         THEME_MOON_BITE_OFFSET, THEME_MOON_BITE_RADIUS, THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS,
@@ -8542,6 +9116,22 @@ mod tests {
         output
     }
 
+    /// One pass at a taller window, for the sections below the fold: the detail
+    /// pane's scroll area does not paint what it cannot show, and a test asking
+    /// whether a control exists should not depend on the window's height.
+    fn drive_tall(app: &mut PingApp, ctx: &egui::Context) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT + 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
+        output.textures_delta.clear();
+        output
+    }
+
     /// Every piece of `text` a pass painted, wherever it came from.
     ///
     /// This is what makes a control addressable without coordinates. The rail
@@ -8785,6 +9375,275 @@ mod tests {
         assert_eq!(
             app.selected_id, None,
             "clicking the selected row did not clear the selection"
+        );
+    }
+
+    /// The three sticky boxes are three conditions, in one fixed order, and
+    /// they cannot disagree with the matcher about what they mean.
+    #[test]
+    fn the_sticky_boxes_read_and_write_the_same_conditions() {
+        let mut target = None;
+        assert_eq!(sticky_value(target.as_ref(), Part::ProcessName), "");
+
+        set_sticky_value(&mut target, Part::ProcessName, "chrome.exe".to_string());
+        set_sticky_value(&mut target, Part::Title, "github".to_string());
+        set_sticky_value(
+            &mut target,
+            Part::ClassName,
+            "Chrome_WidgetWin_1".to_string(),
+        );
+        let target = target.expect("three boxes are a target");
+        assert_eq!(
+            target.when,
+            vec![
+                Condition {
+                    part: Part::ProcessName,
+                    matcher: MatchMode::Exact,
+                    value: "chrome.exe".to_string(),
+                },
+                Condition {
+                    part: Part::Title,
+                    matcher: MatchMode::Contains,
+                    value: "github".to_string(),
+                },
+                Condition {
+                    part: Part::ClassName,
+                    matcher: MatchMode::Exact,
+                    value: "Chrome_WidgetWin_1".to_string(),
+                },
+            ]
+        );
+        assert_eq!(sticky_value(Some(&target), Part::Title), "github");
+
+        // Clearing one box drops its condition; clearing the last one is back
+        // to "no target", not an empty matcher.
+        let mut target = Some(target);
+        set_sticky_value(&mut target, Part::Title, String::new());
+        let target = target.expect("two boxes are still a target");
+        assert!(target
+            .when
+            .iter()
+            .all(|condition| condition.part != Part::Title));
+        let mut target = Some(target);
+        set_sticky_value(&mut target, Part::ProcessName, String::new());
+        set_sticky_value(&mut target, Part::ClassName, String::new());
+        assert!(target.is_none(), "no boxes left is no target");
+    }
+
+    /// Typing in one box leaves the other conditions alone, modes included: a
+    /// hand-edited regex title survives editing the process box.
+    #[test]
+    fn writing_a_sticky_box_leaves_the_other_conditions_alone() {
+        let regex = Condition {
+            part: Part::Title,
+            matcher: MatchMode::Regex,
+            value: "(?i)github".to_string(),
+        };
+        let mut target = Some(config::StickyTarget {
+            when: vec![regex.clone()],
+        });
+        set_sticky_value(&mut target, Part::ProcessName, "chrome.exe".to_string());
+        let target = target.expect("a target");
+        assert!(
+            target.when.contains(&regex),
+            "editing the process box rewrote the regex title"
+        );
+
+        // The box for that part is what normalizes it, and only then.
+        let mut target = Some(target);
+        set_sticky_value(&mut target, Part::Title, "(?i)github".to_string());
+        let target = target.expect("a target");
+        assert!(target.when.iter().any(|condition| {
+            condition.part == Part::Title && condition.matcher == MatchMode::Contains
+        }));
+    }
+
+    /// A picked window fills the process and the class, and deliberately not
+    /// the title: the picked title is true only for the moment it was read, and
+    /// a stale one is what strands an overlay on a window right in front of the
+    /// user (Windows 11's Notepad reopens its last document, a browser's title
+    /// follows the page).
+    #[test]
+    fn a_picked_window_fills_process_and_class_but_not_the_title() {
+        let window = WindowInfo {
+            process: "notepad.exe".to_string(),
+            title: "note.txt - Notepad".to_string(),
+            class_name: "Notepad".to_string(),
+        };
+        let mut target = None;
+        fill_sticky_target(&mut target, &window);
+        let target = target.expect("a picked window is a target");
+        assert_eq!(
+            target.when,
+            vec![
+                Condition {
+                    part: Part::ProcessName,
+                    matcher: MatchMode::Exact,
+                    value: "notepad.exe".to_string(),
+                },
+                Condition {
+                    part: Part::ClassName,
+                    matcher: MatchMode::Exact,
+                    value: "Notepad".to_string(),
+                },
+            ],
+            "the picked title must not become a condition"
+        );
+        assert_eq!(sticky_value(Some(&target), Part::Title), "");
+
+        // Picking over a title the user typed on purpose starts a fresh target:
+        // that title was true for the window they had, not the one they picked.
+        let mut target = Some(target);
+        set_sticky_value(&mut target, Part::Title, "note".to_string());
+        fill_sticky_target(&mut target, &window);
+        assert_eq!(sticky_value(target.as_ref(), Part::Title), "");
+    }
+
+    /// A pick commits on the release after its press, and on nothing else.
+    ///
+    /// This is the part of the crosshair that can be tested without a mouse: a
+    /// pick must not fire on the click that starts it, must not fire while the
+    /// button is held, and must fire exactly once on the release. The capture
+    /// is deliberately not in this decision — winit drops it on every button-up.
+    #[test]
+    fn a_pick_commits_on_the_release_after_its_press() {
+        let (mut armed, mut held) = (false, false);
+
+        // The pass right after the button started the pick: the starting click
+        // is already released, so the next press is the one that picks.
+        assert!(
+            !pick_step(&mut armed, &mut held, false),
+            "nothing is picked before a press"
+        );
+        assert!(armed, "the picker never armed after the starting click");
+
+        assert!(
+            !pick_step(&mut armed, &mut held, true),
+            "a press picks by itself"
+        );
+        assert!(held);
+        assert!(
+            !pick_step(&mut armed, &mut held, true),
+            "a hold is not a click"
+        );
+
+        assert!(
+            pick_step(&mut armed, &mut held, false),
+            "the release did not commit the pick"
+        );
+        assert!(
+            !pick_step(&mut armed, &mut held, false),
+            "one release committed twice"
+        );
+    }
+
+    /// The click that starts a pick is not the pick, even if its release is the
+    /// first thing the picker sees.
+    #[test]
+    fn the_starting_click_is_never_the_pick() {
+        let (mut armed, mut held) = (false, false);
+        assert!(
+            !pick_step(&mut armed, &mut held, true),
+            "the starting press must not arm the picker"
+        );
+        assert!(!armed);
+        assert!(
+            !pick_step(&mut armed, &mut held, false),
+            "the starting release must not commit"
+        );
+        assert!(
+            armed,
+            "the picker should be armed after the starting release"
+        );
+    }
+
+    /// The pick glyph's parts stay inside the box the button gives it, the
+    /// same check the theme glyphs get.
+    ///
+    /// A glyph whose parts come from a table can be centred and still poke out
+    /// — the Global glyph shipped with a knob past its track — so the reach is
+    /// summed rather than eyeballed.
+    #[test]
+    fn the_pick_glyph_stays_inside_its_box() {
+        let reach = (PICK_ICON_TICK_OUTER + PICK_ICON_STROKE / 2.0)
+            .max(PICK_ICON_RADIUS + PICK_ICON_STROKE / 2.0);
+        assert!(
+            reach <= 0.5,
+            "the crosshair reaches {reach} of its box, past its edge"
+        );
+        let gap = PICK_ICON_TICK_INNER - (PICK_ICON_RADIUS + PICK_ICON_STROKE / 2.0);
+        assert!(
+            gap > 0.0,
+            "the ticks have to start outside the ring, or they read as spokes"
+        );
+    }
+
+    /// The cursor rule for a running pick, as a table.
+    ///
+    /// The displaced case is the one that matters: a window that has been moved
+    /// out of the way has no rect for the pointer to leave, and the crosshair
+    /// is the only sign a pick is still running.
+    #[test]
+    fn the_pick_cursor_follows_the_window() {
+        let cases = [
+            (false, true, egui::CursorIcon::Crosshair),
+            (false, false, egui::CursorIcon::Default),
+            (true, false, egui::CursorIcon::Crosshair),
+            (true, true, egui::CursorIcon::Crosshair),
+        ];
+        for (displaced, inside, expected) in cases {
+            assert_eq!(
+                pick_cursor(displaced, inside),
+                expected,
+                "with displaced={displaced} and inside={inside}"
+            );
+        }
+    }
+
+    /// The Display Mode radios stage the mode through the real frame, and
+    /// choosing Sticky puts the target's controls on screen.
+    #[test]
+    fn choosing_sticky_mode_stages_it_and_opens_the_target_boxes() {
+        let root = driving_root("plo-drive-display-mode");
+        let store = config::Store::new(root.clone());
+        let mut config = Config::default();
+        config.overlays.push(OverlayConfig::new());
+        store
+            .save_profile("default", &config)
+            .expect("seed the profile");
+        store
+            .set_active_profile("default")
+            .expect("seed the active profile");
+
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+
+        let list_pane_right = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH;
+        click_text_where(&mut app, &ctx, "New overlay", |rect| {
+            rect.center().x < list_pane_right
+        });
+        assert!(app.selected_id.is_some(), "the editor did not open");
+
+        assert_eq!(
+            app.config.overlays[0].display_mode,
+            config::DisplayMode::Global
+        );
+        click_text(&mut app, &ctx, "Sticky Overlay");
+        assert_eq!(
+            app.config.overlays[0].display_mode,
+            config::DisplayMode::Sticky,
+            "the radio did not stage the mode"
+        );
+        assert!(app.dirty, "staging a mode did not mark the profile dirty");
+
+        let output = drive_tall(&mut app, &ctx);
+        assert!(
+            !text_rects(&output, "Process").is_empty(),
+            "the sticky target's boxes did not appear"
+        );
+        assert!(
+            !text_rects(&output, "Always above other windows").is_empty(),
+            "the sticky z-order choice did not appear"
         );
     }
 }

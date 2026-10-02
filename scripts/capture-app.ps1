@@ -19,6 +19,7 @@
 #   scripts/capture-app.ps1 -Live                    # use the real config directory
 #   scripts/capture-app.ps1 -DebugBuild              # use target\debug instead of release
 #   scripts/capture-app.ps1 -OutDir C:\somewhere     # where the PNGs go
+#   scripts/capture-app.ps1 -ConfigDir C:\sandbox -NoCopy   # a pre-made sandbox, used as-is
 #
 # Output: <outdir>\config.png, one overlay-<nn>-<w>x<h>.png per visible overlay,
 # a full-screen shot with -FullScreen, and manifest.txt naming every window.
@@ -27,6 +28,7 @@
 param(
     [string]$OutDir,
     [string]$ConfigDir,
+    [switch]$NoCopy,
     [switch]$Live,
     [switch]$KeepRunning,
     [double]$SettleSeconds = 8,
@@ -74,7 +76,7 @@ if ($Live) {
 }
 if (-not $Live) {
     New-Item -ItemType Directory -Force -Path $SessionConfigDir | Out-Null
-    if (Test-Path $RealConfigDir) {
+    if (-not $NoCopy -and (Test-Path $RealConfigDir)) {
         Copy-Item -Path (Join-Path $RealConfigDir '*') -Destination $SessionConfigDir -Recurse -Force
     }
 }

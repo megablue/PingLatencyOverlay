@@ -103,10 +103,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `ShellExecuteW` is how Windows hands a URL to the user's browser. eframe's
 # NATIVE runner ignores `egui::OutputCommand::OpenUrl` (only its web runner
-# acts on it), so the app has to open the URL itself. Pinned to a version
-# already in the lock file so no second copy of the crate is compiled.
+# acts on it), so the app has to open the URL itself. The sticky target's
+# crosshair reads the cursor and the mouse button directly while a pick is
+# armed, which is why KeyboardAndMouse is here. Pinned to a version already in
+# the lock file so no second copy of the crate is compiled.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
