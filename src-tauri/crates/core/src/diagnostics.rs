@@ -17,14 +17,42 @@
 //! Nothing here is required for the app to work, and a failure to write the log
 //! is swallowed: a diagnostics path that can itself take the app down would be
 //! worse than having none.
+//!
+//! The log is a development and support tool, not a product feature: a release
+//! build writes nothing unless `PLO_LOG` is set, so an ordinary install does not
+//! accumulate a file forever.
 
 use std::io::Write;
+
+/// Whether anything should reach the log file.
+///
+/// A debug build always logs; a release build logs only when `PLO_LOG` names
+/// something. The log exists so a silent failure can be told from a feature
+/// that was never written, which is a problem during development and a support
+/// case — not something an ordinary install should accumulate a file for.
+pub fn enabled() -> bool {
+    log_enabled(
+        cfg!(debug_assertions),
+        std::env::var_os("PLO_LOG").as_deref(),
+    )
+}
+
+/// The decision behind [`enabled`], with both inputs passed in.
+///
+/// Split out so a test can drive every combination without mutating the process
+/// environment, the same reason `resolve_config_dir` is.
+pub fn log_enabled(debug: bool, override_value: Option<&std::ffi::OsStr>) -> bool {
+    debug || override_value.is_some_and(|value| !value.is_empty())
+}
 
 /// Append one line to the shared log, tagged with the process and the time.
 ///
 /// A failure here is ignored on purpose. The log is a courtesy, and a user
 /// whose config directory is read-only still needs the app to start.
 pub fn log_line(process: &str, message: &str) {
+    if !enabled() {
+        return;
+    }
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -145,5 +173,34 @@ mod tests {
     fn logging_never_fails_the_caller() {
         log_line("test", "a line written on purpose");
         log_line("", "");
+    }
+
+    /// The log is off for an ordinary release install and on for a development
+    /// build or a support session.
+    ///
+    /// Both inputs are parameters so this test never touches the process
+    /// environment: another test thread reading `PLO_LOG` at the same time would
+    /// make it flaky, the same reason `resolve_config_dir` is split out.
+    #[test]
+    fn the_log_is_off_in_a_release_build_unless_asked() {
+        use std::ffi::OsStr;
+
+        assert!(log_enabled(true, None), "a debug build logs");
+        assert!(
+            log_enabled(true, Some(OsStr::new(""))),
+            "an empty value changes nothing in a debug build"
+        );
+        assert!(
+            log_enabled(false, Some(OsStr::new("1"))),
+            "PLO_LOG brings the log back in a release build"
+        );
+        assert!(
+            !log_enabled(false, None),
+            "a release build is silent by default"
+        );
+        assert!(
+            !log_enabled(false, Some(OsStr::new(""))),
+            "an empty PLO_LOG is not a request"
+        );
     }
 }

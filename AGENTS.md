@@ -715,7 +715,10 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   that never draws a window. **Any `return` on a tray error path needs one of
   the two** — a bare `return` is invisible forever. The tray also logs a
   heartbeat, because a wedged loop and a feature that was never written look
-  identical from outside.
+  identical from outside. **A release build writes nothing unless `PLO_LOG` is
+  set** (`log_enabled`; a debug build logs as before), so the "one of the two"
+  rule has a release reading: a log line is silent for an ordinary install, and
+  anything the user must see has to be a `fatal`.
 - The launch matrix is `should_start(me, missing)`, tested over all nine cells:
   a process never starts itself, the renderer starts nothing, the tray does not
   open the window on its own, and everything else missing gets started. It is a

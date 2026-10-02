@@ -23,10 +23,11 @@
 - Closing the Config window leaves the tray running. That is intended: the tray
   is the app, and a window should not take it down with it. To stop everything,
   use the tray's **Exit**.
-- If something goes wrong, `pinglatencyoverlay.log` is written beside your
-  config, and a failure that stops the tray from starting at all also puts up a
-  message box, because the tray is the one part of this app with no window of
-  its own.
+- If something goes wrong, a log is written beside your config when one is
+  asked for — a development build writes it always, a released build only when
+  the `PLO_LOG` environment variable is set — and a failure that stops the tray
+  from starting at all also puts up a message box, because the tray is the one
+  part of this app with no window of its own.
 - Starting the app starts the renderer. If one is already running — because you
   closed the tray, or launched the Config window directly — the caller attaches
   to it instead of starting a second.
