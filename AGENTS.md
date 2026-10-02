@@ -105,6 +105,10 @@ Installer (run from the repository root):
 - `.\scripts\build-nsis.ps1 -Arch arm64` — build the ARM64 installer after
   building the ARM64 release exe
 
+Capture (run from the repository root):
+- `.\scripts\capture-app.ps1` — run the app against a sandboxed config and
+  photograph the Config window and every overlay; see *Workflow*
+
 ## Workflow
 - **Measure layout, don't deduce it.** Reading the code and checking arithmetic
   against constants shipped three layout bugs in a row. Lay the real thing out
@@ -144,7 +148,11 @@ Installer (run from the repository root):
   drive `frame_ui` and deliberately not `frame_logic`: reconnection and the
   `sync_*` methods talk to the machine. The tests module's `use super::{...}`
   is an explicit list, so a new helper or constant a test touches must be added
-  to it.
+  to it. **None of this reaches a release binary**: `for_test` is
+  `#[cfg(test)]`, so is the tests module, and production only ever calls
+  `build` with `attach: true` — the one release-visible piece of the seam is
+  that parameter. (The capture script is not shipped either; the installer
+  packs the three exes and the LICENSE.)
 - **A manifest that is both a workspace root and a package narrows plain
   `cargo test` to that package alone.** The split into `crates/core` made
   `cargo test` report 35 passed against a 94-test suite and exit 0, silently
