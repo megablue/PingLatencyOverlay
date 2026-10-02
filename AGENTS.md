@@ -864,6 +864,15 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
 - **The prefill is seeded by target id, not overlay id.** Seeding per overlay
   gives every host of a group the same fake latency curve, which looks like one
   host with a fat line — the exact thing grouping disambiguates.
+- **The prefill's shape is deliberate: a drifting baseline with jitter and
+  sparse spikes, not a wave, and its level is absolute milliseconds rather
+  than a fraction of the axis.** Real latency is not periodic, and the summed
+  sines this replaced read as a pacemaker; the fraction-of-the-axis version
+  that followed rested at a fifth to a third of a one-second axis, which reads
+  as a terrible connection on an overlay nobody is even probing yet, and said
+  something different on every scale. `the_cosmetic_prefill_is_jagged_rather_than_a_curve`
+  holds the shape (frequent direction changes, an attack larger than the old
+  smooth step) and `the_cosmetic_prefill_rests_at_a_healthy_latency` the level.
 - **`OverlayWindow.sample_generation` is the max across hosts, not one host's.**
   It answers "has the real graph started", and a group where one host answered
   has started; the others draw an empty line rather than a fake one.

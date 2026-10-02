@@ -470,31 +470,76 @@ fn draw_series(
 
 const PREFILL_MAX_SAMPLES: usize = 512;
 
+/// Draw the next value of a splitmix64 stream.
+fn prefill_step(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A uniform draw in `0.0..1.0` with 24 bits of resolution.
+fn prefill_unit(state: &mut u64) -> f32 {
+    (prefill_step(state) >> 40) as f32 / (1u64 << 24) as f32
+}
+
 /// Build a deterministic, plausible-looking cosmetic latency curve.
 ///
 /// Seeded from `seed` rather than from the overlay alone. With one target the
 /// overlay id is enough; with several, two targets sharing a curve would look
 /// like one host with a fat line, which is the thing a group exists to
 /// disambiguate.
+///
+/// Real latency is not a smooth wave: it drifts around a resting level, jitters
+/// from sample to sample, and now and then spikes and decays back. A pair of
+/// sines reads as a pacemaker, so the shape here is a random walk with jitter
+/// and sparse spike episodes, drawn from a seeded splitmix64 stream. The order
+/// of the draws is fixed so the series stays deterministic.
+///
+/// The level is in milliseconds, not a fraction of the axis. A fraction is
+/// relative to whatever scale the user chose, so the same generator read as a
+/// working connection on a 200 ms axis and as a congestion problem on a 1 s
+/// one; plausible latency is a property of the connection. The walk rests in
+/// the tens of milliseconds and spikes above that, clamped to the axis.
 pub fn cosmetic_prefill_values(config: &OverlayConfig, seed: &str) -> Vec<u32> {
     let count = config.window_seconds.max(1).min(PREFILL_MAX_SAMPLES as u32) as usize;
     let mut hasher = DefaultHasher::new();
     config.id.hash(&mut hasher);
     seed.hash(&mut hasher);
-    let phase = (hasher.finish() % 360) as f32 * (std::f32::consts::PI / 180.0);
+    let mut state = hasher.finish();
     let max_y = config.max_y_ms.max(1) as f32;
 
+    let mut baseline = 12.0 + prefill_unit(&mut state) * 18.0;
+    let mut spike_left = 0usize;
+    let mut spike_level = 0.0f32;
+
     (0..count)
-        .map(|index| {
-            let t = if count <= 1 {
-                0.0
+        .map(|_| {
+            // A slow, mean-reverting drift around the resting level.
+            baseline = (baseline + (prefill_unit(&mut state) - 0.5) * 2.0).clamp(5.0, 45.0);
+            let jitter = (prefill_unit(&mut state) - 0.5) * 6.0;
+            if spike_left == 0 && prefill_unit(&mut state) < 0.07 {
+                if prefill_unit(&mut state) < 0.12 {
+                    // A long episode: sustained, gentler, decaying.
+                    spike_left = 8 + (prefill_unit(&mut state) * 12.0) as usize;
+                    spike_level = 8.0 + prefill_unit(&mut state) * 25.0;
+                } else {
+                    // A short episode: one to three samples, sharper.
+                    spike_left = 1 + (prefill_unit(&mut state) * 3.0) as usize;
+                    spike_level = 15.0 + prefill_unit(&mut state) * 115.0;
+                }
+            }
+            let spike = if spike_left > 0 {
+                let level = spike_level;
+                spike_left -= 1;
+                spike_level *= 0.7;
+                level
             } else {
-                index as f32 / (count - 1) as f32
+                0.0
             };
-            let wave = (t * std::f32::consts::TAU * 1.5 + phase).sin();
-            let detail = (t * std::f32::consts::TAU * 4.0 + phase * 0.37).sin();
-            let normalized = (0.38 + wave * 0.14 + detail * 0.05).clamp(0.05, 0.85);
-            (normalized * max_y).round().max(1.0) as u32
+            let value = (baseline + jitter + spike).clamp(1.0, max_y);
+            value.round() as u32
         })
         .collect()
 }
@@ -1133,6 +1178,68 @@ mod tests {
         assert_eq!(first, second);
         assert!(!first.is_empty());
         assert!(first.iter().all(|value| (1..=1_000).contains(value)));
+    }
+
+    /// The prefill has to look measured, not generated.
+    ///
+    /// The pair of sines this replaced changed direction about a dozen times
+    /// across a minute and never moved more than ~4% of the axis in one
+    /// sample; both numbers are what made it read as a pacemaker. The walk
+    /// with jitter and spikes should flip sign far more often than that, and
+    /// a spike's attack has to clear the old generator's biggest step.
+    #[test]
+    fn the_cosmetic_prefill_is_jagged_rather_than_a_curve() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 60;
+        config.max_y_ms = 1_000;
+        let values = cosmetic_prefill_values(&config, "t");
+
+        let deltas: Vec<i64> = values
+            .windows(2)
+            .map(|pair| pair[1] as i64 - pair[0] as i64)
+            .collect();
+        let flips = deltas
+            .windows(2)
+            .filter(|pair| (pair[0] > 0) != (pair[1] > 0))
+            .count();
+        assert!(
+            flips * 3 >= deltas.len(),
+            "the prefill changed direction {flips} times across {} deltas; a smooth curve \
+             flips far less often",
+            deltas.len()
+        );
+
+        let largest_step = deltas
+            .iter()
+            .map(|delta| delta.unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            largest_step >= 60,
+            "the largest single-sample jump was {largest_step} of 1000, too little to read \
+             as a spike"
+        );
+    }
+
+    /// The resting level has to read as a healthy connection.
+    ///
+    /// Drawn as a fraction of the axis, the generator rested at a fifth to a
+    /// third of a one-second axis — 200 to 320 ms — which looks like a problem
+    /// before a single real sample arrives. The level is absolute milliseconds
+    /// for exactly this reason; the fraction is only what gets drawn.
+    #[test]
+    fn the_cosmetic_prefill_rests_at_a_healthy_latency() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 60;
+        config.max_y_ms = 1_000;
+        let mut values = cosmetic_prefill_values(&config, "t");
+        values.sort_unstable();
+        let median = values[values.len() / 2];
+        assert!(
+            median <= 60,
+            "the middle value was {median} ms against a 1 s axis; that reads as a bad \
+             connection"
+        );
     }
 
     #[test]
