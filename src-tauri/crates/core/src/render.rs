@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tiny_skia::{IntSize, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::border::{self, BorderVisual};
-use crate::config::OverlayConfig;
+use crate::config::{OverlayConfig, MAX_LINE_STROKE_PX, MIN_LINE_STROKE_PX};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SamplePoint {
@@ -127,12 +127,12 @@ pub fn render_series_into_with_border(
 
 /// The room the underglow needs past the zero line, in physical pixels.
 ///
-/// The deepest cast layer reaches the radius plus half the 1.5px core past the
-/// line's centre, and antialiasing spends about half a pixel more; the axis's
-/// own 2px pad already covers part of that, so the window reserves one pixel
-/// past the radius. It is added to the window's short dimension rather than
-/// taken out of the axis, so `graphHeightPx` keeps naming the visible height
-/// of the graph.
+/// The deepest cast layer reaches the radius past the line's edge, and
+/// antialiasing spends about half a pixel more. The axis's own pad already
+/// carries the stroke's half-width plus half a pixel for that (`stroke_pad`),
+/// so the reserve is the radius plus one, whatever the stroke is. It is added
+/// to the window's short dimension rather than taken out of the axis, so
+/// `graphHeightPx` keeps naming the visible height of the graph.
 ///
 /// The window sizing in `overlay::layout_in_rect` and the inset inside
 /// `render_graph_into_internal` both read this function, so the box and the
@@ -146,6 +146,17 @@ pub fn line_glow_reserve_px(config: &OverlayConfig) -> u32 {
     } else {
         0
     }
+}
+
+/// The pad the axis keeps from the window edge for the stroke.
+///
+/// A stroke is centred on its path, so a line clamped to the top or bottom of
+/// the axis reaches half a stroke past it, plus the usual half pixel of
+/// antialiasing. The default 1.5px stroke keeps the historic 2px pad; a
+/// thicker one grows the pad rather than letting the pixmap edge slice the
+/// line flat.
+fn stroke_pad(stroke_width: f32) -> f32 {
+    (stroke_width / 2.0 + 0.5).max(2.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,7 +215,12 @@ fn render_graph_into_internal(
     let step = long_px / visible_samples as f32;
 
     let y_max = config.max_y_ms.max(1) as f32;
-    let pad = 2.0;
+    // One stroke for the whole overlay: every host line, the startup prefill
+    // and the timeout markers draw with it, so the width is read once here.
+    let stroke_width = config
+        .line_stroke_px
+        .clamp(MIN_LINE_STROKE_PX, MAX_LINE_STROKE_PX);
+    let pad = stroke_pad(stroke_width);
     let top = pad;
     // The cast falls past the zero line, so the window reserves a band for it:
     // the axis keeps its configured height and the glow gets the room below.
@@ -254,7 +270,7 @@ fn render_graph_into_internal(
     }
 
     let stroke = Stroke {
-        width: 1.5,
+        width: stroke_width,
         ..Stroke::default()
     };
 
@@ -783,7 +799,9 @@ pub fn parse_hex_color(value: &str, fallback: [u8; 3]) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::OverlayConfig;
+    use crate::config::{
+        OverlayConfig, DEFAULT_LINE_STROKE_PX, MAX_LINE_STROKE_PX, MIN_LINE_STROKE_PX,
+    };
 
     fn render_graph(
         width: u32,
@@ -1602,6 +1620,109 @@ mod tests {
         assert!(
             deepest >= height - 3,
             "the marker stopped at row {deepest}; the canvas is {height} tall"
+        );
+    }
+
+    /// The pad that keeps a stroke off the pixmap edge: exactly the old 2px at
+    /// the default width, growing by half the extra stroke.
+    #[test]
+    fn the_stroke_pad_keeps_the_default_and_grows_with_the_stroke() {
+        assert_eq!(stroke_pad(MIN_LINE_STROKE_PX), 2.0);
+        assert_eq!(stroke_pad(DEFAULT_LINE_STROKE_PX), 2.0);
+        assert_eq!(stroke_pad(MAX_LINE_STROKE_PX), 3.5);
+    }
+
+    /// A wider stroke draws a wider line: the count of rows the line covers in
+    /// one column follows the setting.
+    #[test]
+    fn a_thicker_stroke_draws_a_thicker_line() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let now = Instant::now();
+        let samples = samples(&[Some(500); 40]);
+        let rows_at = |config: &OverlayConfig| {
+            let pixels = render_graph(300, 100, config, &samples, now, false).expect("pixmap");
+            let rows: std::collections::BTreeSet<usize> =
+                positions_of_color(&pixels, 300, [0, 255, 0])
+                    .into_iter()
+                    .filter(|(_, column)| *column == 150)
+                    .map(|(row, _)| row)
+                    .collect();
+            rows.len()
+        };
+
+        let thin = rows_at(&config);
+        assert!(
+            (2..=3).contains(&thin),
+            "a 1.5px stroke covered {thin} rows in one column"
+        );
+        config.line_stroke_px = 5.0;
+        let thick = rows_at(&config);
+        assert!(
+            thick >= 5,
+            "a 5px stroke only covered {thick} rows in one column"
+        );
+    }
+
+    /// The timeout markers are stroked with the same width as the lines.
+    #[test]
+    fn timeout_markers_follow_the_stroke_width() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
+        let now = Instant::now();
+        let samples = samples(&[None]);
+        let columns_at_row = |config: &OverlayConfig| {
+            let pixels = render_graph(300, 100, config, &samples, now, false).expect("pixmap");
+            positions_of_color(&pixels, 300, [255, 0, 0])
+                .into_iter()
+                .filter(|(row, _)| *row == 50)
+                .count()
+        };
+
+        let thin = columns_at_row(&config);
+        assert!(
+            (1..=3).contains(&thin),
+            "a 1.5px marker covered {thin} columns in one row"
+        );
+        config.line_stroke_px = 5.0;
+        let thick = columns_at_row(&config);
+        assert!(
+            thick >= 5,
+            "a 5px marker only covered {thick} columns in one row"
+        );
+    }
+
+    /// A thick stroke clamped to the ceiling or resting on the zero line is not
+    /// sliced by the pixmap edge: the outermost row it reaches keeps its
+    /// antialiased half coverage instead of a hard cut.
+    #[test]
+    fn a_thick_stroke_at_the_axis_edges_is_not_sliced() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.line_stroke_px = MAX_LINE_STROKE_PX;
+        let now = Instant::now();
+        let alpha_at = |pixels: &[u8], row: usize, column: usize| -> u8 {
+            pixels[(row * 300 + column) * 4 + 3]
+        };
+
+        // Clamped at the ceiling.
+        let pixels = render_graph(300, 100, &config, &samples(&[Some(1_000); 40]), now, false)
+            .expect("pixmap");
+        let top_alpha = alpha_at(&pixels, 0, 150);
+        assert!(
+            top_alpha < 200,
+            "the top row is {top_alpha} opaque; the line was sliced flat"
+        );
+
+        // Resting on the zero line.
+        let pixels =
+            render_graph(300, 100, &config, &samples(&[Some(0); 40]), now, false).expect("pixmap");
+        let bottom_alpha = alpha_at(&pixels, 99, 150);
+        assert!(
+            (1..200).contains(&bottom_alpha),
+            "the bottom row is {bottom_alpha} opaque; the line was clipped"
         );
     }
 

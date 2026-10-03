@@ -71,6 +71,12 @@ pub const DEFAULT_LINE_GLOW_RADIUS_PX: u32 = 30;
 pub const MIN_LINE_GLOW_RADIUS_PX: u32 = 2;
 /// Largest accepted underglow reach, in physical pixels.
 pub const MAX_LINE_GLOW_RADIUS_PX: u32 = 50;
+/// Default width every line and timeout marker is stroked with, in pixels.
+pub const DEFAULT_LINE_STROKE_PX: f32 = 1.5;
+/// Smallest accepted stroke width, in pixels.
+pub const MIN_LINE_STROKE_PX: f32 = 0.5;
+/// Largest accepted stroke width, in pixels.
+pub const MAX_LINE_STROKE_PX: f32 = 6.0;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -189,6 +195,15 @@ pub struct OverlayConfig {
     /// Background opacity, 0 (transparent) to 100 (opaque).
     #[serde(default = "default_bg_opacity")]
     pub bg_opacity: u32,
+    /// Width every line and timeout marker is stroked with, in pixels.
+    ///
+    /// One value for the whole overlay: the host lines, the startup prefill
+    /// and the timeout markers all read it, so a group of hosts cannot end up
+    /// with lines of different weights. The axis pads itself by half the
+    /// stroke, so a thick line resting on the zero line or clamped at the
+    /// ceiling is not sliced by the window edge.
+    #[serde(default = "default_line_stroke_px")]
+    pub line_stroke_px: f32,
     /// Draw a soft cast under every line, in that line's own colour.
     ///
     /// The cast falls toward the zero line in the graph's own frame, so it
@@ -510,6 +525,7 @@ impl OverlayConfig {
             legacy_margin_px: None,
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
+            line_stroke_px: default_line_stroke_px(),
             line_glow: true,
             line_glow_intensity: default_line_glow_intensity(),
             line_glow_radius_px: default_line_glow_radius_px(),
@@ -636,6 +652,9 @@ fn default_bg_color() -> String {
 }
 fn default_bg_opacity() -> u32 {
     DEFAULT_BG_OPACITY
+}
+fn default_line_stroke_px() -> f32 {
+    DEFAULT_LINE_STROKE_PX
 }
 fn default_line_glow_intensity() -> u32 {
     DEFAULT_LINE_GLOW_INTENSITY
@@ -774,6 +793,15 @@ impl Config {
                 o.orientation = 0;
             }
             o.bg_opacity = o.bg_opacity.min(100);
+            // A hand-edited `1e999` parses as an infinity and an infinity would
+            // poison every transform it reaches; anything that is not a real
+            // number settles at the default before the clamp.
+            o.line_stroke_px = if o.line_stroke_px.is_finite() {
+                o.line_stroke_px
+                    .clamp(MIN_LINE_STROKE_PX, MAX_LINE_STROKE_PX)
+            } else {
+                DEFAULT_LINE_STROKE_PX
+            };
             o.line_glow_intensity = o
                 .line_glow_intensity
                 .clamp(MIN_LINE_GLOW_INTENSITY, MAX_LINE_GLOW_INTENSITY);
@@ -2139,6 +2167,7 @@ mod tests {
         assert_eq!(overlay.horizontal_margin_px, 0);
         assert_eq!(overlay.vertical_margin_px, 0);
         assert_eq!(overlay.bg_opacity, 0);
+        assert_eq!(overlay.line_stroke_px, DEFAULT_LINE_STROKE_PX);
         assert!(overlay.line_glow);
         assert_eq!(overlay.line_glow_intensity, DEFAULT_LINE_GLOW_INTENSITY);
         assert_eq!(overlay.line_glow_radius_px, DEFAULT_LINE_GLOW_RADIUS_PX);
@@ -2173,6 +2202,40 @@ mod tests {
             config.overlays[0].line_glow_radius_px,
             MIN_LINE_GLOW_RADIUS_PX
         );
+    }
+
+    /// The stroke width is the old fixed 1.5px for every profile written
+    /// before the setting existed, and a value pushed out of range settles at
+    /// an end. A non-finite one settles at the default rather than a limit:
+    /// it would poison every transform it reached.
+    #[test]
+    fn line_stroke_defaults_and_clamps_to_its_limits() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert_eq!(overlay.line_stroke_px, DEFAULT_LINE_STROKE_PX);
+
+        let mut config = Config {
+            overlays: vec![
+                OverlayConfig {
+                    line_stroke_px: 99.0,
+                    ..OverlayConfig::new()
+                },
+                OverlayConfig {
+                    line_stroke_px: 0.0,
+                    ..OverlayConfig::new()
+                },
+                OverlayConfig {
+                    line_stroke_px: f32::INFINITY,
+                    ..OverlayConfig::new()
+                },
+            ],
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(config.overlays[0].line_stroke_px, MAX_LINE_STROKE_PX);
+        assert_eq!(config.overlays[1].line_stroke_px, MIN_LINE_STROKE_PX);
+        assert_eq!(config.overlays[2].line_stroke_px, DEFAULT_LINE_STROKE_PX);
     }
 
     #[test]

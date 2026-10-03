@@ -124,6 +124,10 @@
   - Mirror: on/off; combines with any orientation.
   - Line color: configurable.
   - Timeout color: configurable, default red.
+  - Line width (`lineStrokePx`, 0.5–6 px, default 1.5): one stroke width for
+    every host line, the startup prefill and the timeout markers. A thick line
+    is not sliced by the overlay edge: the graph pads itself for it, so a line
+    resting on the zero line or clamped at the ceiling keeps its full width.
   - Background color (`bgColor`, default `#0f172a`) and opacity (`bgOpacity`,
     0–100, default 0 = fully transparent), drawn behind the graph and not
     rotated with it.
@@ -213,7 +217,7 @@
 - What belongs to the **group** is the appearance of the window and the plot —
   orientation, mirror, time window, scale, smoothing, the startup prefill and
   border, graph height, latency ceiling, position, offsets, monitor, background
-  colour and opacity, line glow.
+  colour and opacity, line width, line glow.
 - What belongs to a **host** is the probe itself and the two colours that
   identify its line: protocol, target, port, timeout, line colour and timeout
   colour. A host can also be switched off without being deleted.

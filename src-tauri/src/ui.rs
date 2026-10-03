@@ -6146,6 +6146,26 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
+                ui.label("Stroke width")
+                    .on_hover_text("Width of every line and of the timeout markers.");
+                let mut stroke_width = overlay.line_stroke_px;
+                if ui
+                    .add(
+                        egui::Slider::new(
+                            &mut stroke_width,
+                            config::MIN_LINE_STROKE_PX..=config::MAX_LINE_STROKE_PX,
+                        )
+                        .suffix(" px")
+                        .step_by(0.5),
+                    )
+                    .changed()
+                {
+                    overlay.line_stroke_px =
+                        stroke_width.clamp(config::MIN_LINE_STROKE_PX, config::MAX_LINE_STROKE_PX);
+                    *changed = true;
+                }
+                ui.end_row();
+
                 ui.label("Line glow").on_hover_text(
                     "Cast a soft glow under each line, in the line's own colour.\n\
                      The glow rotates with the graph and the box reserves room \

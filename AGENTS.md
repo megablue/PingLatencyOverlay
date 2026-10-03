@@ -1057,6 +1057,14 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   cast, then every marker, then every series' core: a glow over a marker would
   tint it into the glow, while a core still lands on top of a marker it crosses
   and no glow can tint an earlier host's line where two cross.
+- **The stroke width is one read for every line, and the pad follows it.**
+  `render_graph_into_internal` builds one `Stroke` from `lineStrokePx` and hands
+  it to the lines and to the timeout markers alike. `stroke_pad` —
+  `(width / 2 + 0.5).max(2)` — keeps the pixmap edge from slicing a thick line
+  clamped to the ceiling or resting on the zero line; at the default 1.5px it is
+  exactly the old 2px. The cast's layers already start at the core's half-width
+  (`stroke.width / 2.0`), so a thicker line's glow starts at its edge and the
+  reserve stays `radius + 1`.
 - Graph orientation, timeout marks, the X and Y axes and the work-area
   positioning rules are behavior and live in `docs/SPEC.md`; do not restate them
   here.
