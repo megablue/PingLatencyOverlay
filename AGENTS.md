@@ -1044,6 +1044,19 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
 - `ProbeManager::apply_config` must not restart all tasks for a style-only Save.
   Existing tasks read shared settings each tick; only deleted/disabled overlays
   are stopped. This keeps Save from pausing the graph.
+- **The underglow is cast in the graph's own frame, and one function owns its
+  room.** `line_glow_reserve_px` is read both by `overlay::layout_in_rect`,
+  which grows the window's short dimension, and by `render_graph_into_internal`,
+  which insets `bottom` by the same amount, so the box and the drawing cannot
+  disagree about the band past the zero line and the axis keeps the height
+  `graphHeightPx` names. The cast direction is `glow_direction`, the image of
+  the graph's +Y basis under the same rotation and mirror as `transform_point`
+  (they share `rotation`), because screen-down would smear a 90°/270° overlay's
+  cast along the time axis. Timeout markers end at the canvas edge rather than
+  at `bottom`, so they run through that band. The draw order is every series'
+  cast, then every marker, then every series' core: a glow over a marker would
+  tint it into the glow, while a core still lands on top of a marker it crosses
+  and no glow can tint an earlier host's line where two cross.
 - Graph orientation, timeout marks, the X and Y axes and the work-area
   positioning rules are behavior and live in `docs/SPEC.md`; do not restate them
   here.

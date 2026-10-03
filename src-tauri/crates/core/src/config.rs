@@ -59,6 +59,18 @@ pub const MAX_MARGIN_OFFSET_PX: i32 = 10_000;
 pub const DEFAULT_BG_COLOR: &str = "#0f172a";
 /// Default overlay background opacity (0 = fully transparent).
 pub const DEFAULT_BG_OPACITY: u32 = 0;
+/// Default strength of the underglow cast below each line, in percent.
+pub const DEFAULT_LINE_GLOW_INTENSITY: u32 = 10;
+/// Smallest accepted underglow strength, in percent (0 = invisible).
+pub const MIN_LINE_GLOW_INTENSITY: u32 = 0;
+/// Largest accepted underglow strength, in percent.
+pub const MAX_LINE_GLOW_INTENSITY: u32 = 100;
+/// Default distance the underglow reaches past a line, in physical pixels.
+pub const DEFAULT_LINE_GLOW_RADIUS_PX: u32 = 30;
+/// Smallest accepted underglow reach, in physical pixels.
+pub const MIN_LINE_GLOW_RADIUS_PX: u32 = 2;
+/// Largest accepted underglow reach, in physical pixels.
+pub const MAX_LINE_GLOW_RADIUS_PX: u32 = 50;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -177,6 +189,23 @@ pub struct OverlayConfig {
     /// Background opacity, 0 (transparent) to 100 (opaque).
     #[serde(default = "default_bg_opacity")]
     pub bg_opacity: u32,
+    /// Draw a soft cast under every line, in that line's own colour.
+    ///
+    /// The cast falls toward the zero line in the graph's own frame, so it
+    /// rotates and mirrors with the overlay. The window reserves room past
+    /// the zero line for it — `line_glow_reserve_px` is the one statement of
+    /// how much — so a glowing line on the zero line is not sliced flat by
+    /// the window edge. `new()` turns this on, while an absent key reads as
+    /// off, so a profile written before the setting existed does not start
+    /// glowing on its own.
+    #[serde(default)]
+    pub line_glow: bool,
+    /// Strength of the underglow, 0 to 100.
+    #[serde(default = "default_line_glow_intensity")]
+    pub line_glow_intensity: u32,
+    /// How far the underglow reaches past a line, in physical pixels.
+    #[serde(default = "default_line_glow_radius_px")]
+    pub line_glow_radius_px: u32,
     /// The display this overlay belongs to, as a Win32 device name
     /// (`\\.\DISPLAY2`), or `None` to follow the primary monitor.
     ///
@@ -481,6 +510,9 @@ impl OverlayConfig {
             legacy_margin_px: None,
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
+            line_glow: true,
+            line_glow_intensity: default_line_glow_intensity(),
+            line_glow_radius_px: default_line_glow_radius_px(),
             monitor_device: None,
             display_mode: DisplayMode::Global,
             sticky_target: None,
@@ -604,6 +636,12 @@ fn default_bg_color() -> String {
 }
 fn default_bg_opacity() -> u32 {
     DEFAULT_BG_OPACITY
+}
+fn default_line_glow_intensity() -> u32 {
+    DEFAULT_LINE_GLOW_INTENSITY
+}
+fn default_line_glow_radius_px() -> u32 {
+    DEFAULT_LINE_GLOW_RADIUS_PX
 }
 
 fn anchor_has_horizontal_edge(anchor: Anchor) -> bool {
@@ -736,6 +774,12 @@ impl Config {
                 o.orientation = 0;
             }
             o.bg_opacity = o.bg_opacity.min(100);
+            o.line_glow_intensity = o
+                .line_glow_intensity
+                .clamp(MIN_LINE_GLOW_INTENSITY, MAX_LINE_GLOW_INTENSITY);
+            o.line_glow_radius_px = o
+                .line_glow_radius_px
+                .clamp(MIN_LINE_GLOW_RADIUS_PX, MAX_LINE_GLOW_RADIUS_PX);
             // A blank name is not a monitor. Left alone it would name a display
             // that does not exist and the overlay would stay hidden with no
             // way to tell from the screen that it had been asked for.
@@ -2095,6 +2139,40 @@ mod tests {
         assert_eq!(overlay.horizontal_margin_px, 0);
         assert_eq!(overlay.vertical_margin_px, 0);
         assert_eq!(overlay.bg_opacity, 0);
+        assert!(overlay.line_glow);
+        assert_eq!(overlay.line_glow_intensity, DEFAULT_LINE_GLOW_INTENSITY);
+        assert_eq!(overlay.line_glow_radius_px, DEFAULT_LINE_GLOW_RADIUS_PX);
+    }
+
+    /// The underglow is off for every profile written before it existed, and
+    /// the two numbers the UI can push beyond their range settle at the ends.
+    #[test]
+    fn line_glow_defaults_off_and_clamps_to_its_limits() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert!(!overlay.line_glow);
+        assert_eq!(overlay.line_glow_intensity, DEFAULT_LINE_GLOW_INTENSITY);
+        assert_eq!(overlay.line_glow_radius_px, DEFAULT_LINE_GLOW_RADIUS_PX);
+
+        let mut config = Config {
+            overlays: vec![OverlayConfig {
+                line_glow: true,
+                line_glow_intensity: 5_000,
+                line_glow_radius_px: 0,
+                ..OverlayConfig::new()
+            }],
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(
+            config.overlays[0].line_glow_intensity,
+            MAX_LINE_GLOW_INTENSITY
+        );
+        assert_eq!(
+            config.overlays[0].line_glow_radius_px,
+            MIN_LINE_GLOW_RADIUS_PX
+        );
     }
 
     #[test]

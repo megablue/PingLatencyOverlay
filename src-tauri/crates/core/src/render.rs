@@ -125,6 +125,29 @@ pub fn render_series_into_with_border(
     render_graph_into_internal(width, height, config, series, now, smooth, border, pixels)
 }
 
+/// The room the underglow needs past the zero line, in physical pixels.
+///
+/// The deepest cast layer reaches the radius plus half the 1.5px core past the
+/// line's centre, and antialiasing spends about half a pixel more; the axis's
+/// own 2px pad already covers part of that, so the window reserves one pixel
+/// past the radius. It is added to the window's short dimension rather than
+/// taken out of the axis, so `graphHeightPx` keeps naming the visible height
+/// of the graph.
+///
+/// The window sizing in `overlay::layout_in_rect` and the inset inside
+/// `render_graph_into_internal` both read this function, so the box and the
+/// drawing cannot disagree about how much room the cast has.
+///
+/// Zero when the glow is off: an overlay without it is sized exactly as it
+/// always was.
+pub fn line_glow_reserve_px(config: &OverlayConfig) -> u32 {
+    if config.line_glow {
+        config.line_glow_radius_px + 1
+    } else {
+        0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_graph_into_internal(
     width: u32,
@@ -183,7 +206,10 @@ fn render_graph_into_internal(
     let y_max = config.max_y_ms.max(1) as f32;
     let pad = 2.0;
     let top = pad;
-    let bottom = short_px - pad;
+    // The cast falls past the zero line, so the window reserves a band for it:
+    // the axis keeps its configured height and the glow gets the room below.
+    let reserve = line_glow_reserve_px(config) as f32;
+    let bottom = short_px - pad - reserve;
     let map_y = |value: u32| {
         let t = (value as f32).min(y_max) / y_max;
         bottom - t * (bottom - top)
@@ -232,8 +258,64 @@ fn render_graph_into_internal(
         ..Stroke::default()
     };
 
-    // Timeout markers first, all series, so a line drawn afterwards sits on top
-    // of them rather than being cut by one.
+    // The prefill colour is shared by every target: it is the overlay's
+    // cosmetic line colour, and one muted colour for the whole reveal reads as
+    // one event rather than as N unrelated fake graphs.
+    let mut prefill_line_paint = Paint::default();
+    let [prefill_r, prefill_g, prefill_b] =
+        parse_hex_color(&config.prefill_line_color, [100, 116, 139]);
+    prefill_line_paint.set_color_rgba8(prefill_r, prefill_g, prefill_b, 255);
+
+    // The cast runs from each line toward the zero line in the graph's own
+    // frame, so it rotates and mirrors with the graph. Its layers use the
+    // segment's own colour, which is why `draw_series` gets the colour bytes
+    // beside each paint.
+    let glow = config.line_glow.then(|| LineGlow {
+        radius: config.line_glow_radius_px as f32,
+        intensity: config.line_glow_intensity.min(100) as f32 / 100.0,
+        dir: glow_direction(config.orientation, config.mirrored),
+    });
+
+    // One pass over every series. A glowing overlay calls it twice — all casts,
+    // then all cores — so a later host's translucent glow cannot tint an
+    // earlier host's line where the two cross.
+    let draw_lines = |pixmap: &mut Pixmap, pass: LinePass| {
+        for entry in series {
+            let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+            if samples.is_empty() {
+                continue;
+            }
+            let mut real_line_paint = Paint::default();
+            let [r, g, b] = parse_hex_color(entry.line_color, [74, 222, 128]);
+            real_line_paint.set_color_rgba8(r, g, b, 255);
+            draw_series(
+                pixmap,
+                samples,
+                entry.max_sample_gap,
+                &real_line_paint,
+                [r, g, b],
+                &prefill_line_paint,
+                [prefill_r, prefill_g, prefill_b],
+                &stroke,
+                &map_x,
+                &map_y,
+                long_px,
+                short_px,
+                config.orientation,
+                config.mirrored,
+                glow.as_ref(),
+                pass,
+            );
+        }
+    };
+
+    // Casts first, then the markers, then the cores. A marker spans the whole
+    // canvas, through the cast's reserved band, so it is drawn over the casts —
+    // a glow laid over it would tint it into the glow. The cores come last,
+    // which keeps the old rule that a line sits on top of a marker it crosses.
+    if glow.is_some() {
+        draw_lines(&mut pixmap, LinePass::Glow);
+    }
     for entry in series {
         // A target that has never responded draws nothing. An empty slice would
         // otherwise contribute a marker at every x if this were expressed as a
@@ -258,8 +340,10 @@ fn render_graph_into_internal(
                     config.orientation,
                     config.mirrored,
                 );
+                // The far end is the canvas edge, not the zero line: the band
+                // the cast reserves below y0 is part of the marker's height.
                 let end = transform_point(
-                    (x, bottom),
+                    (x, short_px - pad),
                     long_px,
                     short_px,
                     config.orientation,
@@ -273,43 +357,91 @@ fn render_graph_into_internal(
             pixmap.stroke_path(&path, &timeout_paint, &stroke, Transform::identity(), None);
         }
     }
-
-    // The prefill colour is shared by every target: it is the overlay's
-    // cosmetic line colour, and one muted colour for the whole reveal reads as
-    // one event rather than as N unrelated fake graphs.
-    let mut prefill_line_paint = Paint::default();
-    let [r, g, b] = parse_hex_color(&config.prefill_line_color, [100, 116, 139]);
-    prefill_line_paint.set_color_rgba8(r, g, b, 255);
-
-    for entry in series {
-        let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
-        if samples.is_empty() {
-            continue;
-        }
-        let mut real_line_paint = Paint::default();
-        let [r, g, b] = parse_hex_color(entry.line_color, [74, 222, 128]);
-        real_line_paint.set_color_rgba8(r, g, b, 255);
-        draw_series(
-            &mut pixmap,
-            samples,
-            entry.max_sample_gap,
-            &real_line_paint,
-            &prefill_line_paint,
-            &stroke,
-            &map_x,
-            &map_y,
-            long_px,
-            short_px,
-            config.orientation,
-            config.mirrored,
-        );
-    }
+    draw_lines(&mut pixmap, LinePass::Core);
 
     if let Some(border) = border {
         border::draw_border(&mut pixmap, width, height, border);
     }
     *pixels = pixmap.take();
     true
+}
+
+/// One overlay's resolved underglow.
+struct LineGlow {
+    /// How far the cast reaches past the line's centre, in pixels.
+    radius: f32,
+    /// Strength as a fraction of full opacity.
+    intensity: f32,
+    /// Unit direction of the cast, in window coordinates.
+    dir: (f32, f32),
+}
+
+/// Which half of a line a pass draws.
+///
+/// A glowing overlay is drawn in two passes over every series — all casts,
+/// then all cores — so a later host's translucent glow cannot tint an earlier
+/// host's line where the two cross.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinePass {
+    Glow,
+    Core,
+}
+
+/// The number of nested strokes a cast is drawn with.
+///
+/// One per pixel of reach reads as a gradient, so the lower cap keeps a small
+/// radius from collapsing into one hard band and the upper one keeps the
+/// widest casts to bands under two pixels instead of a stack of stripes.
+fn glow_layer_count(radius: f32) -> usize {
+    (radius.round() as usize).clamp(3, 64)
+}
+
+/// Stroke one finished run of a line: its core, or one layer of its cast.
+///
+/// A cast layer is the same path stroked wider and translated by half that
+/// width along `glow.dir`, which puts the layer's back edge exactly on the
+/// line; the core covers that edge, so nothing shows above the line. The
+/// layers nest with falling alphas, which reads as one soft gradient below it.
+fn stroke_run(
+    pixmap: &mut Pixmap,
+    path: &tiny_skia::Path,
+    paint: &Paint,
+    rgb: [u8; 3],
+    stroke: &Stroke,
+    glow: Option<&LineGlow>,
+    pass: LinePass,
+) {
+    if pass == LinePass::Core {
+        pixmap.stroke_path(path, paint, stroke, Transform::identity(), None);
+        return;
+    }
+    let Some(glow) = glow else {
+        return;
+    };
+    if glow.intensity <= 0.0 {
+        return;
+    }
+    let layers = glow_layer_count(glow.radius);
+    let core_half = stroke.width / 2.0;
+    for index in 1..=layers {
+        // Reach of this layer past the line: the core's half-width plus its
+        // share of the radius.
+        let width = core_half + glow.radius * index as f32 / layers as f32;
+        let t = 1.0 - (index as f32 - 0.5) / layers as f32;
+        let alpha = (glow.intensity * 255.0 * t * t).round().clamp(0.0, 255.0) as u8;
+        if alpha == 0 {
+            continue;
+        }
+        let mut layer_paint = Paint::default();
+        layer_paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], alpha);
+        let layer_stroke = Stroke {
+            width,
+            ..stroke.clone()
+        };
+        let offset = width / 2.0;
+        let transform = Transform::from_translate(glow.dir.0 * offset, glow.dir.1 * offset);
+        pixmap.stroke_path(path, &layer_paint, &layer_stroke, transform, None);
+    }
 }
 
 /// Stroke one target's line, breaking it at timeouts, data gaps and prefill
@@ -325,7 +457,9 @@ fn draw_series(
     samples: &[SamplePoint],
     max_sample_gap: Duration,
     real_line_paint: &Paint,
+    real_line_rgb: [u8; 3],
     prefill_line_paint: &Paint,
+    prefill_line_rgb: [u8; 3],
     stroke: &Stroke,
     map_x: &dyn Fn(usize, &SamplePoint) -> Option<f32>,
     map_y: &dyn Fn(u32) -> f32,
@@ -333,12 +467,14 @@ fn draw_series(
     short_px: f32,
     orientation: u16,
     mirrored: bool,
+    glow: Option<&LineGlow>,
+    pass: LinePass,
 ) {
-    let paint_for = |prefill: Option<bool>| {
+    let paint_for = |prefill: Option<bool>| -> (&Paint, [u8; 3]) {
         if prefill == Some(true) {
-            prefill_line_paint
+            (prefill_line_paint, prefill_line_rgb)
         } else {
-            real_line_paint
+            (real_line_paint, real_line_rgb)
         }
     };
 
@@ -364,13 +500,8 @@ fn draw_series(
         if gap {
             if in_segment {
                 if let Some(path) = segment.finish() {
-                    pixmap.stroke_path(
-                        &path,
-                        paint_for(segment_prefill),
-                        stroke,
-                        Transform::identity(),
-                        None,
-                    );
+                    let (paint, rgb) = paint_for(segment_prefill);
+                    stroke_run(pixmap, &path, paint, rgb, stroke, glow, pass);
                 }
                 segment = PathBuilder::new();
             }
@@ -381,13 +512,8 @@ fn draw_series(
         let Some(latency) = sample.value else {
             if in_segment {
                 if let Some(path) = segment.finish() {
-                    pixmap.stroke_path(
-                        &path,
-                        paint_for(segment_prefill),
-                        stroke,
-                        Transform::identity(),
-                        None,
-                    );
+                    let (paint, rgb) = paint_for(segment_prefill);
+                    stroke_run(pixmap, &path, paint, rgb, stroke, glow, pass);
                 }
                 segment = PathBuilder::new();
             }
@@ -403,13 +529,8 @@ fn draw_series(
             let previous_segment_prefill = segment_prefill;
             if in_segment {
                 if let Some(path) = segment.finish() {
-                    pixmap.stroke_path(
-                        &path,
-                        paint_for(previous_segment_prefill),
-                        stroke,
-                        Transform::identity(),
-                        None,
-                    );
+                    let (paint, rgb) = paint_for(previous_segment_prefill);
+                    stroke_run(pixmap, &path, paint, rgb, stroke, glow, pass);
                 }
                 segment = PathBuilder::new();
             }
@@ -426,13 +547,8 @@ fn draw_series(
                 connector.move_to(previous.0, previous.1);
                 connector.line_to(point.0, point.1);
                 if let Some(path) = connector.finish() {
-                    pixmap.stroke_path(
-                        &path,
-                        paint_for(previous_segment_prefill),
-                        stroke,
-                        Transform::identity(),
-                        None,
-                    );
+                    let (paint, rgb) = paint_for(previous_segment_prefill);
+                    stroke_run(pixmap, &path, paint, rgb, stroke, glow, pass);
                 }
                 segment.move_to(point.0, point.1);
             } else {
@@ -457,13 +573,8 @@ fn draw_series(
     }
     if in_segment {
         if let Some(path) = segment.finish() {
-            pixmap.stroke_path(
-                &path,
-                paint_for(segment_prefill),
-                stroke,
-                Transform::identity(),
-                None,
-            );
+            let (paint, rgb) = paint_for(segment_prefill);
+            stroke_run(pixmap, &path, paint, rgb, stroke, glow, pass);
         }
     }
 }
@@ -600,6 +711,31 @@ pub fn render_prefill_into(
     render_series_into_with_border(width, height, config, &series, now, true, border, pixels)
 }
 
+/// The rotation half of `transform_point`, shared with the underglow's cast
+/// direction so the two cannot disagree about which way the graph points.
+fn rotation(orientation: u16) -> (f32, f32) {
+    match orientation {
+        90 => (1.0, 0.0),
+        180 => (0.0, -1.0),
+        270 => (-1.0, 0.0),
+        _ => (0.0, 1.0),
+    }
+}
+
+/// The direction the underglow is cast in, in window coordinates.
+///
+/// The cast runs from the line toward the zero line in the graph's own frame:
+/// the image of the graph's +Y basis under the same rotation and mirror
+/// `transform_point` applies. Screen-down would be wrong the moment the
+/// overlay is rotated — at 90 and 270 degrees it would smear the cast along
+/// the time axis instead of under the line — so the direction rotates with
+/// the graph, and mirroring flips it exactly as it flips the graph.
+fn glow_direction(orientation: u16, mirrored: bool) -> (f32, f32) {
+    let (sin, cos) = rotation(orientation);
+    let sign = if mirrored { -1.0 } else { 1.0 };
+    (sin * sign, cos * sign)
+}
+
 /// Map logical graph coordinates to the physical layered-window coordinates.
 /// The matrix is the anticlockwise rotation required by the product spec.
 fn transform_point(
@@ -615,12 +751,7 @@ fn transform_point(
         y = -y;
     }
 
-    let (sin, cos) = match orientation {
-        90 => (1.0, 0.0),
-        180 => (0.0, -1.0),
-        270 => (-1.0, 0.0),
-        _ => (0.0, 1.0),
-    };
+    let (sin, cos) = rotation(orientation);
     let (center_x, center_y) = if matches!(orientation, 90 | 270) {
         (short_px / 2.0, long_px / 2.0)
     } else {
@@ -1000,6 +1131,9 @@ mod tests {
     #[test]
     fn a_data_gap_is_not_interpolated_in_smooth_mode() {
         let mut config = OverlayConfig::new();
+        // The cast's round caps at the run ends would bleed line-coloured pixels
+        // into the hole; this test is about where the line itself was drawn.
+        config.line_glow = false;
         config.window_seconds = 30;
         config.max_y_ms = 1_000;
         let now = Instant::now();
@@ -1057,6 +1191,9 @@ mod tests {
     #[test]
     fn a_data_gap_is_not_interpolated_in_index_mode() {
         let mut config = OverlayConfig::new();
+        // The cast's round caps at the run ends would bleed line-coloured pixels
+        // into the hole; this test is about where the line itself was drawn.
+        config.line_glow = false;
         config.window_seconds = 10;
         config.max_y_ms = 1_000;
         let now = Instant::now();
@@ -1434,6 +1571,40 @@ mod tests {
         );
     }
 
+    /// A marker runs the full height of the canvas, through the band the
+    /// underglow reserves below y0.
+    ///
+    /// The reserve exists only for the cast; without this the marker stops at
+    /// the zero line and a timeout partly disappears behind a glow.
+    #[test]
+    fn a_timeout_marker_reaches_through_the_underglow_reserve() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = true;
+        config.line_glow_radius_px = 10;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
+        let width = 300;
+        let height = 100 + line_glow_reserve_px(&config) as usize;
+        let pixels = render_graph(
+            width as u32,
+            height as u32,
+            &config,
+            &samples(&[None]),
+            Instant::now(),
+            false,
+        )
+        .expect("pixmap");
+        let deepest = positions_of_color(&pixels, width, [255, 0, 0])
+            .into_iter()
+            .map(|(row, _)| row)
+            .max()
+            .expect("the timeout marker was not drawn");
+        assert!(
+            deepest >= height - 3,
+            "the marker stopped at row {deepest}; the canvas is {height} tall"
+        );
+    }
+
     #[test]
     fn timeout_marker_follows_graph_orientation() {
         for (orientation, expected) in [(0, "left"), (180, "right"), (90, "bottom"), (270, "top")] {
@@ -1495,5 +1666,191 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    /// The cast falls from the line toward the zero line in the graph's own
+    /// frame — down at 0 degrees, right at 90, and so on — and never shows on
+    /// the far side of the line, whether or not the overlay is mirrored.
+    #[test]
+    fn the_underglow_casts_toward_the_zero_line_in_every_orientation() {
+        for (orientation, mirrored) in [
+            (0u16, false),
+            (0, true),
+            (90, false),
+            (90, true),
+            (180, false),
+            (180, true),
+            (270, false),
+            (270, true),
+        ] {
+            let mut config = OverlayConfig::new();
+            config.line_glow = true;
+            config.line_glow_radius_px = 4;
+            config.line_glow_intensity = 100;
+            config.orientation = orientation;
+            config.mirrored = mirrored;
+            config.first_target_mut().line_color = "#00ff00".to_string();
+
+            let (width, height) = if matches!(orientation, 90 | 270) {
+                (100u32, 300u32)
+            } else {
+                (300u32, 100u32)
+            };
+            let pixels = render_graph(
+                width,
+                height,
+                &config,
+                &samples(&[Some(500); 40]),
+                Instant::now(),
+                false,
+            )
+            .expect("pixmap");
+
+            let long_px = if matches!(orientation, 90 | 270) {
+                height as f32
+            } else {
+                width as f32
+            };
+            let short_px = if matches!(orientation, 90 | 270) {
+                width as f32
+            } else {
+                height as f32
+            };
+            let pad = 2.0;
+            let bottom = short_px - pad - line_glow_reserve_px(&config) as f32;
+            let line_y = bottom - 0.5 * (bottom - pad);
+            let center = transform_point(
+                (long_px / 2.0, line_y),
+                long_px,
+                short_px,
+                orientation,
+                mirrored,
+            );
+            let dir = glow_direction(orientation, mirrored);
+
+            let positions = positions_of_color(&pixels, width as usize, [0, 255, 0]);
+            assert!(
+                !positions.is_empty(),
+                "the line itself is missing at {orientation}/{mirrored}"
+            );
+            let mut deepest = f32::MIN;
+            let mut shallowest = f32::MAX;
+            for (row, column) in positions {
+                // Pixel centres, not corners: the line's own antialiased back
+                // edge sits half a pixel behind the centre, and the far-side
+                // assertion must not mistake it for a cast that leaked.
+                let delta = (column as f32 + 0.5 - center.0) * dir.0
+                    + (row as f32 + 0.5 - center.1) * dir.1;
+                deepest = deepest.max(delta);
+                shallowest = shallowest.min(delta);
+            }
+            assert!(
+                deepest > 1.0,
+                "no cast on the zero-line side at {orientation}/{mirrored}"
+            );
+            assert!(
+                deepest <= config.line_glow_radius_px as f32 + 2.0,
+                "the cast ran past its radius at {orientation}/{mirrored}: {deepest}"
+            );
+            assert!(
+                shallowest > -1.5,
+                "the cast leaked to the far side at {orientation}/{mirrored}: {shallowest}"
+            );
+        }
+    }
+
+    /// Every host's cast is drawn in its own line's colour, the same rule the
+    /// lines themselves follow.
+    #[test]
+    fn the_underglow_uses_each_hosts_own_line_colour() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = true;
+        config.line_glow_radius_px = 4;
+        let now = Instant::now();
+        let upper = samples(&[Some(300); 40]);
+        let lower = samples(&[Some(700); 40]);
+        let pixels = render_hosts(
+            &config,
+            &[
+                ("#00ff00", "#ff0000", &upper),
+                ("#0000ff", "#ff0000", &lower),
+            ],
+            now,
+            false,
+        );
+
+        let bottom = 100.0 - 2.0 - line_glow_reserve_px(&config) as f32;
+        for (color, value) in [([0u8, 255u8, 0u8], 300u32), ([0u8, 0u8, 255u8], 700u32)] {
+            let line_y = bottom - (value as f32 / 1_000.0) * (bottom - 2.0);
+            let row = (line_y + 2.5).round() as usize;
+            let cast = positions_of_color(&pixels, 300, color);
+            assert!(
+                cast.iter().any(|(cast_row, _)| *cast_row == row),
+                "no {color:?} cast at row {row}"
+            );
+        }
+    }
+
+    /// The cast is brightest against the line and fades with depth; a layer
+    /// stack that fell flat would read as one hard band.
+    #[test]
+    fn the_underglow_fades_with_depth_below_the_line() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = true;
+        config.line_glow_radius_px = 4;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let pixels = render_graph(
+            300,
+            100,
+            &config,
+            &samples(&[Some(500); 40]),
+            Instant::now(),
+            false,
+        )
+        .expect("pixmap");
+
+        let bottom = 100.0 - 2.0 - line_glow_reserve_px(&config) as f32;
+        let line_y = bottom - 0.5 * (bottom - 2.0);
+        let alpha_at = |row: usize| pixels[(row * 300 + 150) * 4 + 3];
+        let first = (line_y + 1.5).round() as usize;
+        let faded: Vec<u8> = (first..first + 4).map(alpha_at).collect();
+        assert!(
+            faded[0] > faded[1] && faded[1] > faded[2] && faded[2] >= faded[3],
+            "the cast does not fade with depth: {faded:?}"
+        );
+    }
+
+    /// A later host's cast cannot tint an earlier host's line.
+    ///
+    /// The second host is the upper one, so its cast falls across the first
+    /// host's core. If each series were stroked glow-then-core in one pass,
+    /// that cast would paint over a core that was already down, and the first
+    /// host's line would come out a blend of two colours.
+    #[test]
+    fn another_hosts_glow_does_not_tint_an_earlier_hosts_line() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = true;
+        config.line_glow_radius_px = 4;
+        let now = Instant::now();
+        let lower = samples(&[Some(500); 40]);
+        let upper = samples(&[Some(522); 40]);
+        let pixels = render_hosts(
+            &config,
+            &[
+                ("#00ff00", "#ff0000", &lower),
+                ("#0000ff", "#ff0000", &upper),
+            ],
+            now,
+            false,
+        );
+        let core_row = 47;
+        let run = positions_of_color(&pixels, 300, [0, 255, 0])
+            .iter()
+            .filter(|(row, _)| *row == core_row)
+            .count();
+        assert!(
+            run > 100,
+            "the earlier host's core was tinted by the later host's glow: {run} pure pixels"
+        );
     }
 }

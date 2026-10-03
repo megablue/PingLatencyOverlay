@@ -14,8 +14,8 @@ use crate::config::{
 use crate::monitors::{MonitorInfo, Rect};
 use crate::probes::SampleStore;
 use crate::render::{
-    cosmetic_prefill_samples, render_series_into_with_border, sample_gap_threshold, SamplePoint,
-    Series,
+    cosmetic_prefill_samples, line_glow_reserve_px, render_series_into_with_border,
+    sample_gap_threshold, SamplePoint, Series,
 };
 use crate::rules::CompiledMatcher;
 use crate::sticky;
@@ -1781,15 +1781,21 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
     let long_logical =
         (config.window_seconds.max(1) as f64 * config.scale.max(1) as f64).clamp(1.0, 8192.0);
     let short_logical = (config.graph_height_px.max(10) as f64).clamp(1.0, 8192.0);
+    // Underglow is cast past the zero line, so the window grows on that side
+    // instead of the axis shrinking: the short dimension is the axis plus the
+    // cast's reserve, and `render_graph_into_internal` insets the axis by the
+    // same amount. The reserve is not scaled by DPI because the glow radius it
+    // mirrors is a physical pixel size.
+    let reserve = line_glow_reserve_px(config) as i32;
     let (long_px, short_px) = if matches!(config.orientation, 90 | 270) {
         (
-            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32,
+            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32 + reserve,
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32,
         )
     } else {
         (
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32,
-            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32,
+            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32 + reserve,
         )
     };
     let size = (long_px.max(1), short_px.max(1));
@@ -2002,5 +2008,40 @@ mod tests {
             position_for_anchor(Anchor::BottomCenter, work_area(), 100, 50, -10, 20),
             (440, 730)
         );
+    }
+
+    /// The underglow's reserve grows the window on the short side and leaves
+    /// the axis the height `graphHeightPx` names; a rotated overlay carries it
+    /// on its width. Zero without the glow, so existing sizes do not move.
+    #[test]
+    fn the_underglow_reserves_room_on_the_short_side() {
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let mut overlay = OverlayConfig::new();
+        overlay.line_glow = false;
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120, 60));
+
+        overlay.line_glow = true;
+        overlay.line_glow_radius_px = 4;
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120, 65));
+        assert_eq!(
+            line_glow_reserve_px(&overlay),
+            5,
+            "the reserve must match the window's growth"
+        );
+
+        overlay.orientation = 90;
+        let (rotated, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(rotated, (65, 120));
+
+        // The reserve is a physical size and is not scaled with the display.
+        let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
+        assert_eq!(scaled, (125, 240));
     }
 }

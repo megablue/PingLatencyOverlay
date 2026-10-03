@@ -68,8 +68,9 @@
 - Plot start: the first point is the first responding latency, not y0.
 - Timeouts (a ping exceeding the overlay's timeout counts as no response):
   - The line is not interpolated across a timeout.
-  - At each timeout, draw a vertical line from y0 to yMax in the timeout color
-    (default red).
+  - At each timeout, draw a vertical line spanning the full height of the
+    overlay box, through the underglow's reserved band, in the timeout color
+    (default red). It is drawn over the glows and under the lines.
   - On resumption, the next segment starts at the next responding sample's X,
     using the last responding Y, then continues with actual samples.
 - A stretch with no samples at all is not drawn across either: a target whose
@@ -126,6 +127,15 @@
   - Background color (`bgColor`, default `#0f172a`) and opacity (`bgOpacity`,
     0–100, default 0 = fully transparent), drawn behind the graph and not
     rotated with it.
+  - Line glow (on by default for a new overlay, off for a profile written
+    before the setting existed): every line casts a soft glow in its own colour,
+    so each host of a group glows in the colour of its line. The cast falls
+    toward the zero line in the graph's own frame, which means it rotates and
+    mirrors with the overlay rather than staying screen-down. Intensity
+    (0–100, default 10) and radius (2–50 px, default 30) are per overlay, and
+    the startup prefill glows in the prefill colour. The overlay box reserves
+    room past the zero line for the cast, so the Y axis keeps the height
+    `graphHeightPx` names and a line sitting on the zero line is not cut off.
 - **Display Mode** is one of three exclusive placements, chosen in a **Display
   Mode** section under Position and defaulting to **Global Overlay**:
   - **Global Overlay** places the overlay on a display. Position is one of 9
@@ -203,7 +213,7 @@
 - What belongs to the **group** is the appearance of the window and the plot —
   orientation, mirror, time window, scale, smoothing, the startup prefill and
   border, graph height, latency ceiling, position, offsets, monitor, background
-  colour and opacity.
+  colour and opacity, line glow.
 - What belongs to a **host** is the probe itself and the two colours that
   identify its line: protocol, target, port, timeout, line colour and timeout
   colour. A host can also be switched off without being deleted.
@@ -214,7 +224,8 @@
   group larger than it has two hosts sharing a colour — never two neighbours,
   because each step is relative to the host added before it.
 - **A timeout is a full-height vertical line in that host's own timeout colour.**
-  Two hosts dropping in the same second draw their markers over each other and
+  It spans the whole overlay box, through the underglow's reserved band when a
+  glow is on. Two hosts dropping in the same second draw their markers over each other and
   only the later one is visible, which is the same thing that happens to two
   lines crossing. Markers are not drawn for a host that has never answered,
   because a line along the bottom would read as "extremely fast" rather than

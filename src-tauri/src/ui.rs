@@ -6145,6 +6145,63 @@ fn edit_overlay(
                     *changed = true;
                 }
                 ui.end_row();
+
+                ui.label("Line glow").on_hover_text(
+                    "Cast a soft glow under each line, in the line's own colour.\n\
+                     The glow rotates with the graph and the box reserves room \
+                     for it past the zero line.",
+                );
+                if ui.checkbox(&mut overlay.line_glow, "Enabled").changed() {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Glow intensity");
+                let mut glow_intensity = overlay.line_glow_intensity as i64;
+                if ui
+                    .add_enabled(
+                        overlay.line_glow,
+                        egui::Slider::new(
+                            &mut glow_intensity,
+                            config::MIN_LINE_GLOW_INTENSITY as i64
+                                ..=config::MAX_LINE_GLOW_INTENSITY as i64,
+                        )
+                        .suffix("%")
+                        .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    overlay.line_glow_intensity = glow_intensity.clamp(
+                        config::MIN_LINE_GLOW_INTENSITY as i64,
+                        config::MAX_LINE_GLOW_INTENSITY as i64,
+                    ) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Glow radius (px)")
+                    .on_hover_text("How far the glow reaches past each line.");
+                let mut glow_radius = overlay.line_glow_radius_px as i64;
+                if ui
+                    .add_enabled(
+                        overlay.line_glow,
+                        egui::Slider::new(
+                            &mut glow_radius,
+                            config::MIN_LINE_GLOW_RADIUS_PX as i64
+                                ..=config::MAX_LINE_GLOW_RADIUS_PX as i64,
+                        )
+                        .suffix(" px")
+                        .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    overlay.line_glow_radius_px = glow_radius.clamp(
+                        config::MIN_LINE_GLOW_RADIUS_PX as i64,
+                        config::MAX_LINE_GLOW_RADIUS_PX as i64,
+                    ) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
             });
     });
 
