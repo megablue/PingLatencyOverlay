@@ -89,9 +89,13 @@
     `viewport / windowSeconds`. The window is sized in logical pixels, so under
     Windows DPI and text scaling that is not the same as `scale`.
   - Optional smooth rendering scrolls the timestamped graph between probe
-    samples. It is enabled by default at 60 FPS for new overlays and legacy
-    configs without an explicit preference; the per-overlay smooth FPS controls
-    the intermediate redraw rate, and gaps in the data are never interpolated.
+    samples, drawn three sample intervals behind live, with the window shifted
+    so the newest revealed instant sits at the leading edge: each incoming
+    sample is revealed over its own interval, so the line's tip walks along the
+    segment instead of the segment appearing whole at the leading edge. It is
+    enabled by default at 60 FPS for new overlays and legacy configs without an
+    explicit preference; the per-overlay smooth FPS controls the intermediate
+    redraw rate, and gaps in the data are never interpolated.
 - Startup behaviors:
   - `Cosmetic Startup Prefill` can show a deterministic fake latency graph
     before the first real probe result arrives.

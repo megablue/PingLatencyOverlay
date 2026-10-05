@@ -1101,6 +1101,20 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   draws after the cores and before the border, per host, and it settles on the
   last value because a timeout writes no sample. Default on, absent key
   included, unlike the underglow.
+- **Smooth mode presents the line three sample intervals behind live, and one
+  instant owns that cut.** The newest sample would otherwise land on the
+  leading edge in a single frame, so the transition from the previous sample
+  is a step. The frame is drawn to `now - SMOOTH_REVEAL_DELAY`, and smooth
+  `map_x` shifts the window by the same delay, so the newest revealed instant
+  sits at the axis end while the tip's y walks the segment the cut falls on.
+  `draw_series`
+  takes the cut as `reveal` and, at the first sample newer than it, draws a
+  partial last segment (never while a new run is starting); the marker loop
+  skips newer samples and `line_y_at_x` stops at the same instant, so the whole
+  frame agrees on where "now" ends. Index mode passes `None`: it steps by
+  sample and has no live edge to hold back.
+  `smooth_mode_stops_at_a_delayed_reveal_time` and
+  `the_reveal_tip_walks_the_segment_as_time_passes` pin the tip.
 - Graph orientation, timeout marks, the X and Y axes and the work-area
   positioning rules are behavior and live in `docs/SPEC.md`; do not restate them
   here.

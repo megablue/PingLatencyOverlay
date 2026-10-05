@@ -91,6 +91,15 @@ impl CursorAnimation {
 /// cannot drift apart.
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How far behind live the smooth line is presented.
+///
+/// Without this the newest sample lands on the leading edge the instant it
+/// arrives, so a whole one-second segment is drawn in a single frame and the
+/// line's transition from the previous sample happens as a step. Holding the
+/// reveal back by three sample intervals lets the tip walk along each segment
+/// as time passes. Index mode steps by sample, so it is not held back.
+pub const SMOOTH_REVEAL_DELAY: Duration = Duration::from_secs(3 * SAMPLE_INTERVAL.as_secs());
+
 /// The longest interval between consecutive samples that the probe loop itself
 /// can produce.
 ///
@@ -341,6 +350,11 @@ fn render_graph_into_internal(
     let visible_samples = config.window_seconds.max(1) as usize;
     let window_duration = Duration::from_secs(visible_samples as u64);
     let step = axis_long / visible_samples as f32;
+    // The instant this frame presents, in smooth mode: the same three-sample
+    // hold the marker loop and the cursor's walk use, so the whole frame
+    // agrees on where "now" ends. Index mode shows the samples it has as soon
+    // as it has them.
+    let reveal = (smooth && config.smooth_rendering).then(|| now - SMOOTH_REVEAL_DELAY);
 
     let y_max = config.max_y_ms.max(1) as f32;
     // One stroke for the whole overlay: every host line, the startup prefill
@@ -365,12 +379,21 @@ fn render_graph_into_internal(
         if smooth {
             // Move every point by its real age so the whole graph scrolls as
             // one surface; index-based positions would jump when a sample
-            // arrives at the right edge.
+            // arrives at the right edge. The reveal hold shifts the window a
+            // whole delay later, so the newest revealed instant sits at the
+            // axis end and the drawn ages run from the delay to the window
+            // after it; ages inside the hold extend past the end, which the
+            // partial tip's interpolation needs and never strokes beyond.
             let age = now.saturating_duration_since(sample.timestamp);
-            if age > window_duration {
+            if age > window_duration + SMOOTH_REVEAL_DELAY {
                 return None;
             }
-            Some(axis_long * (1.0 - age.as_secs_f32() / window_duration.as_secs_f32()))
+            Some(
+                axis_long
+                    * (1.0
+                        - (age.as_secs_f32() - SMOOTH_REVEAL_DELAY.as_secs_f32())
+                            / window_duration.as_secs_f32()),
+            )
         } else {
             Some((index as f32 + 0.5) * step)
         }
@@ -391,8 +414,11 @@ fn render_graph_into_internal(
         visible_samples: usize,
     ) -> &[SamplePoint] {
         let start = if smooth {
+            // The axis ends at the newest revealed instant, so the oldest
+            // point it shows is the window plus the reveal hold old.
             samples.partition_point(|sample| {
-                now.saturating_duration_since(sample.timestamp) > window_duration
+                now.saturating_duration_since(sample.timestamp)
+                    > window_duration + SMOOTH_REVEAL_DELAY
             })
         } else {
             samples.len().saturating_sub(visible_samples)
@@ -452,6 +478,7 @@ fn render_graph_into_internal(
                 config.mirrored,
                 glow.as_ref(),
                 pass,
+                reveal,
             );
         }
     };
@@ -479,6 +506,9 @@ fn render_graph_into_internal(
             let Some(x) = map_x(index, sample) else {
                 continue;
             };
+            if reveal.is_some_and(|cut| sample.timestamp > cut) {
+                continue;
+            }
             if sample.value.is_none() {
                 let start = transform_point(
                     (x, top),
@@ -518,8 +548,14 @@ fn render_graph_into_internal(
         let target_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN - size;
         for entry in &mut *series {
             let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
-            let Some(target) = line_y_at_x(samples, entry.max_sample_gap, &map_x, &map_y, target_x)
-            else {
+            let Some(target) = line_y_at_x(
+                samples,
+                entry.max_sample_gap,
+                &map_x,
+                &map_y,
+                target_x,
+                reveal,
+            ) else {
                 continue;
             };
             let y = match entry.cursor.as_deref_mut() {
@@ -712,13 +748,16 @@ fn draw_sample_cursor(
 /// sample's value. When nothing covers `target_x` (the line has not reached it
 /// yet, or a hole passes under the apex), the newest drawn value is the
 /// answer: a timeout writes no sample, and the cursor stays where the line
-/// stopped. Returns `None` when no sample has a value at all.
+/// stopped. Samples newer than `reveal` are withheld, the same cut the line is
+/// drawn with, so the cursor cannot point past the drawn head. Returns `None`
+/// when no sample has a value at all.
 fn line_y_at_x(
     samples: &[SamplePoint],
     max_sample_gap: Duration,
     map_x: &dyn Fn(usize, &SamplePoint) -> Option<f32>,
     map_y: &dyn Fn(u32) -> f32,
     target_x: f32,
+    reveal: Option<Instant>,
 ) -> Option<f32> {
     let mut covered: Option<f32> = None;
     let mut newest_y: Option<f32> = None;
@@ -733,6 +772,9 @@ fn line_y_at_x(
         let Some(x) = map_x(index, sample) else {
             continue;
         };
+        if reveal.is_some_and(|cut| sample.timestamp > cut) {
+            break;
+        }
         let gap = last_timestamp.is_some_and(|previous| {
             sample.timestamp.saturating_duration_since(previous) > max_sample_gap
         });
@@ -805,7 +847,9 @@ fn cover(result: &mut Option<f32>, from: (f32, f32), to: (f32, f32), target_x: f
 }
 
 /// Stroke one target's line, breaking it at timeouts, data gaps and prefill
-/// boundaries.
+/// boundaries. In smooth mode `reveal` stops the walk at the instant the frame
+/// presents, drawing a partial last segment so the tip advances with time
+/// rather than arriving whole with its sample.
 ///
 /// Split out of the renderer so the per-target bookkeeping is written once
 /// rather than nested inside a loop over targets. The cost of that loop is that
@@ -829,6 +873,7 @@ fn draw_series(
     mirrored: bool,
     glow: Option<&LineGlow>,
     pass: LinePass,
+    reveal: Option<Instant>,
 ) {
     let paint_for = |prefill: Option<bool>| -> (&Paint, [u8; 3]) {
         if prefill == Some(true) {
@@ -848,6 +893,35 @@ fn draw_series(
         let Some(x) = map_x(index, sample) else {
             continue;
         };
+        if let Some(cut) = reveal.filter(|cut| sample.timestamp > *cut) {
+            // Stop at the reveal instant. When this sample continues the run,
+            // draw part of the way to it: the tip walks along the segment as
+            // time passes instead of arriving whole with its sample.
+            if in_segment && segment_prefill == Some(sample.is_prefill) {
+                if let (Some((previous_x, previous_y)), Some(latency), Some(previous_timestamp)) =
+                    (last_point, sample.value, last_timestamp)
+                {
+                    let span = sample
+                        .timestamp
+                        .saturating_duration_since(previous_timestamp);
+                    if span <= max_sample_gap {
+                        let walked = cut.saturating_duration_since(previous_timestamp);
+                        let partial = if span.is_zero() {
+                            1.0
+                        } else {
+                            (walked.as_secs_f32() / span.as_secs_f32()).min(1.0)
+                        };
+                        let tip = (
+                            previous_x + (x - previous_x) * partial,
+                            previous_y + (map_y(latency) - previous_y) * partial,
+                        );
+                        let point = transform_point(tip, long_px, short_px, orientation, mirrored);
+                        segment.line_to(point.0, point.1);
+                    }
+                }
+            }
+            break;
+        }
         // Two samples further apart than the probe loop can produce were not
         // neighbours in time, so the segment ends here and the next one resumes
         // at the last known value — exactly as it does after a timeout. Without
@@ -1486,9 +1560,10 @@ mod tests {
             .map(|(_, column)| *column)
             .min()
             .expect("not empty");
-        // Time runs right to left, so the newest sample is at the right edge and
-        // a sample `oldest_age` old is that fraction of the width in from it.
-        let expected_left = 300 - (300.0 * oldest_age as f32 / 30.0) as usize;
+        // Time runs right to left and the reveal shifts the window: the newest
+        // revealed instant sits at the right edge, so a sample `oldest_age`
+        // old is `oldest_age - 3` seconds in from it.
+        let expected_left = 300 - (300.0 * oldest_age.saturating_sub(3) as f32 / 30.0) as usize;
         assert!(
             leftmost >= expected_left.saturating_sub(6) && leftmost <= 300,
             "the new host's line starts at column {leftmost}, but samples no \
@@ -1515,18 +1590,20 @@ mod tests {
         config.window_seconds = 30;
         config.max_y_ms = 1_000;
         let now = Instant::now();
-        // Three samples at 100ms, an eight-second hole, three at 300ms. In a
-        // 300px / 30s window the sample before the hole is at column 200 and
-        // the one after it at column 280.
+        // Three samples at 100ms, an eight-second hole, three at 300ms. The
+        // reveal holds the newest three seconds back and shifts the window, so
+        // in a 300px / 30s plot age 3 sits at the right edge and each second is
+        // 10px: the sample before the hole (age 16) is at column 170 and the
+        // one after it (age 6) at 270.
         let samples = aged_samples(
             now,
             &[
-                (12, 100),
-                (11, 100),
-                (10, 100),
-                (2, 300),
-                (1, 300),
-                (0, 300),
+                (16, 100),
+                (15, 100),
+                (14, 100),
+                (6, 300),
+                (5, 300),
+                (4, 300),
             ],
         );
 
@@ -1536,18 +1613,18 @@ mod tests {
 
         let drawn_in_gap = green
             .iter()
-            .filter(|(_, column)| (203..=277).contains(column))
+            .filter(|(_, column)| (193..=267).contains(column))
             .count();
         assert_eq!(
             drawn_in_gap, 0,
-            "a line was drawn across the eight-second hole (columns 200 to 280)"
+            "a line was drawn across the eight-second hole (columns 190 to 270)"
         );
 
         // And it resumes at the last known value rather than jumping: the stub
         // at the first sample after the hole spans the old and the new level.
         let stub: Vec<usize> = green
             .iter()
-            .filter(|(_, column)| (278..=282).contains(column))
+            .filter(|(_, column)| (268..=272).contains(column))
             .map(|(row, _)| *row)
             .collect();
         let span = match (stub.iter().min(), stub.iter().max()) {
@@ -1627,15 +1704,17 @@ mod tests {
         // The cursor would sit at the right edge of the columns under test.
         config.sample_cursor = false;
         let now = Instant::now();
+        // The reveal holds the newest three seconds back and shifts the window,
+        // so age 3 sits at the right edge and a second is 10px: ages 12s down
+        // to 3s sit at columns 210 to 300.
         let entries: Vec<(u64, u32)> = (0..10u32)
-            .map(|index| (u64::from(9 - index), 100 + index * 20))
+            .map(|index| (u64::from(12 - index), 100 + index * 20))
             .collect();
         let samples = aged_samples(now, &entries);
 
         let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], now, true);
         let green = positions_of_color(&pixels, 300, [0, 255, 0]);
-        // Ages 9s down to 0s sit at columns 210 to 300; every column between
-        // them has to carry a pixel.
+        // Every column between them has to carry a pixel.
         let missing: Vec<usize> = (212..=298)
             .filter(|column| !green.iter().any(|(_, drawn)| drawn == column))
             .collect();
@@ -1643,6 +1722,90 @@ mod tests {
             missing.is_empty(),
             "the line is broken at columns {missing:?} although every sample is \
              one second from its neighbour"
+        );
+    }
+
+    /// Smooth mode presents the line a fixed three-sample delay behind live.
+    ///
+    /// The newest samples are withheld so the tip walks along each segment as
+    /// time passes instead of the whole segment arriving with its sample; the
+    /// reveal shifts the window so the tip's x is pinned to the axis end while
+    /// its y moves.
+    #[test]
+    fn smooth_mode_stops_at_a_delayed_reveal_time() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.sample_cursor = false;
+        config.window_seconds = 30;
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        // A flat run whose oldest sample is at age 12 and newest at age 3; the
+        // reveal shifts the window, so the age-3 sample sits at the axis end
+        // (column 300).
+        let entries: Vec<(u64, u32)> = (0..10).map(|index| (12 - index, 100)).collect();
+        let revealed = aged_samples(now, &entries);
+
+        let rows_near_end = |samples: &[SamplePoint]| -> Vec<usize> {
+            let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", samples)], now, true);
+            let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+            green
+                .iter()
+                .filter(|(_, column)| (294..=299).contains(column))
+                .map(|(row, _)| *row)
+                .collect()
+        };
+
+        let flat = rows_near_end(&revealed);
+        assert!(!flat.is_empty(), "the line stopped short of the axis end");
+
+        // The same run plus a sample inside the hold: it must not be drawn, so
+        // the pixels at the axis end cannot move.
+        let mut held_entries = entries.clone();
+        held_entries.push((2, 900));
+        let held = aged_samples(now, &held_entries);
+        assert_eq!(
+            flat,
+            rows_near_end(&held),
+            "a sample inside the reveal hold was drawn"
+        );
+    }
+
+    /// The tip's x is fixed by the delay while its y walks the current segment:
+    /// half a second later the same column carries a later interpolation.
+    #[test]
+    fn the_reveal_tip_walks_the_segment_as_time_passes() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.sample_cursor = false;
+        config.window_seconds = 30;
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        // The segment under the tip spans 100ms to 300ms, so the cut's
+        // interpolation — two thirds in at `now`, five sixths at `now + 0.5s` —
+        // climbs from 233ms toward 267ms. The tip's x stays at the axis end
+        // (column 300), so the rows to compare are in the last few columns.
+        let samples = aged_samples(now, &[(5, 100), (2, 300)]);
+
+        let rows_near_tip = |at: Instant| -> Vec<usize> {
+            let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], at, true);
+            let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+            green
+                .iter()
+                .filter(|(_, column)| (294..=299).contains(column))
+                .map(|(row, _)| *row)
+                .collect()
+        };
+
+        let before = rows_near_tip(now);
+        let after = rows_near_tip(now + Duration::from_millis(500));
+        assert!(
+            !before.is_empty() && !after.is_empty(),
+            "the tip drew nothing"
+        );
+        let mean = |rows: &[usize]| rows.iter().sum::<usize>() as f64 / rows.len() as f64;
+        assert!(
+            mean(&before) - mean(&after) > 1.0,
+            "the tip did not walk the segment: {before:?} then {after:?}"
         );
     }
 
