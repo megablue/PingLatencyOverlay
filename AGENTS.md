@@ -978,6 +978,16 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   `a_data_gap_is_not_interpolated_in_smooth_mode`,
   `a_data_gap_is_not_interpolated_in_index_mode` and
   `a_one_second_cadence_is_not_a_gap` pin both halves.
+- **A probe task resolves its target once and refreshes it off the sampling
+  path.** `probe::lookup_ipv4` can block for seconds on a cold DNS cache, and a
+  blocked loop writes no sample at all — a silent break with no marker to
+  explain it. `AddressCache` probes the cached address every tick — ICMP pings
+  it, TCP connects to it — and refreshes from a detached task, on
+  `DNS_REFRESH_INTERVAL` or after `DNS_REFRESH_AFTER_FAILURES` consecutive
+  misses, and a host edit drops the address. Resolution therefore never runs
+  inside a connect: `probe::connect_ipv4` takes the address and the port.
+  `the_address_action_resolves_refreshes_or_reuses` pins the decision table and
+  `a_tcp_target_connects_to_its_cached_address` the connect path.
 - **A host's visible window is cropped per series, not once for the overlay.**
   A newly added host has a handful of samples and none of the history the others
   have; cropping them at one index drops them or pushes them to the left of where

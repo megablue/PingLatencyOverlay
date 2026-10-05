@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
-use crate::config::{Config, TargetConfig};
+use crate::config::{Config, ProbeConfig, TargetConfig};
 use crate::probe;
 use crate::render::{SamplePoint, SAMPLE_INTERVAL};
 
@@ -15,6 +17,28 @@ use crate::render::{SamplePoint, SAMPLE_INTERVAL};
 /// second tick — and are never restarted just because the user saved a style or
 /// graph setting.
 const MAX_BUFFERED_SAMPLES: usize = 86_400;
+
+/// How long a target's resolved address may be used before a background
+/// refresh replaces it.
+///
+/// Nothing about a lookup may sit on the sampling path (see `AddressCache`),
+/// so this is only about staying current with a rotating record: the game
+/// endpoints this exists for are Cloudflare names whose A records live for
+/// well under a minute.
+const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Consecutive failed probes that force an early refresh.
+///
+/// A record can rotate to an edge that no longer answers before the periodic
+/// refresh arrives. Three misses at the one-second cadence is a few seconds of
+/// red markers, not a minute.
+const DNS_REFRESH_AFTER_FAILURES: u32 = 3;
+
+/// A lookup slower than this is written to the log, when logging is enabled.
+///
+/// It is exactly the stall the cached address exists to absorb, so the line is
+/// the evidence that the cache is earning its keep.
+const SLOW_LOOKUP: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 pub struct SampleBuffer {
@@ -224,17 +248,183 @@ impl Drop for ProbeManager {
     }
 }
 
+/// The IPv4 address a probe task is probing — ICMP pings it, TCP connects to
+/// it — and the background lookup that keeps it current.
+///
+/// `to_socket_addrs` can block for seconds on a cold cache, and a blocked
+/// sampling loop writes no sample — a silent break in the graph with no
+/// timeout marker to explain it. So the address is resolved once, up front,
+/// and refreshed from a detached task; the loop only ever reads what is
+/// already there.
+struct AddressCache {
+    host: String,
+    addr: Option<IpAddr>,
+    looked_up_at: Instant,
+    refreshing: Option<Receiver<Option<IpAddr>>>,
+    failures: u32,
+}
+
+impl Default for AddressCache {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            addr: None,
+            looked_up_at: Instant::now(),
+            refreshing: None,
+            failures: 0,
+        }
+    }
+}
+
+impl AddressCache {
+    /// Point the cache at `host`, dropping the address if the host changed.
+    ///
+    /// A host edit invalidates the address the same tick it arrives; keeping it
+    /// would keep pinging a name the user replaced.
+    fn rehost(&mut self, host: &str) {
+        if self.host != host {
+            self.host = host.to_owned();
+            self.addr = None;
+            self.looked_up_at = Instant::now();
+            self.refreshing = None;
+            self.failures = 0;
+        }
+    }
+
+    /// Take a finished background lookup's result, if it has finished.
+    fn take_refresh(&mut self, now: Instant) {
+        let Some(pending) = self.refreshing.as_ref() else {
+            return;
+        };
+        let result = pending.try_recv();
+        match result {
+            Ok(Some(addr)) => {
+                self.addr = Some(addr);
+                self.looked_up_at = now;
+                self.failures = 0;
+                self.refreshing = None;
+            }
+            Ok(None) => {
+                // The lookup failed. Keep pinging the address that worked and
+                // try again on the normal clock; clearing the failure run is
+                // what stops the next tick from asking for another refresh
+                // immediately.
+                self.looked_up_at = now;
+                self.failures = 0;
+                self.refreshing = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                // The refresh task is gone without an answer; ask again.
+                self.refreshing = None;
+            }
+        }
+    }
+}
+
+/// What a probe task should do about its cached address on this tick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AddressAction {
+    /// No address yet: resolve it now and use the result.
+    Resolve,
+    /// Keep using the cached address and start a background refresh.
+    Refresh,
+    /// Use the cached address as it is.
+    Use,
+}
+
+/// The address decision, split out so the full table is testable: a refresh
+/// already in flight is never doubled up, and a short failure run does not
+/// force one.
+fn address_action(
+    has_address: bool,
+    refreshing: bool,
+    overdue: bool,
+    failures: u32,
+) -> AddressAction {
+    if !has_address {
+        AddressAction::Resolve
+    } else if !refreshing && (overdue || failures >= DNS_REFRESH_AFTER_FAILURES) {
+        AddressAction::Refresh
+    } else {
+        AddressAction::Use
+    }
+}
+
+/// One probe tick through the address cache.
+///
+/// Nothing here can delay the sample on a lookup except the first one, before
+/// there is an address to fall back on; every later refresh is a detached task
+/// whose result the next tick picks up. Both protocols probe the cached
+/// address directly — ICMP pings it, TCP connects to it.
+async fn measure_cached(
+    cache: &mut AddressCache,
+    probe: &ProbeConfig,
+    timeout_ms: u32,
+) -> Option<u32> {
+    let host = probe.host();
+    cache.rehost(host);
+    let now = Instant::now();
+    cache.take_refresh(now);
+
+    match address_action(
+        cache.addr.is_some(),
+        cache.refreshing.is_some(),
+        now.saturating_duration_since(cache.looked_up_at) > DNS_REFRESH_INTERVAL,
+        cache.failures,
+    ) {
+        AddressAction::Resolve => {
+            cache.addr = probe::lookup_ipv4(host).await;
+            cache.looked_up_at = Instant::now();
+            cache.failures = 0;
+        }
+        AddressAction::Refresh => {
+            let (sender, receiver) = mpsc::channel();
+            let host = host.to_owned();
+            tokio::spawn(async move {
+                let started = Instant::now();
+                let resolved = probe::lookup_ipv4(&host).await;
+                let elapsed = started.elapsed();
+                if elapsed > SLOW_LOOKUP {
+                    crate::diagnostics::log_line(
+                        "renderer",
+                        &format!("lookup for {host} took {elapsed:?}"),
+                    );
+                }
+                let _ = sender.send(resolved);
+            });
+            cache.refreshing = Some(receiver);
+        }
+        AddressAction::Use => {}
+    }
+
+    let latency = match cache.addr {
+        Some(addr) => match probe {
+            ProbeConfig::Icmp { .. } => probe::ping_ipv4(addr, timeout_ms).await,
+            ProbeConfig::Tcp { port, .. } => probe::connect_ipv4(addr, *port, timeout_ms).await,
+        },
+        None => None,
+    };
+    if latency.is_none() {
+        cache.failures = cache.failures.saturating_add(1);
+    } else {
+        cache.failures = 0;
+    }
+    latency
+}
+
 async fn probe_loop(
     key: TaskKey,
     configs: Arc<RwLock<HashMap<TaskKey, TargetConfig>>>,
     samples: SampleStore,
     running: Arc<AtomicBool>,
 ) {
+    let mut address = AddressCache::default();
     loop {
         let target = configs.read().unwrap().get(&key).cloned();
         if running.load(Ordering::Relaxed) {
             if let Some(target) = target.as_ref() {
-                let latency = probe::measure(&target.probe, target.timeout_ms).await;
+                let latency = measure_cached(&mut address, &target.probe, target.timeout_ms).await;
                 let mut all_samples = samples.lock().unwrap();
                 let overlay = all_samples.entry(key.overlay_id.clone()).or_default();
                 let buffer = overlay.entry(key.target_id.clone()).or_default();
@@ -257,6 +447,7 @@ async fn probe_loop(
 mod tests {
     use super::*;
     use crate::config::{OverlayConfig, ProbeConfig};
+    use std::net::Ipv4Addr;
     use std::time::Duration;
 
     fn overlay_with_targets(count: usize) -> OverlayConfig {
@@ -574,6 +765,151 @@ mod tests {
              that kept probing"
         );
         manager.stop_all();
+        runtime.shutdown_background();
+    }
+
+    /// The refresh decision, as a table. A refresh already in flight is never
+    /// doubled up, and a short failure run does not force one.
+    #[test]
+    fn the_address_action_resolves_refreshes_or_reuses() {
+        let cases = [
+            (false, false, false, 0, AddressAction::Resolve),
+            (true, false, false, 0, AddressAction::Use),
+            (true, false, true, 0, AddressAction::Refresh),
+            (true, true, true, 0, AddressAction::Use),
+            (
+                true,
+                false,
+                false,
+                DNS_REFRESH_AFTER_FAILURES,
+                AddressAction::Refresh,
+            ),
+            (
+                true,
+                false,
+                false,
+                DNS_REFRESH_AFTER_FAILURES - 1,
+                AddressAction::Use,
+            ),
+            (
+                true,
+                true,
+                false,
+                DNS_REFRESH_AFTER_FAILURES,
+                AddressAction::Use,
+            ),
+        ];
+        for (has_address, refreshing, overdue, failures, expected) in cases {
+            assert_eq!(
+                address_action(has_address, refreshing, overdue, failures),
+                expected,
+                "has={has_address} refreshing={refreshing} overdue={overdue} failures={failures}"
+            );
+        }
+    }
+
+    /// A background lookup's result lands in the cache; a failed one keeps the
+    /// address that is still being pinged, and clears the pending slot or the
+    /// next tick would never ask again.
+    #[test]
+    fn a_finished_lookup_lands_in_the_cache() {
+        let first = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let second = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+        let mut cache = AddressCache {
+            host: "example.invalid".to_owned(),
+            addr: Some(first),
+            ..AddressCache::default()
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        cache.refreshing = Some(receiver);
+        sender.send(Some(second)).expect("send");
+        cache.take_refresh(Instant::now());
+        assert_eq!(cache.addr, Some(second));
+        assert!(
+            cache.refreshing.is_none(),
+            "a finished refresh stayed pending"
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        cache.refreshing = Some(receiver);
+        cache.failures = 2;
+        sender.send(None).expect("send");
+        cache.take_refresh(Instant::now());
+        assert_eq!(
+            cache.addr,
+            Some(second),
+            "a failed lookup dropped the address"
+        );
+        assert!(
+            cache.refreshing.is_none(),
+            "a failed refresh stayed pending"
+        );
+        assert_eq!(cache.failures, 0);
+    }
+
+    /// A host edit drops the address with the name it belonged to.
+    #[test]
+    fn changing_the_host_drops_the_cached_address() {
+        let mut cache = AddressCache {
+            host: "old.invalid".to_owned(),
+            addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            failures: 4,
+            ..AddressCache::default()
+        };
+
+        cache.rehost("new.invalid");
+        assert_eq!(cache.addr, None);
+        assert_eq!(cache.failures, 0);
+
+        cache.addr = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        cache.rehost("new.invalid");
+        assert_eq!(
+            cache.addr,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "re-pointing at the same host must not drop the address"
+        );
+    }
+
+    /// The first tick of a literal-IP host fills the cache without a lookup,
+    /// so an address is in hand before any refresh machinery runs.
+    #[test]
+    fn a_literal_ip_host_caches_its_address() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let mut cache = AddressCache::default();
+            let probe = ProbeConfig::Icmp {
+                host: "127.0.0.1".to_owned(),
+            };
+            let _ = measure_cached(&mut cache, &probe, 1).await;
+            assert_eq!(cache.addr, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+            assert!(cache.refreshing.is_none());
+        });
+        runtime.shutdown_background();
+    }
+
+    /// The TCP arm connects to the cached address directly; a literal-IP host
+    /// caches without a lookup and the handshake completes against a real
+    /// listener.
+    #[test]
+    fn a_tcp_target_connects_to_its_cached_address() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("local address").port();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let mut cache = AddressCache::default();
+            let probe = ProbeConfig::Tcp {
+                host: "127.0.0.1".to_owned(),
+                port,
+            };
+            let latency = measure_cached(&mut cache, &probe, 1_000).await;
+            assert!(
+                latency.is_some(),
+                "connecting to a listening socket must measure"
+            );
+            assert_eq!(cache.addr, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+            assert!(cache.refreshing.is_none());
+        });
         runtime.shutdown_background();
     }
 }

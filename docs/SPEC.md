@@ -250,6 +250,10 @@
 - Target: domain name or IP address.
 - Port: required for TCP, unused for ICMP.
 - Timeout: configurable, default 1000 ms.
+- A hostname is resolved when its probe starts and refreshed in the background
+  afterwards, so a slow name lookup does not interrupt the one-second cadence.
+  Both protocols then probe the cached address directly — ICMP pings it, TCP
+  connects to it — so resolution is IPv4-only, as ICMP has always been.
 
 ## Config storage
 - Settings live in profile files under

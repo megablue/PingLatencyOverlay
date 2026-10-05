@@ -51,8 +51,11 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// deliberate statement that slow responses are expected; a threshold that
 /// ignored it would cut a line that is genuinely continuous.
 pub fn sample_gap_threshold(timeout_ms: u32) -> Duration {
-    /// Scheduling slack, and room for the ICMP path's name resolution, which
-    /// runs outside the `IcmpSendEcho2` timeout.
+    /// Scheduling slack. An ICMP lookup is deliberately absent from this
+    /// budget: a probe task resolves its target once and refreshes it off the
+    /// sampling path, so a slow lookup can only delay the first sample — before
+    /// there is a previous one to measure a gap against. What is left is the
+    /// loop's own scheduling jitter.
     const SLACK: Duration = Duration::from_secs(2);
     Duration::from_millis(u64::from(timeout_ms)) + SAMPLE_INTERVAL + SLACK
 }
