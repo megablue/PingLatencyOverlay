@@ -92,7 +92,10 @@
     samples, drawn three sample intervals behind live, with the window shifted
     so the newest revealed instant sits at the leading edge: each incoming
     sample is revealed over its own interval, so the line's tip walks along the
-    segment instead of the segment appearing whole at the leading edge. It is
+    segment instead of the segment appearing whole at the leading edge. The
+    line is drawn through one sample older than the visible window, so where it
+    leaves the canvas the segment is clipped by the edge rather than the line
+    stopping short of it. It is
     enabled by default at 60 FPS for new overlays and legacy configs without an
     explicit preference; the per-overlay smooth FPS controls the intermediate
     redraw rate, and gaps in the data are never interpolated.

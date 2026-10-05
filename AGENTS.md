@@ -1107,14 +1107,18 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   is a step. The frame is drawn to `now - SMOOTH_REVEAL_DELAY`, and smooth
   `map_x` shifts the window by the same delay, so the newest revealed instant
   sits at the axis end while the tip's y walks the segment the cut falls on.
-  `draw_series`
-  takes the cut as `reveal` and, at the first sample newer than it, draws a
-  partial last segment (never while a new run is starting); the marker loop
-  skips newer samples and `line_y_at_x` stops at the same instant, so the whole
-  frame agrees on where "now" ends. Index mode passes `None`: it steps by
+  `draw_series` takes the cut as `reveal` and, at the first sample newer than
+  it, draws a partial last segment (never while a new run is starting); the
+  marker loop skips newer samples and `line_y_at_x` stops at the same instant,
+  so the whole frame agrees on where "now" ends. The crop is otherwise the only
+  visibility gate: `visible` keeps one sample older than the cut for the line
+  pass, whose negative x lets the edge clip the segment instead of the polyline
+  starting at the oldest on-screen vertex, while the marker loop and
+  `line_y_at_x` keep the tight crop. Index mode passes `None`: it steps by
   sample and has no live edge to hold back.
-  `smooth_mode_stops_at_a_delayed_reveal_time` and
-  `the_reveal_tip_walks_the_segment_as_time_passes` pin the tip.
+  `smooth_mode_stops_at_a_delayed_reveal_time`,
+  `the_reveal_tip_walks_the_segment_as_time_passes` and
+  `the_line_reaches_the_left_edge_through_one_older_sample` pin the tip.
 - Graph orientation, timeout marks, the X and Y axes and the work-area
   positioning rules are behavior and live in `docs/SPEC.md`; do not restate them
   here.

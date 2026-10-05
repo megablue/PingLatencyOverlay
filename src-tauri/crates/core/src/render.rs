@@ -382,12 +382,11 @@ fn render_graph_into_internal(
             // arrives at the right edge. The reveal hold shifts the window a
             // whole delay later, so the newest revealed instant sits at the
             // axis end and the drawn ages run from the delay to the window
-            // after it; ages inside the hold extend past the end, which the
-            // partial tip's interpolation needs and never strokes beyond.
+            // after it. The crop is the only visibility gate: an age past the
+            // window plus hold maps to a negative x, which the line pass wants
+            // for the one older sample it keeps so the polyline leaves the
+            // canvas instead of starting at x = 0.
             let age = now.saturating_duration_since(sample.timestamp);
-            if age > window_duration + SMOOTH_REVEAL_DELAY {
-                return None;
-            }
             Some(
                 axis_long
                     * (1.0
@@ -406,20 +405,33 @@ fn render_graph_into_internal(
     // target that has just been added has none of the history the others have.
     // Cropping them as one buffer would offset every line by however much the
     // shorter series is short.
+    //
+    // `keep_older` adds the one sample immediately older than the cut. The
+    // line pass wants it: its x is negative, so the segment into the canvas is
+    // clipped by the edge instead of the polyline starting at the oldest
+    // on-screen vertex. Markers and the cursor do not use it — a marker an
+    // edge off-screen is invisible either way, and the cursor's walk must end
+    // at the same instant the line is drawn to.
     fn visible(
         samples: &[SamplePoint],
         smooth: bool,
         now: Instant,
         window_duration: Duration,
         visible_samples: usize,
+        keep_older: bool,
     ) -> &[SamplePoint] {
         let start = if smooth {
             // The axis ends at the newest revealed instant, so the oldest
             // point it shows is the window plus the reveal hold old.
-            samples.partition_point(|sample| {
+            let cut = samples.partition_point(|sample| {
                 now.saturating_duration_since(sample.timestamp)
                     > window_duration + SMOOTH_REVEAL_DELAY
-            })
+            });
+            if keep_older {
+                cut.saturating_sub(1)
+            } else {
+                cut
+            }
         } else {
             samples.len().saturating_sub(visible_samples)
         };
@@ -454,7 +466,14 @@ fn render_graph_into_internal(
     // earlier host's line where the two cross.
     let draw_lines = |pixmap: &mut Pixmap, pass: LinePass, series: &mut [Series<'_>]| {
         for entry in series {
-            let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+            let samples = visible(
+                entry.samples,
+                smooth,
+                now,
+                window_duration,
+                visible_samples,
+                true,
+            );
             if samples.is_empty() {
                 continue;
             }
@@ -501,7 +520,14 @@ fn render_graph_into_internal(
         let [r, g, b] = parse_hex_color(entry.timeout_color, [239, 68, 68]);
         timeout_paint.set_color_rgba8(r, g, b, 255);
         let mut timeout_builder = PathBuilder::new();
-        let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+        let samples = visible(
+            entry.samples,
+            smooth,
+            now,
+            window_duration,
+            visible_samples,
+            false,
+        );
         for (index, sample) in samples.iter().enumerate() {
             let Some(x) = map_x(index, sample) else {
                 continue;
@@ -547,7 +573,14 @@ fn render_graph_into_internal(
         let size = sample_cursor_size(config) as f32;
         let target_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN - size;
         for entry in &mut *series {
-            let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+            let samples = visible(
+                entry.samples,
+                smooth,
+                now,
+                window_duration,
+                visible_samples,
+                false,
+            );
             let Some(target) = line_y_at_x(
                 samples,
                 entry.max_sample_gap,
@@ -1806,6 +1839,57 @@ mod tests {
         assert!(
             mean(&before) - mean(&after) > 1.0,
             "the tip did not walk the segment: {before:?} then {after:?}"
+        );
+    }
+
+    /// The line pass keeps one sample older than the visible cut, so the
+    /// departing vertex maps to a negative x and the segment into the picture
+    /// is clipped by the edge. Without it the polyline would start at the
+    /// oldest on-screen sample and leave the first few columns empty until
+    /// that sample arrived at the edge.
+    #[test]
+    fn the_line_reaches_the_left_edge_through_one_older_sample() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.sample_cursor = false;
+        config.window_seconds = 30;
+        config.max_y_ms = 1_000;
+        let now = Instant::now();
+        // Window 30 plus the 3s hold puts the cut at age 33 and 10px per
+        // second maps age to x = 330 - 10 * age: the oldest sample here is 34s
+        // old (x = -10) and the next is 32 (x = 10). Cropped without the older
+        // sample the line would start at x = 10 — the first columns empty.
+        let samples = aged_samples(
+            now,
+            &[
+                (34, 100),
+                (32, 100),
+                (31, 100),
+                (30, 100),
+                (29, 100),
+                (28, 100),
+            ],
+        );
+
+        let leftmost = |at: Instant| -> usize {
+            let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], at, true);
+            let green = positions_of_color(&pixels, 300, [0, 255, 0]);
+            green
+                .iter()
+                .map(|(_, column)| *column)
+                .min()
+                .expect("the line drew nothing")
+        };
+
+        let first = leftmost(now);
+        assert!(first <= 1, "the line did not reach the left edge: {first}");
+        // Half a second later the cut keeps a different older sample (the
+        // same ones are half a second older), and the line still leaves
+        // through the edge: the segment now runs from x = -15 to x = 5.
+        let later = leftmost(now + Duration::from_millis(500));
+        assert!(
+            later <= 1,
+            "the line stopped at column {later} half a second later"
         );
     }
 
