@@ -135,11 +135,13 @@
     before the setting existed): every line casts a soft glow in its own colour,
     so each host of a group glows in the colour of its line. The cast falls
     toward the zero line in the graph's own frame, which means it rotates and
-    mirrors with the overlay rather than staying screen-down. Intensity
-    (0–100, default 10) and radius (2–50 px, default 30) are per overlay, and
-    the startup prefill glows in the prefill colour. The overlay box reserves
-    room past the zero line for the cast, so the Y axis keeps the height
-    `graphHeightPx` names and a line sitting on the zero line is not cut off.
+    mirrors with the overlay rather than staying screen-down. The cast never
+    appears on the far side of a line — however sharp a spike, no glow wraps
+    over its peak. Intensity (0–100, default 10) and radius (2–50 px, default
+    30) are per overlay, and the startup prefill glows in the prefill colour.
+    The overlay box reserves room past the zero line for the cast, so the Y axis
+    keeps the height `graphHeightPx` names and a line sitting on the zero line
+    is not cut off.
 - **Display Mode** is one of three exclusive placements, chosen in a **Display
   Mode** section under Position and defaulting to **Global Overlay**:
   - **Global Overlay** places the overlay on a display. Position is one of 9

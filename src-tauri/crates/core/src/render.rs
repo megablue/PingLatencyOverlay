@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use tiny_skia::{IntSize, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{IntSize, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::border::{self, BorderVisual};
 use crate::config::{OverlayConfig, MAX_LINE_STROKE_PX, MIN_LINE_STROKE_PX};
@@ -130,7 +130,7 @@ pub fn render_series_into_with_border(
 
 /// The room the underglow needs past the zero line, in physical pixels.
 ///
-/// The deepest cast layer reaches the radius past the line's edge, and
+/// The cast's deepest band reaches the radius past the line's centre, and
 /// antialiasing spends about half a pixel more. The axis's own pad already
 /// carries the stroke's half-width plus half a pixel for that (`stroke_pad`),
 /// so the reserve is the radius plus one, whatever the stroke is. It is added
@@ -406,21 +406,36 @@ enum LinePass {
     Core,
 }
 
-/// The number of nested strokes a cast is drawn with.
+/// The width of one band of a cast.
 ///
-/// One per pixel of reach reads as a gradient, so the lower cap keeps a small
-/// radius from collapsing into one hard band and the upper one keeps the
-/// widest casts to bands under two pixels instead of a stack of stripes.
+/// A cast is built from thin copies of the path, one per depth; a band that
+/// spread sideways with depth would put glow where the line is not.
+const GLOW_BAND_WIDTH: f32 = 1.5;
+
+/// The depth step between a cast's bands: half a band, so neighbouring bands
+/// overlap and the stack reads as one gradient rather than a stripe per step.
+const GLOW_BAND_STEP: f32 = 0.75;
+
+/// The number of bands a cast is drawn with: one per half-band of reach.
+///
+/// The lower cap keeps a small radius from collapsing into a single hard band;
+/// the upper one keeps a wide cast's stroke count bounded.
 fn glow_layer_count(radius: f32) -> usize {
-    (radius.round() as usize).clamp(3, 64)
+    ((radius / GLOW_BAND_STEP).ceil() as usize).clamp(3, 64)
 }
 
-/// Stroke one finished run of a line: its core, or one layer of its cast.
+/// Stroke one finished run of a line: its core, or its cast.
 ///
-/// A cast layer is the same path stroked wider and translated by half that
-/// width along `glow.dir`, which puts the layer's back edge exactly on the
-/// line; the core covers that edge, so nothing shows above the line. The
-/// layers nest with falling alphas, which reads as one soft gradient below it.
+/// The cast is the shadow the run drops along `glow.dir`: the same path copied
+/// at a band of depths, each copy stroked thin with a falling alpha. Only the
+/// translation moves a copy, so no part of the cast can land on the far side
+/// of the line. A stroke that grew *wider* with depth cannot promise that — it
+/// also grows sideways, and its miter joins spike outward at corners, which is
+/// what wrapped glow over the top of every sharp spike. The copies overlap, so
+/// the stack composites to less than the sum of its alphas; each band carries
+/// its share of the overlap it sits in, or the cast would read weaker than the
+/// nested strokes it replaced. The core covers the first band's edge on the
+/// line itself.
 fn stroke_run(
     pixmap: &mut Pixmap,
     path: &tiny_skia::Path,
@@ -441,24 +456,32 @@ fn stroke_run(
         return;
     }
     let layers = glow_layer_count(glow.radius);
-    let core_half = stroke.width / 2.0;
-    for index in 1..=layers {
-        // Reach of this layer past the line: the core's half-width plus its
-        // share of the radius.
-        let width = core_half + glow.radius * index as f32 / layers as f32;
-        let t = 1.0 - (index as f32 - 0.5) / layers as f32;
-        let alpha = (glow.intensity * 255.0 * t * t).round().clamp(0.0, 255.0) as u8;
+    let span = (glow.radius - GLOW_BAND_WIDTH).max(0.0);
+    let spacing = span / (layers - 1) as f32;
+    let overlap = if spacing > 0.0 {
+        (GLOW_BAND_WIDTH / spacing + 1.0).min(4.0)
+    } else {
+        1.0
+    };
+    for index in 0..layers {
+        // The band's depth past the line's centre. Starting half a band out
+        // keeps the band's near edge from crossing the line.
+        let depth = GLOW_BAND_WIDTH / 2.0 + spacing * index as f32;
+        let t = (1.0 - depth / glow.radius).max(0.0);
+        let alpha = (glow.intensity * 255.0 * t * t * overlap)
+            .round()
+            .clamp(0.0, 255.0) as u8;
         if alpha == 0 {
             continue;
         }
         let mut layer_paint = Paint::default();
         layer_paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], alpha);
         let layer_stroke = Stroke {
-            width,
+            width: GLOW_BAND_WIDTH,
+            line_join: LineJoin::Bevel,
             ..stroke.clone()
         };
-        let offset = width / 2.0;
-        let transform = Transform::from_translate(glow.dir.0 * offset, glow.dir.1 * offset);
+        let transform = Transform::from_translate(glow.dir.0 * depth, glow.dir.1 * depth);
         pixmap.stroke_path(path, &layer_paint, &layer_stroke, transform, None);
     }
 }
@@ -1879,6 +1902,79 @@ mod tests {
             assert!(
                 shallowest > -1.5,
                 "the cast leaked to the far side at {orientation}/{mirrored}: {shallowest}"
+            );
+        }
+    }
+
+    /// A cast is a shadow: no glow may reach past the line on the far side of
+    /// the cast's direction, however sharp the spike it falls from.
+    ///
+    /// A stroke that grows wider with depth also grows sideways, and its miter
+    /// joins spike outward at a corner — so a bright overlay used to wrap glow
+    /// over the top of every peak. The sweep only ever translates the path
+    /// along the cast direction; this compares the lit render against the same
+    /// line drawn without any glow, and no visible pixel may appear on the far
+    /// side of where the bare line reaches.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    #[test]
+    fn the_underglow_does_not_reach_above_the_line_at_a_spike() {
+        for (orientation, mirrored) in [
+            (0u16, false),
+            (0, true),
+            (90, false),
+            (90, true),
+            (180, false),
+            (180, true),
+            (270, false),
+            (270, true),
+        ] {
+            let spiky: Vec<Option<u32>> = (0..41)
+                .map(|index| Some(if index == 20 { 900 } else { 100 }))
+                .collect();
+            let points = samples(&spiky);
+            let mut config = OverlayConfig::new();
+            config.line_glow = true;
+            config.line_glow_radius_px = 20;
+            config.line_glow_intensity = 100;
+            config.orientation = orientation;
+            config.mirrored = mirrored;
+            config.first_target_mut().line_color = "#00ff00".to_string();
+
+            let (width, height) = if matches!(orientation, 90 | 270) {
+                (100u32, 300u32)
+            } else {
+                (300u32, 100u32)
+            };
+            let lit = render_graph(width, height, &config, &points, Instant::now(), false)
+                .expect("pixmap");
+            // Keep the reserve, drop only the strength, so both renders share
+            // the same axis geometry — turning the glow off would move the
+            // line up by the whole reserved band.
+            config.line_glow_intensity = 0;
+            let bare = render_graph(width, height, &config, &points, Instant::now(), false)
+                .expect("pixmap");
+
+            let dir = glow_direction(orientation, mirrored);
+            // The furthest reach along the far side of the cast: the smallest
+            // projection onto the cast direction among visible pixels.
+            let reach = |pixels: &[u8]| {
+                let mut furthest = f32::MAX;
+                for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                    if pixel[3] < 24 {
+                        continue;
+                    }
+                    let column = (index % width as usize) as f32 + 0.5;
+                    let row = (index / width as usize) as f32 + 0.5;
+                    furthest = furthest.min(column * dir.0 + row * dir.1);
+                }
+                furthest
+            };
+            let line_reach = reach(&bare);
+            let lit_reach = reach(&lit);
+            assert!(
+                lit_reach >= line_reach - 1.5,
+                "the cast reached past the line at {orientation}/{mirrored}: \
+                 lit {lit_reach} vs line {line_reach}"
             );
         }
     }

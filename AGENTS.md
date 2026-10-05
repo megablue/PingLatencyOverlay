@@ -1062,8 +1062,16 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   `graphHeightPx` names. The cast direction is `glow_direction`, the image of
   the graph's +Y basis under the same rotation and mirror as `transform_point`
   (they share `rotation`), because screen-down would smear a 90°/270° overlay's
-  cast along the time axis. Timeout markers end at the canvas edge rather than
-  at `bottom`, so they run through that band. The draw order is every series'
+  cast along the time axis. A cast is a sweep — the path copied at a band of
+  depths (`GLOW_BAND_STEP` apart) and each copy stroked thin at
+  `GLOW_BAND_WIDTH` — never a stroke that grows with depth: a widening stroke
+  also spreads sideways and its miter joins spike outward at corners, which is
+  what wrapped glow over the top of every sharp spike. Bevel joins and the
+  band's own near edge keep every copy behind its own line, so no mask exists
+  to clip a host's glow against another host's geometry.
+  `the_underglow_does_not_reach_above_the_line_at_a_spike` pins it. Timeout
+  markers end at the canvas edge rather than at `bottom`, so they run through
+  that band. The draw order is every series'
   cast, then every marker, then every series' core: a glow over a marker would
   tint it into the glow, while a core still lands on top of a marker it crosses
   and no glow can tint an earlier host's line where two cross.
@@ -1072,8 +1080,8 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   it to the lines and to the timeout markers alike. `stroke_pad` —
   `(width / 2 + 0.5).max(2)` — keeps the pixmap edge from slicing a thick line
   clamped to the ceiling or resting on the zero line; at the default 1.5px it is
-  exactly the old 2px. The cast's layers already start at the core's half-width
-  (`stroke.width / 2.0`), so a thicker line's glow starts at its edge and the
+  exactly the old 2px. The core covers the first glow band up to its own
+  half-width, so a thicker line's glow still reads from its edge, and the
   reserve stays `radius + 1`.
 - Graph orientation, timeout marks, the X and Y axes and the work-area
   positioning rules are behavior and live in `docs/SPEC.md`; do not restate them
