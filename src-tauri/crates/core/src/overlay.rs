@@ -15,7 +15,8 @@ use crate::monitors::{MonitorInfo, Rect};
 use crate::probes::SampleStore;
 use crate::render::{
     cosmetic_prefill_samples, line_glow_reserve_px, render_series_into_with_border,
-    sample_gap_threshold, SamplePoint, Series,
+    sample_cursor_reserve_px, sample_cursor_room_px, sample_gap_threshold, CursorAnimation,
+    SamplePoint, Series,
 };
 use crate::rules::CompiledMatcher;
 use crate::sticky;
@@ -455,6 +456,8 @@ struct WindowSeries {
     generation: u64,
     /// The prefill and the live samples merged in time order.
     history: Vec<SamplePoint>,
+    /// Where the sample cursor was last drawn, and whether it is still easing.
+    cursor: CursorAnimation,
 }
 
 impl WindowSeries {
@@ -464,6 +467,7 @@ impl WindowSeries {
             samples: Vec::new(),
             generation: 0,
             history: Vec::new(),
+            cursor: CursorAnimation::default(),
         }
     }
 }
@@ -1042,7 +1046,12 @@ impl OverlayManager {
                         || window.last_rendered.elapsed()
                             >= smooth_frame_interval(window.config.smooth_fps))
             });
-            if changed || surface_changed || smooth_due || prefill_due || border_due {
+            // A cursor that is still easing needs frames of its own: index mode
+            // has no clock, and the next sample is a second away.
+            let cursor_due = window.config.sample_cursor
+                && window.series.iter().any(|series| series.cursor.is_active())
+                && window.last_rendered.elapsed() >= border_frame_interval();
+            if changed || surface_changed || smooth_due || prefill_due || border_due || cursor_due {
                 if Self::render_window(window, smooth) {
                     window.last_rendered = Instant::now();
                 } else {
@@ -1219,6 +1228,19 @@ impl OverlayManager {
             .then(border_frame_interval)
     }
 
+    /// How fast the renderer must redraw while a sample cursor is easing.
+    ///
+    /// Index mode has no frame clock of its own, so without this the cursor
+    /// would only move when a sample arrives — a jump, which is the easing's
+    /// whole point to avoid.
+    pub fn cursor_repaint_interval(&self) -> Option<Duration> {
+        self.windows
+            .values()
+            .filter(|window| !window.hidden && window.config.sample_cursor)
+            .any(|window| window.series.iter().any(|series| series.cursor.is_active()))
+            .then(border_frame_interval)
+    }
+
     fn create_window(
         &self,
         config: &OverlayConfig,
@@ -1379,22 +1401,23 @@ impl OverlayManager {
             .collect();
         let rendered = if has_prefill {
             if prefill_complete {
-                let series: Vec<Series<'_>> = window
+                let mut series: Vec<Series<'_>> = window
                     .series
-                    .iter()
+                    .iter_mut()
                     .zip(targets.iter())
                     .map(|(entry, target)| Series {
                         line_color: &target.line_color,
                         timeout_color: &target.timeout_color,
                         samples: &entry.history,
                         max_sample_gap: sample_gap_threshold(target.timeout_ms),
+                        cursor: Some(&mut entry.cursor),
                     })
                     .collect();
                 render_series_into_with_border(
                     width,
                     height,
                     &window.config,
-                    &series,
+                    &mut series,
                     now,
                     render_smooth,
                     border.as_ref(),
@@ -1416,7 +1439,7 @@ impl OverlayManager {
                         .prefill_points
                         .push(samples.iter().take(count).copied().collect::<Vec<_>>());
                 }
-                let series: Vec<Series<'_>> = targets
+                let mut series: Vec<Series<'_>> = targets
                     .iter()
                     .zip(window.prefill_points.iter())
                     .map(|(target, samples)| Series {
@@ -1424,13 +1447,14 @@ impl OverlayManager {
                         timeout_color: &target.timeout_color,
                         samples,
                         max_sample_gap: sample_gap_threshold(target.timeout_ms),
+                        cursor: None,
                     })
                     .collect();
                 render_series_into_with_border(
                     width,
                     height,
                     &window.config,
-                    &series,
+                    &mut series,
                     now,
                     render_smooth,
                     border.as_ref(),
@@ -1438,22 +1462,23 @@ impl OverlayManager {
                 )
             }
         } else {
-            let series: Vec<Series<'_>> = window
+            let mut series: Vec<Series<'_>> = window
                 .series
-                .iter()
+                .iter_mut()
                 .zip(targets.iter())
                 .map(|(entry, target)| Series {
                     line_color: &target.line_color,
                     timeout_color: &target.timeout_color,
                     samples: &entry.samples,
                     max_sample_gap: sample_gap_threshold(target.timeout_ms),
+                    cursor: Some(&mut entry.cursor),
                 })
                 .collect();
             render_series_into_with_border(
                 width,
                 height,
                 &window.config,
-                &series,
+                &mut series,
                 now,
                 smooth,
                 border.as_ref(),
@@ -1787,15 +1812,28 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
     // same amount. The reserve is not scaled by DPI because the glow radius it
     // mirrors is a physical pixel size.
     let reserve = line_glow_reserve_px(config) as i32;
+    // The cursor owns a band past the newest sample on the long side and half
+    // a triangle's height at each end of the axis. The window grows for both
+    // and the renderer insets by the same amounts, so the axis keeps its
+    // configured size and a cursor on the zero line or the ceiling stays
+    // whole. Physical pixels, like the glow radius.
+    let cursor_reserve = sample_cursor_reserve_px(config) as i32;
+    let cursor_room = sample_cursor_room_px(config) as i32 * 2;
     let (long_px, short_px) = if matches!(config.orientation, 90 | 270) {
         (
-            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32 + reserve,
-            (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32,
+            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
+                + reserve
+                + cursor_room,
+            (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
+                + cursor_reserve,
         )
     } else {
         (
-            (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32,
-            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32 + reserve,
+            (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
+                + cursor_reserve,
+            (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
+                + reserve
+                + cursor_room,
         )
     };
     let size = (long_px.max(1), short_px.max(1));
@@ -2023,6 +2061,7 @@ mod tests {
         };
         let mut overlay = OverlayConfig::new();
         overlay.line_glow = false;
+        overlay.sample_cursor = false;
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
         assert_eq!(size, (120, 60));
 
@@ -2043,5 +2082,52 @@ mod tests {
         // The reserve is a physical size and is not scaled with the display.
         let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
         assert_eq!(scaled, (125, 240));
+    }
+
+    /// The cursor reserves a constant 2px gutter on the leading side of the
+    /// long axis — the base sits flush at the edge, and the apex grows back
+    /// along the line as the cursor grows — plus room at both ends of the axis
+    /// so the triangle is never sliced and the axis keeps the size
+    /// `windowSeconds`/`graphHeightPx` name. Both reserves are physical sizes,
+    /// not scaled with the display.
+    #[test]
+    fn the_sample_cursor_reserves_room_on_both_axes() {
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let mut overlay = OverlayConfig::new();
+        overlay.line_glow = false;
+        overlay.sample_cursor = false;
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120, 60));
+
+        overlay.sample_cursor = true;
+        assert_eq!(
+            sample_cursor_reserve_px(&overlay),
+            2,
+            "a constant gutter: the edge margin plus half the rim"
+        );
+        assert_eq!(
+            sample_cursor_room_px(&overlay),
+            9,
+            "half the triangle (0.7 * 10) plus half the rim and a pixel"
+        );
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120 + 2, 60 + 2 * 9));
+
+        overlay.orientation = 90;
+        let (rotated, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(rotated, (60 + 2 * 9, 120 + 2));
+
+        overlay.orientation = 0;
+        overlay.sample_cursor_size_px = 20;
+        let (large, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(large, (120 + 2, 60 + 2 * 16));
+
+        let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
+        assert_eq!(scaled, (2 * 120 + 2, 2 * 60 + 2 * 16));
     }
 }

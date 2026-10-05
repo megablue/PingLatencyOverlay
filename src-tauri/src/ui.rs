@@ -6222,6 +6222,40 @@ fn edit_overlay(
                     *changed = true;
                 }
                 ui.end_row();
+
+                ui.label("Sample cursor").on_hover_text(
+                    "Mark each line's newest drawn sample with a triangle.\n\
+                     The cursor sits at the last value the line drew and \
+                     rotates with the graph.",
+                );
+                if ui.checkbox(&mut overlay.sample_cursor, "Enabled").changed() {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Cursor size (px)")
+                    .on_hover_text("Length of the triangle's body.");
+                let mut cursor_size = overlay.sample_cursor_size_px as i64;
+                if ui
+                    .add_enabled(
+                        overlay.sample_cursor,
+                        egui::Slider::new(
+                            &mut cursor_size,
+                            config::MIN_SAMPLE_CURSOR_SIZE_PX as i64
+                                ..=config::MAX_SAMPLE_CURSOR_SIZE_PX as i64,
+                        )
+                        .suffix(" px")
+                        .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    overlay.sample_cursor_size_px = cursor_size.clamp(
+                        config::MIN_SAMPLE_CURSOR_SIZE_PX as i64,
+                        config::MAX_SAMPLE_CURSOR_SIZE_PX as i64,
+                    ) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
             });
     });
 

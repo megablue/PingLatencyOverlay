@@ -1083,6 +1083,24 @@ Every trap below shipped once. Each test named here fails on the old behaviour.
   exactly the old 2px. The core covers the first glow band up to its own
   half-width, so a thicker line's glow still reads from its edge, and the
   reserve stays `radius + 1`.
+- **The sample cursor is a graph-space triangle anchored to the leading edge,
+  and one pair of reserves owns its room.** `draw_sample_cursor` puts the base
+  flush at the leading edge and the apex one size back along the time axis, and
+  `line_y_at_x` walks the series with `draw_series`' own state machine
+  (connectors, resume stubs, gaps) so the apex rides the drawn line rather than
+  the newest sample; all three vertices go through `transform_point`, so it
+  rotates and mirrors with the line instead of being painted upright. A
+  per-series `CursorAnimation` in `WindowSeries`, threaded to the renderer as
+  `Series.cursor`, eases the apex (~150 ms) and asks for repaints while it is
+  still moving; the pure test path passes `None` and draws the target directly.
+  Two physical-pixel marks are read by both `overlay::layout_in_rect` and
+  `render_graph_into_internal`, the way the underglow's reserve is:
+  `sample_cursor_reserve_px` (a constant gutter — the edge margin plus half the
+  rim) and `sample_cursor_room_px` (each end of the latency axis, twice in the
+  window's short dimension), so the box and the drawing cannot disagree. It
+  draws after the cores and before the border, per host, and it settles on the
+  last value because a timeout writes no sample. Default on, absent key
+  included, unlike the underglow.
 - Graph orientation, timeout marks, the X and Y axes and the work-area
   positioning rules are behavior and live in `docs/SPEC.md`; do not restate them
   here.

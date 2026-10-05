@@ -142,6 +142,19 @@
     The overlay box reserves room past the zero line for the cast, so the Y axis
     keeps the height `graphHeightPx` names and a line sitting on the zero line
     is not cut off.
+  - Sample cursor (on by default, including for a profile written before the
+    setting existed; an explicit off turns it off): a white triangle with a dark
+    rim marks each line's leading end. Its base sits flush against the leading
+    edge and its apex points back along the line, so how far back it reaches is
+    the cursor's size; the apex sits on the line itself, interpolated between
+    samples — including a spike's flank or the jog where a line resumes after a
+    timeout — and it eases to a new value instead of jumping. Through a timeout
+    it holds the last value the line drew, because a timeout writes no point.
+    It rotates and mirrors with the graph. Size is configurable
+    (`sampleCursorSizePx`, 4–20 px, default 10). The overlay box reserves a
+    constant gutter at the leading edge for the base and room at both ends of
+    the Y axis, so the axis keeps its length and height and a cursor on the zero
+    line or clamped at the ceiling stays whole.
 - **Display Mode** is one of three exclusive placements, chosen in a **Display
   Mode** section under Position and defaulting to **Global Overlay**:
   - **Global Overlay** places the overlay on a display. Position is one of 9
@@ -219,7 +232,7 @@
 - What belongs to the **group** is the appearance of the window and the plot —
   orientation, mirror, time window, scale, smoothing, the startup prefill and
   border, graph height, latency ceiling, position, offsets, monitor, background
-  colour and opacity, line width, line glow.
+  colour and opacity, line width, line glow, sample cursor.
 - What belongs to a **host** is the probe itself and the two colours that
   identify its line: protocol, target, port, timeout, line colour and timeout
   colour. A host can also be switched off without being deleted.

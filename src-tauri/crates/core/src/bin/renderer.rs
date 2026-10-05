@@ -238,6 +238,7 @@ fn repaint_interval(state: &State, overlays: &OverlayManager) -> Duration {
         .into_iter()
         .chain(overlays.prefill_repaint_interval())
         .chain(overlays.border_repaint_interval())
+        .chain(overlays.cursor_repaint_interval())
         .min()
         .unwrap_or(REPAINT_INTERVAL)
 }

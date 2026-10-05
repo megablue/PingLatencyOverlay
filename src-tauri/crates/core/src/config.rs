@@ -77,6 +77,13 @@ pub const DEFAULT_LINE_STROKE_PX: f32 = 1.5;
 pub const MIN_LINE_STROKE_PX: f32 = 0.5;
 /// Largest accepted stroke width, in pixels.
 pub const MAX_LINE_STROKE_PX: f32 = 6.0;
+/// Default length of the triangle marking a line's newest drawn sample, in
+/// physical pixels.
+pub const DEFAULT_SAMPLE_CURSOR_SIZE_PX: u32 = 10;
+/// Smallest accepted cursor size, in physical pixels.
+pub const MIN_SAMPLE_CURSOR_SIZE_PX: u32 = 4;
+/// Largest accepted cursor size, in physical pixels.
+pub const MAX_SAMPLE_CURSOR_SIZE_PX: u32 = 20;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -221,6 +228,19 @@ pub struct OverlayConfig {
     /// How far the underglow reaches past a line, in physical pixels.
     #[serde(default = "default_line_glow_radius_px")]
     pub line_glow_radius_px: u32,
+    /// Draw a triangle on each line's newest drawn sample.
+    ///
+    /// The cursor keeps pointing at the last value the line drew: a timeout
+    /// writes no point, so the cursor stays where the line stopped, and the
+    /// startup prefill's head counts as drawn. The window reserves a band on
+    /// the leading edge for it — `sample_cursor_reserve_px` is the one
+    /// statement of how much — plus a little room at both ends of the axis so
+    /// the triangle is never sliced. On by default, absent key included.
+    #[serde(default = "default_sample_cursor")]
+    pub sample_cursor: bool,
+    /// Length of the sample cursor's triangle, in physical pixels.
+    #[serde(default = "default_sample_cursor_size_px")]
+    pub sample_cursor_size_px: u32,
     /// The display this overlay belongs to, as a Win32 device name
     /// (`\\.\DISPLAY2`), or `None` to follow the primary monitor.
     ///
@@ -529,6 +549,8 @@ impl OverlayConfig {
             line_glow: true,
             line_glow_intensity: default_line_glow_intensity(),
             line_glow_radius_px: default_line_glow_radius_px(),
+            sample_cursor: true,
+            sample_cursor_size_px: default_sample_cursor_size_px(),
             monitor_device: None,
             display_mode: DisplayMode::Global,
             sticky_target: None,
@@ -661,6 +683,12 @@ fn default_line_glow_intensity() -> u32 {
 }
 fn default_line_glow_radius_px() -> u32 {
     DEFAULT_LINE_GLOW_RADIUS_PX
+}
+fn default_sample_cursor() -> bool {
+    true
+}
+fn default_sample_cursor_size_px() -> u32 {
+    DEFAULT_SAMPLE_CURSOR_SIZE_PX
 }
 
 fn anchor_has_horizontal_edge(anchor: Anchor) -> bool {
@@ -808,6 +836,9 @@ impl Config {
             o.line_glow_radius_px = o
                 .line_glow_radius_px
                 .clamp(MIN_LINE_GLOW_RADIUS_PX, MAX_LINE_GLOW_RADIUS_PX);
+            o.sample_cursor_size_px = o
+                .sample_cursor_size_px
+                .clamp(MIN_SAMPLE_CURSOR_SIZE_PX, MAX_SAMPLE_CURSOR_SIZE_PX);
             // A blank name is not a monitor. Left alone it would name a display
             // that does not exist and the overlay would stay hidden with no
             // way to tell from the screen that it had been asked for.
@@ -2171,6 +2202,8 @@ mod tests {
         assert!(overlay.line_glow);
         assert_eq!(overlay.line_glow_intensity, DEFAULT_LINE_GLOW_INTENSITY);
         assert_eq!(overlay.line_glow_radius_px, DEFAULT_LINE_GLOW_RADIUS_PX);
+        assert!(overlay.sample_cursor);
+        assert_eq!(overlay.sample_cursor_size_px, DEFAULT_SAMPLE_CURSOR_SIZE_PX);
     }
 
     /// The underglow is off for every profile written before it existed, and
@@ -2201,6 +2234,47 @@ mod tests {
         assert_eq!(
             config.overlays[0].line_glow_radius_px,
             MIN_LINE_GLOW_RADIUS_PX
+        );
+    }
+
+    /// The sample cursor is on for every profile, including one written before
+    /// the setting existed, and its size settles inside its limits. Only an
+    /// explicit `false` turns it off.
+    #[test]
+    fn sample_cursor_defaults_on_and_clamps_its_size() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert!(overlay.sample_cursor);
+        assert_eq!(overlay.sample_cursor_size_px, DEFAULT_SAMPLE_CURSOR_SIZE_PX);
+
+        let disabled: OverlayConfig = serde_json::from_str(
+            r#"{"id":"off","probe":{"protocol":"icmp","host":"1.1.1.1"},"sampleCursor":false}"#,
+        )
+        .expect("explicit off");
+        assert!(!disabled.sample_cursor);
+
+        let mut config = Config {
+            overlays: vec![
+                OverlayConfig {
+                    sample_cursor_size_px: 0,
+                    ..OverlayConfig::new()
+                },
+                OverlayConfig {
+                    sample_cursor_size_px: 99,
+                    ..OverlayConfig::new()
+                },
+            ],
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(
+            config.overlays[0].sample_cursor_size_px,
+            MIN_SAMPLE_CURSOR_SIZE_PX
+        );
+        assert_eq!(
+            config.overlays[1].sample_cursor_size_px,
+            MAX_SAMPLE_CURSOR_SIZE_PX
         );
     }
 

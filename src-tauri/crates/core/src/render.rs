@@ -2,10 +2,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use tiny_skia::{IntSize, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{FillRule, IntSize, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::border::{self, BorderVisual};
-use crate::config::{OverlayConfig, MAX_LINE_STROKE_PX, MIN_LINE_STROKE_PX};
+use crate::config::{
+    OverlayConfig, MAX_LINE_STROKE_PX, MAX_SAMPLE_CURSOR_SIZE_PX, MIN_LINE_STROKE_PX,
+    MIN_SAMPLE_CURSOR_SIZE_PX,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SamplePoint {
@@ -27,6 +30,57 @@ pub struct Series<'a> {
     /// An interval longer than this between consecutive samples is a period
     /// nothing was measuring this target; see `sample_gap_threshold`.
     pub max_sample_gap: Duration,
+    /// The live easing state for this series' sample cursor, when a window
+    /// keeps one. `None` — the test path — draws the target position directly.
+    pub cursor: Option<&'a mut CursorAnimation>,
+}
+
+/// The eased position of one series' sample cursor.
+///
+/// The cursor follows the drawn line at its own apex, which steps when a
+/// sample arrives and creeps while the graph scrolls. Easing those steps is
+/// what keeps the cursor looking attached to the line instead of teleporting
+/// from point to point.
+#[derive(Default)]
+pub struct CursorAnimation {
+    /// Last drawn y, in graph coordinates.
+    y: Option<f32>,
+    /// When `y` was last advanced; the next step's time constant uses it.
+    at: Option<Instant>,
+    /// Whether the cursor is still moving toward a newer target.
+    active: bool,
+}
+
+impl CursorAnimation {
+    /// Advance toward `target` and return the y to draw this frame.
+    pub fn advance(&mut self, now: Instant, target: f32) -> f32 {
+        let next = match (self.y, self.at) {
+            (Some(y), Some(at)) => {
+                let dt = now.saturating_duration_since(at).as_secs_f32();
+                let k = 1.0 - (-dt / CURSOR_EASE_SECS).exp();
+                y + (target - y) * k
+            }
+            // Nothing to ease from yet: the first frame snaps into place, and
+            // so does a resumed one that has been away for a long interval,
+            // because the exponential step is then all but complete.
+            _ => target,
+        };
+        self.at = Some(now);
+        if (target - next).abs() <= CURSOR_EASE_EPSILON {
+            self.y = Some(target);
+            self.active = false;
+            target
+        } else {
+            self.y = Some(next);
+            self.active = true;
+            next
+        }
+    }
+
+    /// Whether the last advance left the cursor short of its target.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
 }
 
 /// One graph tick: the rate the sampler writes samples at.
@@ -83,7 +137,7 @@ pub fn render_series_into(
     width: u32,
     height: u32,
     config: &OverlayConfig,
-    series: &[Series<'_>],
+    series: &mut [Series<'_>],
     now: Instant,
     smooth: bool,
     pixels: &mut Vec<u8>,
@@ -105,13 +159,23 @@ pub fn render_graph_into_with_border(
     pixels: &mut Vec<u8>,
 ) -> bool {
     let target = config.first_target();
-    let series = [Series {
+    let mut series = [Series {
         line_color: &target.line_color,
         timeout_color: &target.timeout_color,
         samples,
         max_sample_gap: sample_gap_threshold(target.timeout_ms),
+        cursor: None,
     }];
-    render_series_into_with_border(width, height, config, &series, now, smooth, border, pixels)
+    render_series_into_with_border(
+        width,
+        height,
+        config,
+        &mut series,
+        now,
+        smooth,
+        border,
+        pixels,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,7 +183,7 @@ pub fn render_series_into_with_border(
     width: u32,
     height: u32,
     config: &OverlayConfig,
-    series: &[Series<'_>],
+    series: &mut [Series<'_>],
     now: Instant,
     smooth: bool,
     border: Option<&BorderVisual>,
@@ -162,12 +226,68 @@ fn stroke_pad(stroke_width: f32) -> f32 {
     (stroke_width / 2.0 + 0.5).max(2.0)
 }
 
+/// The cursor triangle's rim width, in pixels.
+const SAMPLE_CURSOR_RIM_WIDTH: f32 = 2.0;
+/// The cursor triangle's fill; white with a dark rim reads on any line colour.
+const SAMPLE_CURSOR_FILL: [u8; 3] = [255, 255, 255];
+/// The cursor triangle's rim; the default background colour.
+const SAMPLE_CURSOR_RIM: [u8; 3] = [15, 23, 42];
+/// The gap the triangle's rim leaves at the box edge, in pixels: the outer
+/// edge of the rim is flush against the leading edge of the window.
+const SAMPLE_CURSOR_EDGE_MARGIN: f32 = 1.0;
+/// The cursor's easing time constant, in seconds.
+const CURSOR_EASE_SECS: f32 = 0.15;
+/// How close the cursor must be to its target to count as settled, in pixels.
+const CURSOR_EASE_EPSILON: f32 = 0.25;
+
+fn sample_cursor_size(config: &OverlayConfig) -> u32 {
+    config
+        .sample_cursor_size_px
+        .clamp(MIN_SAMPLE_CURSOR_SIZE_PX, MAX_SAMPLE_CURSOR_SIZE_PX)
+}
+
+/// Half the cursor triangle's height, in pixels.
+fn sample_cursor_half_height(config: &OverlayConfig) -> f32 {
+    sample_cursor_size(config) as f32 * 0.7
+}
+
+/// The band the sample cursor reserves on the leading (newest-sample) edge of
+/// the window, in physical pixels.
+///
+/// The triangle's base is flush against that edge, so the reserve is just the
+/// rim's half width plus a pixel of slack — constant, whatever the cursor's
+/// size. The apex reaches `size - 1` pixels back into the chart and follows
+/// the drawn line, which is what makes a larger cursor point at an earlier
+/// point. Read by both `layout_in_rect` and the renderer, the way the
+/// underglow's reserve is, so the box and the drawing cannot disagree.
+pub fn sample_cursor_reserve_px(config: &OverlayConfig) -> u32 {
+    if config.sample_cursor {
+        (SAMPLE_CURSOR_EDGE_MARGIN + SAMPLE_CURSOR_RIM_WIDTH / 2.0).ceil() as u32
+    } else {
+        0
+    }
+}
+
+/// The room the cursor needs at each end of the latency axis, in physical
+/// pixels: half the triangle's height plus its rim.
+///
+/// The cursor is centred on the line, so a sample resting on the zero line or
+/// clamped to the ceiling would otherwise have half a triangle cut off. Both
+/// ends get the room, because either is one spike away.
+pub fn sample_cursor_room_px(config: &OverlayConfig) -> u32 {
+    if config.sample_cursor {
+        (sample_cursor_half_height(config) + SAMPLE_CURSOR_RIM_WIDTH / 2.0 + 1.0).ceil() as u32
+    } else {
+        0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_graph_into_internal(
     width: u32,
     height: u32,
     config: &OverlayConfig,
-    series: &[Series<'_>],
+    series: &mut [Series<'_>],
     now: Instant,
     smooth: bool,
     border: Option<&BorderVisual>,
@@ -213,9 +333,14 @@ fn render_graph_into_internal(
     let rotated = matches!(config.orientation, 90 | 270);
     let long_px = if rotated { height as f32 } else { width as f32 };
     let short_px = if rotated { width as f32 } else { height as f32 };
+    // The cursor's triangle sits in a band past the newest sample's x, so the
+    // axis stops short of the window's leading edge by the amount the window
+    // grew for it — one statement of the reserve, read here and in the layout.
+    let cursor_reserve = sample_cursor_reserve_px(config) as f32;
+    let axis_long = long_px - cursor_reserve;
     let visible_samples = config.window_seconds.max(1) as usize;
     let window_duration = Duration::from_secs(visible_samples as u64);
-    let step = long_px / visible_samples as f32;
+    let step = axis_long / visible_samples as f32;
 
     let y_max = config.max_y_ms.max(1) as f32;
     // One stroke for the whole overlay: every host line, the startup prefill
@@ -224,11 +349,14 @@ fn render_graph_into_internal(
         .line_stroke_px
         .clamp(MIN_LINE_STROKE_PX, MAX_LINE_STROKE_PX);
     let pad = stroke_pad(stroke_width);
-    let top = pad;
     // The cast falls past the zero line, so the window reserves a band for it:
     // the axis keeps its configured height and the glow gets the room below.
+    // The cursor needs room at both ends of the latency axis as well, or a
+    // sample resting on the zero line or clamped to the ceiling is cut in half.
     let reserve = line_glow_reserve_px(config) as f32;
-    let bottom = short_px - pad - reserve;
+    let cursor_room = sample_cursor_room_px(config) as f32;
+    let top = pad + cursor_room;
+    let bottom = short_px - pad - reserve - cursor_room;
     let map_y = |value: u32| {
         let t = (value as f32).min(y_max) / y_max;
         bottom - t * (bottom - top)
@@ -242,7 +370,7 @@ fn render_graph_into_internal(
             if age > window_duration {
                 return None;
             }
-            Some(long_px * (1.0 - age.as_secs_f32() / window_duration.as_secs_f32()))
+            Some(axis_long * (1.0 - age.as_secs_f32() / window_duration.as_secs_f32()))
         } else {
             Some((index as f32 + 0.5) * step)
         }
@@ -298,7 +426,7 @@ fn render_graph_into_internal(
     // One pass over every series. A glowing overlay calls it twice — all casts,
     // then all cores — so a later host's translucent glow cannot tint an
     // earlier host's line where the two cross.
-    let draw_lines = |pixmap: &mut Pixmap, pass: LinePass| {
+    let draw_lines = |pixmap: &mut Pixmap, pass: LinePass, series: &mut [Series<'_>]| {
         for entry in series {
             let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
             if samples.is_empty() {
@@ -333,9 +461,9 @@ fn render_graph_into_internal(
     // a glow laid over it would tint it into the glow. The cores come last,
     // which keeps the old rule that a line sits on top of a marker it crosses.
     if glow.is_some() {
-        draw_lines(&mut pixmap, LinePass::Glow);
+        draw_lines(&mut pixmap, LinePass::Glow, &mut *series);
     }
-    for entry in series {
+    for entry in &*series {
         // A target that has never responded draws nothing. An empty slice would
         // otherwise contribute a marker at every x if this were expressed as a
         // gap, which is the opposite of what "no data yet" should look like.
@@ -376,7 +504,39 @@ fn render_graph_into_internal(
             pixmap.stroke_path(&path, &timeout_paint, &stroke, Transform::identity(), None);
         }
     }
-    draw_lines(&mut pixmap, LinePass::Core);
+    draw_lines(&mut pixmap, LinePass::Core, &mut *series);
+
+    // The cursor marks the drawn line at its own apex: the base sits flush
+    // against the leading edge and the apex reaches `size` pixels back along
+    // the line, so a larger cursor points at an earlier point. A timeout
+    // writes no sample, so the walk holds the last value the line drew; the
+    // startup prefill's head counts as drawn. Drawn over the cores and under
+    // the border, and independent per host, so no two series' cursors can
+    // affect one another.
+    if config.sample_cursor {
+        let size = sample_cursor_size(config) as f32;
+        let target_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN - size;
+        for entry in &mut *series {
+            let samples = visible(entry.samples, smooth, now, window_duration, visible_samples);
+            let Some(target) = line_y_at_x(samples, entry.max_sample_gap, &map_x, &map_y, target_x)
+            else {
+                continue;
+            };
+            let y = match entry.cursor.as_deref_mut() {
+                Some(animation) => animation.advance(now, target),
+                None => target,
+            };
+            draw_sample_cursor(
+                &mut pixmap,
+                y,
+                long_px,
+                short_px,
+                config.orientation,
+                config.mirrored,
+                size,
+            );
+        }
+    }
 
     if let Some(border) = border {
         border::draw_border(&mut pixmap, width, height, border);
@@ -484,6 +644,164 @@ fn stroke_run(
         let transform = Transform::from_translate(glow.dir.0 * depth, glow.dir.1 * depth);
         pixmap.stroke_path(path, &layer_paint, &layer_stroke, transform, None);
     }
+}
+
+/// Draw the cursor triangle: base flush against the leading edge, apex on the
+/// drawn line, pointing back at the data.
+///
+/// The vertices are built in graph coordinates and transformed like any
+/// sample, so the cursor rotates and mirrors with the overlay. `y` is the apex
+/// height, already resolved against the drawn line and eased; `size` is the
+/// distance from the base to the apex, so a larger cursor reaches further back
+/// along the line. White on a dark rim, fixed for every host, because the
+/// cursor is a marker rather than data.
+fn draw_sample_cursor(
+    pixmap: &mut Pixmap,
+    y: f32,
+    long_px: f32,
+    short_px: f32,
+    orientation: u16,
+    mirrored: bool,
+    size: f32,
+) {
+    let half = size * 0.7;
+    let base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN;
+    let apex_x = base_x - size;
+    let vertices = [
+        transform_point((apex_x, y), long_px, short_px, orientation, mirrored),
+        transform_point((base_x, y - half), long_px, short_px, orientation, mirrored),
+        transform_point((base_x, y + half), long_px, short_px, orientation, mirrored),
+    ];
+    let mut builder = PathBuilder::new();
+    builder.move_to(vertices[0].0, vertices[0].1);
+    builder.line_to(vertices[1].0, vertices[1].1);
+    builder.line_to(vertices[2].0, vertices[2].1);
+    builder.close();
+    let Some(path) = builder.finish() else {
+        return;
+    };
+
+    let mut fill = Paint::default();
+    fill.set_color_rgba8(
+        SAMPLE_CURSOR_FILL[0],
+        SAMPLE_CURSOR_FILL[1],
+        SAMPLE_CURSOR_FILL[2],
+        255,
+    );
+    pixmap.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), None);
+
+    let mut rim = Paint::default();
+    rim.set_color_rgba8(
+        SAMPLE_CURSOR_RIM[0],
+        SAMPLE_CURSOR_RIM[1],
+        SAMPLE_CURSOR_RIM[2],
+        255,
+    );
+    let rim_stroke = Stroke {
+        width: SAMPLE_CURSOR_RIM_WIDTH,
+        ..Stroke::default()
+    };
+    pixmap.stroke_path(&path, &rim, &rim_stroke, Transform::identity(), None);
+}
+
+/// The y the drawn line passes through at `target_x`, in graph coordinates.
+///
+/// Mirrors `draw_series`' walk — including the connector at a prefill
+/// boundary and the vertical resume stub after a timeout or gap — so the
+/// cursor points at what is actually on screen rather than at the nearest
+/// sample's value. When nothing covers `target_x` (the line has not reached it
+/// yet, or a hole passes under the apex), the newest drawn value is the
+/// answer: a timeout writes no sample, and the cursor stays where the line
+/// stopped. Returns `None` when no sample has a value at all.
+fn line_y_at_x(
+    samples: &[SamplePoint],
+    max_sample_gap: Duration,
+    map_x: &dyn Fn(usize, &SamplePoint) -> Option<f32>,
+    map_y: &dyn Fn(u32) -> f32,
+    target_x: f32,
+) -> Option<f32> {
+    let mut covered: Option<f32> = None;
+    let mut newest_y: Option<f32> = None;
+
+    let mut in_segment = false;
+    let mut last_y: Option<f32> = None;
+    let mut last_point: Option<(f32, f32)> = None;
+    let mut current: Option<(f32, f32)> = None;
+    let mut last_timestamp: Option<Instant> = None;
+
+    for (index, sample) in samples.iter().enumerate() {
+        let Some(x) = map_x(index, sample) else {
+            continue;
+        };
+        let gap = last_timestamp.is_some_and(|previous| {
+            sample.timestamp.saturating_duration_since(previous) > max_sample_gap
+        });
+        last_timestamp = Some(sample.timestamp);
+        if gap {
+            in_segment = false;
+            last_point = None;
+            current = None;
+        }
+        let Some(value) = sample.value else {
+            in_segment = false;
+            last_point = None;
+            current = None;
+            continue;
+        };
+        let y = map_y(value);
+        newest_y = Some(y);
+        if !in_segment {
+            match last_point {
+                // A prefill boundary joins continuously: the line runs from
+                // the previous point straight to this one.
+                Some(previous) => {
+                    cover(&mut covered, previous, (x, y), target_x);
+                    current = Some((x, y));
+                }
+                None => {
+                    if let Some(previous_y) = last_y {
+                        // A resume stub: a vertical at this x from the carried
+                        // value to this sample's own, and the line continues
+                        // from the carried value.
+                        cover(&mut covered, (x, y), (x, previous_y), target_x);
+                        current = Some((x, previous_y));
+                    } else {
+                        current = Some((x, y));
+                    }
+                }
+            }
+            in_segment = true;
+        } else if let Some(previous) = current {
+            cover(&mut covered, previous, (x, y), target_x);
+            current = Some((x, y));
+        }
+        last_y = Some(y);
+        last_point = Some((x, y));
+    }
+
+    covered.or(newest_y)
+}
+
+/// Fold one drawn segment into the answer when `target_x` falls on it.
+fn cover(result: &mut Option<f32>, from: (f32, f32), to: (f32, f32), target_x: f32) {
+    let (low, high) = if from.0 <= to.0 {
+        (from.0, to.0)
+    } else {
+        (to.0, from.0)
+    };
+    if target_x < low || target_x > high {
+        return;
+    }
+    let y = if (to.0 - from.0).abs() < f32::EPSILON {
+        // A vertical piece has no slope to read; the later end — the carried
+        // value the line resumes from, or the sample the stub points at — is
+        // what a reader sees at this column.
+        to.1
+    } else {
+        let t = (target_x - from.0) / (to.0 - from.0);
+        from.1 + t * (to.1 - from.1)
+    };
+    *result = Some(y);
 }
 
 /// Stroke one target's line, breaking it at timeouts, data gaps and prefill
@@ -744,13 +1062,23 @@ pub fn render_prefill_into(
     points.clear();
     points.extend(samples.iter().take(count).copied());
     let line_color = &config.first_target().line_color;
-    let series = [Series {
+    let mut series = [Series {
         line_color,
         timeout_color: &config.first_target().timeout_color,
         samples: points,
         max_sample_gap: sample_gap_threshold(config.first_target().timeout_ms),
+        cursor: None,
     }];
-    render_series_into_with_border(width, height, config, &series, now, true, border, pixels)
+    render_series_into_with_border(
+        width,
+        height,
+        config,
+        &mut series,
+        now,
+        true,
+        border,
+        pixels,
+    )
 }
 
 /// The rotation half of `transform_point`, shared with the underglow's cast
@@ -914,13 +1242,14 @@ mod tests {
         smooth: bool,
     ) -> Vec<u8> {
         let entries: Vec<(&str, &str, &[SamplePoint])> = entries.to_vec();
-        let series: Vec<Series<'_>> = entries
+        let mut series: Vec<Series<'_>> = entries
             .iter()
             .map(|(line, timeout, points)| Series {
                 line_color: line,
                 timeout_color: timeout,
                 samples: points,
                 max_sample_gap: sample_gap_threshold(config.first_target().timeout_ms),
+                cursor: None,
             })
             .collect();
         let mut pixels = Vec::new();
@@ -928,7 +1257,7 @@ mod tests {
             300,
             100,
             config,
-            &series,
+            &mut series,
             now,
             smooth,
             &mut pixels
@@ -1125,6 +1454,9 @@ mod tests {
     fn a_newly_added_host_is_placed_by_its_own_timestamps() {
         let mut config = OverlayConfig::new();
         config.window_seconds = 30;
+        // The cursor's reserve would move the right edge this test measures
+        // against; it is about placement, not the marker.
+        config.sample_cursor = false;
         let now = Instant::now();
         let long = samples(&[Some(100); 60]);
 
@@ -1178,6 +1510,8 @@ mod tests {
         // The cast's round caps at the run ends would bleed line-coloured pixels
         // into the hole; this test is about where the line itself was drawn.
         config.line_glow = false;
+        // Same for the cursor: its reserve and its triangle are not the line.
+        config.sample_cursor = false;
         config.window_seconds = 30;
         config.max_y_ms = 1_000;
         let now = Instant::now();
@@ -1238,6 +1572,8 @@ mod tests {
         // The cast's round caps at the run ends would bleed line-coloured pixels
         // into the hole; this test is about where the line itself was drawn.
         config.line_glow = false;
+        // Same for the cursor: its reserve and its triangle are not the line.
+        config.sample_cursor = false;
         config.window_seconds = 10;
         config.max_y_ms = 1_000;
         let now = Instant::now();
@@ -1288,6 +1624,8 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.window_seconds = 30;
         config.max_y_ms = 1_000;
+        // The cursor would sit at the right edge of the columns under test.
+        config.sample_cursor = false;
         let now = Instant::now();
         let entries: Vec<(u64, u32)> = (0..10u32)
             .map(|index| (u64::from(9 - index), 100 + index * 20))
@@ -1728,6 +2066,9 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.line_glow = false;
         config.line_stroke_px = MAX_LINE_STROKE_PX;
+        // The cursor's room would inset the line from both edges and make the
+        // edge assertions pass for the wrong reason.
+        config.sample_cursor = false;
         let now = Instant::now();
         let alpha_at = |pixels: &[u8], row: usize, column: usize| -> u8 {
             pixels[(row * 300 + column) * 4 + 3]
@@ -1939,6 +2280,9 @@ mod tests {
             config.orientation = orientation;
             config.mirrored = mirrored;
             config.first_target_mut().line_color = "#00ff00".to_string();
+            // The cursor is in both renders, and its own corners reach on both
+            // sides of the line: leaving it in would flatten the comparison.
+            config.sample_cursor = false;
 
             let (width, height) = if matches!(orientation, 90 | 270) {
                 (100u32, 300u32)
@@ -1986,6 +2330,9 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.line_glow = true;
         config.line_glow_radius_px = 4;
+        // This test computes the line's row from the plain pad and reserve; the
+        // cursor's room would move it.
+        config.sample_cursor = false;
         let now = Instant::now();
         let upper = samples(&[Some(300); 40]);
         let lower = samples(&[Some(700); 40]);
@@ -2072,5 +2419,229 @@ mod tests {
             run > 100,
             "the earlier host's core was tinted by the later host's glow: {run} pure pixels"
         );
+    }
+
+    /// The cursor is anchored to the box, not to the sample: its base lies on
+    /// the leading edge and its apex reaches `size` back from it, in every
+    /// orientation and mirror — the triangle is built in graph coordinates and
+    /// transformed like the line, so it follows the rotation rather than
+    /// staying upright.
+    #[test]
+    fn the_sample_cursor_sits_flush_at_the_leading_edge() {
+        for (orientation, mirrored) in [
+            (0u16, false),
+            (0, true),
+            (90, false),
+            (90, true),
+            (180, false),
+            (180, true),
+            (270, false),
+            (270, true),
+        ] {
+            let mut config = OverlayConfig::new();
+            config.orientation = orientation;
+            config.mirrored = mirrored;
+            config.window_seconds = 30;
+            config.first_target_mut().line_color = "#00ff00".to_string();
+            let now = Instant::now();
+            let points = samples(&[Some(200); 20]);
+            let (width, height) = if matches!(orientation, 90 | 270) {
+                (100u32, 300u32)
+            } else {
+                (300u32, 100u32)
+            };
+            let pixels = render_graph(width, height, &config, &points, now, false).expect("pixmap");
+            let white = positions_of_color(&pixels, width as usize, [255, 255, 255]);
+            assert!(
+                !white.is_empty(),
+                "no cursor was drawn at {orientation}/{mirrored}"
+            );
+
+            // Where the triangle should be, from the same reserves the
+            // renderer reads rather than from hardcoded numbers. The line is
+            // flat, so the apex sits on the flat value's y wherever it lands.
+            let (long_px, short_px) = if matches!(orientation, 90 | 270) {
+                (height as f32, width as f32)
+            } else {
+                (width as f32, height as f32)
+            };
+            let pad = stroke_pad(config.line_stroke_px);
+            let top = pad + sample_cursor_room_px(&config) as f32;
+            let bottom = short_px
+                - pad
+                - line_glow_reserve_px(&config) as f32
+                - sample_cursor_room_px(&config) as f32;
+            let line_y = bottom - 0.2 * (bottom - top);
+            let size = sample_cursor_size(&config) as f32;
+            let base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN;
+            let apex_x = base_x - size;
+
+            let nearest = |target: (f32, f32)| {
+                white
+                    .iter()
+                    .map(|(row, column)| {
+                        let dx = *column as f32 + 0.5 - target.0;
+                        let dy = *row as f32 + 0.5 - target.1;
+                        (dx * dx + dy * dy).sqrt()
+                    })
+                    .fold(f32::MAX, f32::min)
+            };
+
+            let apex = transform_point((apex_x, line_y), long_px, short_px, orientation, mirrored);
+            let apex_distance = nearest(apex);
+            // The rim wraps the acute tip, so the nearest white pixel sits a
+            // few pixels inside the vertex; the old geometry (apex on the
+            // newest sample) would miss by tens.
+            assert!(
+                apex_distance <= 4.0,
+                "the apex is {apex_distance:.1}px from the edge anchor at \
+                 {orientation}/{mirrored}"
+            );
+            let half = size * 0.7;
+            for corner in [(base_x, line_y - half), (base_x, line_y + half)] {
+                let corner = transform_point(corner, long_px, short_px, orientation, mirrored);
+                let corner_distance = nearest(corner);
+                assert!(
+                    corner_distance <= 5.0,
+                    "a base corner is {corner_distance:.1}px from the edge at \
+                     {orientation}/{mirrored}"
+                );
+            }
+        }
+    }
+
+    /// A bigger cursor grows back along the line: the base stays on the edge
+    /// and the apex sits further in, so the size decides how far back it
+    /// points.
+    #[test]
+    fn the_sample_cursor_apex_moves_with_its_size() {
+        let now = Instant::now();
+        let points = samples(&[Some(200); 20]);
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        config.line_glow = false;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let min_column = |size: u32, config: &mut OverlayConfig| {
+            config.sample_cursor_size_px = size;
+            let pixels = render_graph(300, 100, config, &points, now, false).expect("pixmap");
+            let white = positions_of_color(&pixels, 300, [255, 255, 255]);
+            assert!(!white.is_empty(), "no cursor was drawn at size {size}");
+            white
+                .iter()
+                .map(|(_, column)| *column)
+                .min()
+                .expect("columns")
+        };
+        let small = min_column(8, &mut config);
+        let large = min_column(20, &mut config);
+        // The rim covers a few pixels of the triangle's tip, so the leftmost
+        // white column names the apex within the rim's reach; what must hold
+        // exactly is that the apex moves back by the difference in size.
+        assert!(
+            (small as i32 - (299 - 8)).abs() <= 4,
+            "size 8 put the apex at {small}"
+        );
+        assert!(
+            (large as i32 - (299 - 20)).abs() <= 4,
+            "size 20 put the apex at {large}"
+        );
+        assert!(
+            (small as i32 - large as i32 - 12).abs() <= 1,
+            "the apex must move back by the difference in size: {small} vs {large}"
+        );
+    }
+
+    /// The cursor's easing: the first frame snaps, a short step lands between
+    /// the old and new targets, and a long one arrives and settles.
+    #[test]
+    fn the_cursor_animation_eases_toward_its_target() {
+        let mut animation = CursorAnimation::default();
+        let start = Instant::now();
+        assert_eq!(
+            animation.advance(start, 100.0),
+            100.0,
+            "the first frame has nothing to ease from"
+        );
+        assert!(!animation.is_active());
+
+        let mid = animation.advance(start + Duration::from_millis(50), 200.0);
+        assert!(mid > 100.0 && mid < 200.0, "a short step jumped: {mid}");
+        assert!(animation.is_active(), "a moving cursor must keep its clock");
+
+        let settled = animation.advance(start + Duration::from_secs(1), 200.0);
+        assert_eq!(settled, 200.0, "a long step must arrive");
+        assert!(
+            !animation.is_active(),
+            "a settled cursor must stop asking for frames"
+        );
+    }
+
+    /// A trailing timeout does not move the cursor: it keeps pointing at the
+    /// last value the line actually drew.
+    #[test]
+    fn the_sample_cursor_stays_on_the_last_drawn_value_through_a_timeout() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 10;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let now = Instant::now();
+        let mut timed_out = vec![Some(200); 9];
+        timed_out.push(None);
+        let valued = samples(&[Some(200); 9]);
+        let interrupted = samples(&timed_out);
+        let (width, height) = (300u32, 100u32);
+        let valued_pixels =
+            render_graph(width, height, &config, &valued, now, false).expect("pixmap");
+        let interrupted_pixels =
+            render_graph(width, height, &config, &interrupted, now, false).expect("pixmap");
+        let valued_cursor = positions_of_color(&valued_pixels, 300, [255, 255, 255]);
+        let interrupted_cursor = positions_of_color(&interrupted_pixels, 300, [255, 255, 255]);
+        assert!(
+            !valued_cursor.is_empty() && !interrupted_cursor.is_empty(),
+            "the cursor is missing"
+        );
+        assert_eq!(
+            valued_cursor, interrupted_cursor,
+            "the trailing timeout moved the cursor off the last drawn value"
+        );
+    }
+
+    /// A cursor on the zero line or clamped at the ceiling is not sliced: the
+    /// room reserved at both ends of the axis belongs to the triangle.
+    #[test]
+    fn a_cursor_on_the_zero_line_or_the_ceiling_stays_whole() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let now = Instant::now();
+        // The rim stroke covers the thin apex, so the white interior of a whole
+        // triangle spans fewer rows than the triangle's height. "Whole" is
+        // therefore measured against the same cursor at mid-axis, where no
+        // clipping is possible, rather than an absolute number.
+        let span_of = |pixels: &[u8]| {
+            let rows: Vec<usize> = positions_of_color(pixels, 300, [255, 255, 255])
+                .iter()
+                .map(|(row, _)| *row)
+                .collect();
+            assert!(!rows.is_empty(), "no cursor was drawn");
+            rows.iter().max().expect("rows") - rows.iter().min().expect("rows") + 1
+        };
+        let mid = render_graph(300, 100, &config, &samples(&[Some(500); 20]), now, false)
+            .expect("pixmap");
+        let whole_span = span_of(&mid);
+        for (value, edge_row) in [(0u32, 99usize), (1_000, 0usize)] {
+            let pixels = render_graph(300, 100, &config, &samples(&[Some(value); 20]), now, false)
+                .expect("pixmap");
+            let white = positions_of_color(&pixels, 300, [255, 255, 255]);
+            let span = span_of(&pixels);
+            assert!(
+                span + 1 >= whole_span,
+                "the triangle was sliced at value {value}: it spans {span} rows \
+                 against {whole_span} at mid-axis"
+            );
+            assert!(
+                !white.iter().any(|(row, _)| *row == edge_row),
+                "the cursor reached the pixmap edge at value {value}"
+            );
+        }
     }
 }
