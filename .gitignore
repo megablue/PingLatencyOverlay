@@ -9,9 +9,4 @@ src-tauri/target/
 # in VS, and none of it belongs in the repository.
 .vs/
 
-# The session handoff. A scratch file that records where a session left off and
-# which traps have already been paid for. It is useful to whoever picks the work
-# up next and meaningless to anyone reading the history, and it goes stale, so it
-# is kept out of the repository rather than becoming a second copy of AGENTS.md
-# that quietly disagrees with it.
-HANDOFF.md
+

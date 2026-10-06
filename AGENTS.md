@@ -22,8 +22,9 @@ than a second copy: two copies of a default value is one more thing that can
 be wrong.
 
 ## Read first
-`HANDOFF.md` holds the current state. Then `docs/features/README.md` — the
-feature map — and only the feature doc(s) for what you are about to change.
+`HANDOFF.md` holds the current state; if it is missing, carry on with the
+feature map and the code. Then `docs/features/README.md` — the feature map —
+and only the feature doc(s) for what you are about to change.
 `docs/SPEC.md` is user-visible behavior; this file is process and hard rules;
 the feature docs are the map, the mechanism and the traps.
 
@@ -130,6 +131,10 @@ Capture (run from the repository root):
   follow-up commit is the one that gets skipped. Pure refactors with no
   behavior, mechanism, config or test change need no doc edit — do not churn
   the map.
+- **`HANDOFF.md` is refreshed at the end of a session, not per commit.** It
+  carries what only the passing session knows — open threads, next steps, the
+  last thing delivered — under an `As of` stamp. It is allowed to lag the tip:
+  its header says the code wins. Refresh it before you hand the work over.
 - **Measure layout, don't deduce it.** Reading the code and checking arithmetic
   against constants shipped three layout bugs in a row. Lay the real thing out
   headlessly with `Context::run_ui` and print the rects; the numbers name the
