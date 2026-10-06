@@ -18,7 +18,7 @@ refactors with no behavior, mechanism, config or test change need no edit.
 | --- | --- | --- |
 | Runtime & pipe | [runtime.md](runtime.md) | processes, launch matrix, `transport.rs`, supervision |
 | Tray | planned | tray icon and menu, resident loop, auto profile switching |
-| Config — window | planned | the egui window: `ui.rs`, panes, drafts, pickers, test seams |
+| Config — window | [window.md](config/window.md) | the egui window: `ui.rs`, panes, drafts, pickers, test seams |
 | Config — storage | [storage.md](config/storage.md) | `config.rs`: schema, profiles, globals, `rules.json`, migrations |
 | Probes | planned | `probe.rs` / `probes.rs`: ICMP and TCP, the address cache, cadence |
 | Overlays — rendering | planned | `overlay.rs` / `render.rs`: layered windows, draw order, reserves |
