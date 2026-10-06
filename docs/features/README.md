@@ -3,10 +3,10 @@
 Read this before touching code: find the area, then open only the one or two
 feature docs it points at.
 
-Read order: `HANDOFF.md` (current state) → this index → the feature doc(s) for
-what you are about to change. `docs/SPEC.md` is user-visible behavior;
-`AGENTS.md` is process and hard rules; the docs below are the map, the
-mechanism and the traps.
+Read order: `HANDOFF.md` (current state) → this index → **the page for your
+area** → the code. `docs/SPEC.md` is user-visible behavior; `AGENTS.md` is
+process and hard rules; the docs below are the map, the mechanism and the
+traps.
 
 **Keep this map true in the same commit as the change.** Before staging a
 commit, update the feature doc(s) for whatever you changed, and add a row here
@@ -30,8 +30,9 @@ refactors with no behavior, mechanism, config or test change need no edit.
 | Diagnostics | [diagnostics.md](diagnostics.md) | the log file, `PLO_LOG`, fatal boxes |
 | Packaging | [packaging.md](packaging.md) | version rule, icons, NSIS, executable names |
 
-Docs land one area at a time; a row's Doc cell becomes a link when its page
-does. Until then, `AGENTS.md` still carries that area's working knowledge.
+The index is the entry point, not a glob: pages live in `config/` and
+`overlays/` as well as the top level, so `docs/features/*.md` alone misses
+them. Follow the row's link.
 
 ## Doc template
 

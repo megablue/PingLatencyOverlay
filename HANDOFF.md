@@ -1,5 +1,8 @@
 # Session handoff — PingLatencyOverlay
 
+Next: `docs/features/README.md` — the feature map. Read only the page for
+your area before the code.
+
 **A snapshot, not a source of truth.** This file goes stale by design. If it
 disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 `docs/features/` is the feature map and `docs/SPEC.md` is the behaviour spec.

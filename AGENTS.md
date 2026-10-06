@@ -1,5 +1,10 @@
 # AGENTS.md
 
+**Before you grep, glob or open a source file: read `HANDOFF.md`, then
+`docs/features/README.md`, then only the feature page(s) for the area you are
+about to change. The feature pages name the files, functions and tests you
+would otherwise hunt for — the code comes after them, not before.**
+
 PingLatencyOverlay is a Windows-only desktop overlay that shows live network
 latency. The native implementation uses **Rust + egui/eframe** for the single
 configuration window and native Win32 layered windows for overlays. Probes run
@@ -131,6 +136,10 @@ Capture (run from the repository root):
   follow-up commit is the one that gets skipped. Pure refactors with no
   behavior, mechanism, config or test change need no doc edit — do not churn
   the map.
+- **Search the map in the same breath as the code.** A grep for a feature, a
+  symbol or a behaviour runs over `docs/features/` too: the feature pages name
+  the identifiers and the tests, so the page you need is usually one hop from
+  the hit.
 - **`HANDOFF.md` is refreshed at the end of a session, not per commit.** It
   carries what only the passing session knows — open threads, next steps, the
   last thing delivered — under an `As of` stamp. It is allowed to lag the tip:
