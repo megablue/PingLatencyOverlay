@@ -6169,7 +6169,8 @@ fn edit_overlay(
                 ui.label("Line glow").on_hover_text(
                     "Cast a soft glow under each line, in the line's own colour.\n\
                      The glow rotates with the graph and the box reserves room \
-                     for it past the zero line.",
+                     for it past the zero line; lowering the intensity pulls \
+                     the glow, and its room, back toward the line.",
                 );
                 if ui.checkbox(&mut overlay.line_glow, "Enabled").changed() {
                     *changed = true;
@@ -6189,6 +6190,10 @@ fn edit_overlay(
                         .suffix("%")
                         .step_by(1.0),
                     )
+                    .on_hover_text(
+                        "Strength of the glow. A fainter glow also reaches \
+                         less far: the radius is its reach at full intensity.",
+                    )
                     .changed()
                 {
                     overlay.line_glow_intensity = glow_intensity.clamp(
@@ -6200,7 +6205,7 @@ fn edit_overlay(
                 ui.end_row();
 
                 ui.label("Glow radius (px)")
-                    .on_hover_text("How far the glow reaches past each line.");
+                    .on_hover_text("How far the glow reaches past each line at full intensity.");
                 let mut glow_radius = overlay.line_glow_radius_px as i64;
                 if ui
                     .add_enabled(

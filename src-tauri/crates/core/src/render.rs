@@ -201,27 +201,44 @@ pub fn render_series_into_with_border(
     render_graph_into_internal(width, height, config, series, now, smooth, border, pixels)
 }
 
+/// The reach of an underglow cast at a given intensity, in physical pixels.
+///
+/// The configured radius is the reach at full strength, and the reach scales
+/// with the square root of the intensity: a 25% glow reaches half the radius,
+/// and a 0% glow reaches nothing. The reserve and the renderer both read this,
+/// so turning the intensity down gives the empty space past the glow back
+/// instead of reserving room for a cast that fades out long before its radius.
+fn glow_reach_px(radius_px: u32, intensity: u32) -> f32 {
+    radius_px as f32 * (intensity.min(100) as f32 / 100.0).sqrt()
+}
+
 /// The room the underglow needs past the zero line, in physical pixels.
 ///
-/// The cast's deepest band reaches the radius past the line's centre, and
-/// antialiasing spends about half a pixel more. The axis's own pad already
-/// carries the stroke's half-width plus half a pixel for that (`stroke_pad`),
-/// so the reserve is the radius plus one, whatever the stroke is. It is added
-/// to the window's short dimension rather than taken out of the axis, so
+/// The cast's furthest band reaches `glow_reach_px` past the line's centre
+/// (or the first band's far edge when the reach is shorter than a band), and
+/// antialiasing spends about half a pixel more; the reserve is that rounded
+/// up. The axis's own pad already carries the stroke's half-width plus half a
+/// pixel, so the reserve does not depend on the stroke. It is added to the
+/// window's short dimension rather than taken out of the axis, so
 /// `graphHeightPx` keeps naming the visible height of the graph.
 ///
-/// The window sizing in `overlay::layout_in_rect` and the inset inside
-/// `render_graph_into_internal` both read this function, so the box and the
-/// drawing cannot disagree about how much room the cast has.
+/// Below the zero line the cast's band and the cursor's room are the same
+/// space, so `overlay::layout_in_rect` and `render_graph_into_internal` keep
+/// the larger of the two on that side rather than adding them.
 ///
-/// Zero when the glow is off: an overlay without it is sized exactly as it
-/// always was.
+/// Zero when the glow is off, when the intensity is zero, or when the reach
+/// is too short for a single band to survive the visibility floor: nothing is
+/// drawn, so nothing is reserved.
 pub fn line_glow_reserve_px(config: &OverlayConfig) -> u32 {
-    if config.line_glow {
-        config.line_glow_radius_px + 1
-    } else {
-        0
+    if !config.line_glow {
+        return 0;
     }
+    let reach = glow_reach_px(config.line_glow_radius_px, config.line_glow_intensity);
+    let intensity = config.line_glow_intensity.min(100) as f32 / 100.0;
+    if glow_bands(reach, intensity).next().is_none() {
+        return 0;
+    }
+    (reach + 0.5).ceil() as u32
 }
 
 /// The pad the axis keeps from the window edge for the stroke.
@@ -366,11 +383,14 @@ fn render_graph_into_internal(
     // The cast falls past the zero line, so the window reserves a band for it:
     // the axis keeps its configured height and the glow gets the room below.
     // The cursor needs room at both ends of the latency axis as well, or a
-    // sample resting on the zero line or clamped to the ceiling is cut in half.
+    // sample resting on the zero line or clamped to the ceiling is cut in half
+    // — and below the zero line the glow's band and the cursor's room are the
+    // same space, so that end keeps the larger of the two, not their sum.
     let reserve = line_glow_reserve_px(config) as f32;
     let cursor_room = sample_cursor_room_px(config) as f32;
+    let bottom_room = reserve.max(cursor_room);
     let top = pad + cursor_room;
-    let bottom = short_px - pad - reserve - cursor_room;
+    let bottom = short_px - pad - bottom_room;
     let map_y = |value: u32| {
         let t = (value as f32).min(y_max) / y_max;
         bottom - t * (bottom - top)
@@ -456,7 +476,7 @@ fn render_graph_into_internal(
     // segment's own colour, which is why `draw_series` gets the colour bytes
     // beside each paint.
     let glow = config.line_glow.then(|| LineGlow {
-        radius: config.line_glow_radius_px as f32,
+        reach: glow_reach_px(config.line_glow_radius_px, config.line_glow_intensity),
         intensity: config.line_glow_intensity.min(100) as f32 / 100.0,
         dir: glow_direction(config.orientation, config.mirrored),
     });
@@ -616,8 +636,9 @@ fn render_graph_into_internal(
 
 /// One overlay's resolved underglow.
 struct LineGlow {
-    /// How far the cast reaches past the line's centre, in pixels.
-    radius: f32,
+    /// How far the cast reaches past the line's centre at this intensity, in
+    /// pixels: the configured radius at full strength, less as it drops.
+    reach: f32,
     /// Strength as a fraction of full opacity.
     intensity: f32,
     /// Unit direction of the cast, in window coordinates.
@@ -647,10 +668,50 @@ const GLOW_BAND_STEP: f32 = 0.75;
 
 /// The number of bands a cast is drawn with: one per half-band of reach.
 ///
-/// The lower cap keeps a small radius from collapsing into a single hard band;
+/// The lower cap keeps a small reach from collapsing into a single hard band;
 /// the upper one keeps a wide cast's stroke count bounded.
-fn glow_layer_count(radius: f32) -> usize {
-    ((radius / GLOW_BAND_STEP).ceil() as usize).clamp(3, 64)
+fn glow_layer_count(reach: f32) -> usize {
+    ((reach / GLOW_BAND_STEP).ceil() as usize).clamp(3, 64)
+}
+
+/// The alpha below which a cast band is not drawn.
+///
+/// The outermost bands of a faint cast fall under this — a per-band alpha of
+/// 3 is about 2% once neighbouring bands overlap — and a band that is not
+/// drawn must not be reserved for. Tuned so a full-strength cast still runs
+/// the whole radius: only bands the eye cannot see are dropped.
+const GLOW_ALPHA_FLOOR: u8 = 3;
+
+/// The bands a cast is drawn from, nearest first: the depth past the line's
+/// centre and the alpha to stroke the whole band with.
+///
+/// One source for the renderer and the reserve: `stroke_run` draws exactly
+/// these bands, and `line_glow_reserve_px` sizes the room to the furthest one,
+/// so the box can neither grow past the visible cast nor cut its tail.
+/// Bands under `GLOW_ALPHA_FLOOR` are dropped rather than drawn faintly.
+fn glow_bands(reach: f32, intensity: f32) -> impl Iterator<Item = (f32, u8)> {
+    let layers = glow_layer_count(reach);
+    let span = (reach - GLOW_BAND_WIDTH).max(0.0);
+    let spacing = span / (layers - 1) as f32;
+    let overlap = if spacing > 0.0 {
+        (GLOW_BAND_WIDTH / spacing + 1.0).min(4.0)
+    } else {
+        1.0
+    };
+    (0..layers).filter_map(move |index| {
+        // The band's depth past the line's centre. Starting half a band out
+        // keeps the band's near edge from crossing the line.
+        let depth = GLOW_BAND_WIDTH / 2.0 + spacing * index as f32;
+        let t = if reach > 0.0 {
+            (1.0 - depth / reach).max(0.0)
+        } else {
+            0.0
+        };
+        let alpha = (intensity * 255.0 * t * t * overlap)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        (alpha >= GLOW_ALPHA_FLOOR).then_some((depth, alpha))
+    })
 }
 
 /// Stroke one finished run of a line: its core, or its cast.
@@ -681,28 +742,10 @@ fn stroke_run(
     let Some(glow) = glow else {
         return;
     };
-    if glow.intensity <= 0.0 {
+    if glow.reach <= 0.0 {
         return;
     }
-    let layers = glow_layer_count(glow.radius);
-    let span = (glow.radius - GLOW_BAND_WIDTH).max(0.0);
-    let spacing = span / (layers - 1) as f32;
-    let overlap = if spacing > 0.0 {
-        (GLOW_BAND_WIDTH / spacing + 1.0).min(4.0)
-    } else {
-        1.0
-    };
-    for index in 0..layers {
-        // The band's depth past the line's centre. Starting half a band out
-        // keeps the band's near edge from crossing the line.
-        let depth = GLOW_BAND_WIDTH / 2.0 + spacing * index as f32;
-        let t = (1.0 - depth / glow.radius).max(0.0);
-        let alpha = (glow.intensity * 255.0 * t * t * overlap)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        if alpha == 0 {
-            continue;
-        }
+    for (depth, alpha) in glow_bands(glow.reach, glow.intensity) {
         let mut layer_paint = Paint::default();
         layer_paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], alpha);
         let layer_stroke = Stroke {
@@ -2403,6 +2446,54 @@ mod tests {
         }
     }
 
+    /// The reserve follows the glow's reach, not its configured radius:
+    /// intensity scales the reach, the radius is the reach at full strength,
+    /// and nothing faint enough to draw reserves nothing.
+    #[test]
+    fn the_underglow_reserve_follows_the_intensity() {
+        let mut config = OverlayConfig::new();
+        config.line_glow = true;
+        config.line_glow_radius_px = 20;
+
+        config.line_glow_intensity = 100;
+        assert_eq!(
+            line_glow_reserve_px(&config),
+            21,
+            "full strength keeps radius + 1"
+        );
+
+        config.line_glow_intensity = 50;
+        // reach = 20·√½ ≈ 14.14 -> ceil(14.14 + 0.5) = 15
+        assert_eq!(line_glow_reserve_px(&config), 15);
+
+        config.line_glow_intensity = 25;
+        // reach = 10 exactly -> ceil(10.5) = 11
+        assert_eq!(line_glow_reserve_px(&config), 11);
+
+        config.line_glow_intensity = 4;
+        // reach = 4: the room a 4px radius always took, from a 20px radius.
+        assert_eq!(line_glow_reserve_px(&config), 5);
+
+        config.line_glow_intensity = 0;
+        assert_eq!(line_glow_reserve_px(&config), 0, "no cast, no room");
+
+        config.line_glow_intensity = 1;
+        // reach = 2: the first band still survives the floor.
+        assert_eq!(line_glow_reserve_px(&config), 3);
+
+        config.line_glow_radius_px = 2;
+        assert_eq!(
+            line_glow_reserve_px(&config),
+            0,
+            "a reach under the first band's depth reserves nothing"
+        );
+
+        config.line_glow_radius_px = 20;
+        config.line_glow_intensity = 100;
+        config.line_glow = false;
+        assert_eq!(line_glow_reserve_px(&config), 0);
+    }
+
     /// The cast falls from the line toward the zero line in the graph's own
     /// frame — down at 0 degrees, right at 90, and so on — and never shows on
     /// the far side of the line, whether or not the overlay is mirrored.
@@ -2452,8 +2543,10 @@ mod tests {
                 height as f32
             };
             let pad = 2.0;
-            let bottom = short_px - pad - line_glow_reserve_px(&config) as f32;
-            let line_y = bottom - 0.5 * (bottom - pad);
+            let room = sample_cursor_room_px(&config) as f32;
+            let top = pad + room;
+            let bottom = short_px - pad - (line_glow_reserve_px(&config) as f32).max(room);
+            let line_y = bottom - 0.5 * (bottom - top);
             let center = transform_point(
                 (long_px / 2.0, line_y),
                 long_px,
@@ -2500,9 +2593,9 @@ mod tests {
     /// A stroke that grows wider with depth also grows sideways, and its miter
     /// joins spike outward at a corner — so a bright overlay used to wrap glow
     /// over the top of every peak. The sweep only ever translates the path
-    /// along the cast direction; this compares the lit render against the same
-    /// line drawn without any glow, and no visible pixel may appear on the far
-    /// side of where the bare line reaches.
+    /// along the cast direction; this asserts that no visible pixel sits
+    /// further from the zero line than the spike's own core, whose position is
+    /// read from the same mapping and reserve the renderer uses.
     #[allow(clippy::chunks_exact_to_as_chunks)]
     #[test]
     fn the_underglow_does_not_reach_above_the_line_at_a_spike() {
@@ -2527,8 +2620,8 @@ mod tests {
             config.orientation = orientation;
             config.mirrored = mirrored;
             config.first_target_mut().line_color = "#00ff00".to_string();
-            // The cursor is in both renders, and its own corners reach on both
-            // sides of the line: leaving it in would flatten the comparison.
+            // The cursor's own corners reach on both sides of the line:
+            // leaving it in would flatten the comparison.
             config.sample_cursor = false;
 
             let (width, height) = if matches!(orientation, 90 | 270) {
@@ -2536,36 +2629,45 @@ mod tests {
             } else {
                 (300u32, 100u32)
             };
-            let lit = render_graph(width, height, &config, &points, Instant::now(), false)
-                .expect("pixmap");
-            // Keep the reserve, drop only the strength, so both renders share
-            // the same axis geometry — turning the glow off would move the
-            // line up by the whole reserved band.
-            config.line_glow_intensity = 0;
-            let bare = render_graph(width, height, &config, &points, Instant::now(), false)
+            let pixels = render_graph(width, height, &config, &points, Instant::now(), false)
                 .expect("pixmap");
 
-            let dir = glow_direction(orientation, mirrored);
-            // The furthest reach along the far side of the cast: the smallest
-            // projection onto the cast direction among visible pixels.
-            let reach = |pixels: &[u8]| {
-                let mut furthest = f32::MAX;
-                for (index, pixel) in pixels.chunks_exact(4).enumerate() {
-                    if pixel[3] < 24 {
-                        continue;
-                    }
-                    let column = (index % width as usize) as f32 + 0.5;
-                    let row = (index / width as usize) as f32 + 0.5;
-                    furthest = furthest.min(column * dir.0 + row * dir.1);
-                }
-                furthest
+            let (long_px, short_px) = if matches!(orientation, 90 | 270) {
+                (height as f32, width as f32)
+            } else {
+                (width as f32, height as f32)
             };
-            let line_reach = reach(&bare);
-            let lit_reach = reach(&lit);
+            let stroke_width = config
+                .line_stroke_px
+                .clamp(MIN_LINE_STROKE_PX, MAX_LINE_STROKE_PX);
+            let pad = stroke_pad(stroke_width);
+            let bottom = short_px - pad - line_glow_reserve_px(&config) as f32;
+            let y_max = config.max_y_ms.max(1) as f32;
+            let apex_y = bottom - (900.0_f32.min(y_max) / y_max) * (bottom - pad);
+
+            let dir = glow_direction(orientation, mirrored);
+            // Only the short-axis coordinate projects onto the cast
+            // direction, so the long-axis position here is moot.
+            let apex = transform_point((0.0, apex_y), long_px, short_px, orientation, mirrored);
+            let apex = apex.0 * dir.0 + apex.1 * dir.1;
+
+            // The furthest reach along the far side of the cast: the smallest
+            // projection onto the cast direction among visible pixels. The
+            // line's own half stroke plus antialiasing spans about 1.25px
+            // past the centreline, and a pixel's centre most of one more.
+            let mut furthest = f32::MAX;
+            for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                if pixel[3] < 24 {
+                    continue;
+                }
+                let column = (index % width as usize) as f32 + 0.5;
+                let row = (index / width as usize) as f32 + 0.5;
+                furthest = furthest.min(column * dir.0 + row * dir.1);
+            }
             assert!(
-                lit_reach >= line_reach - 1.5,
+                furthest >= apex - 2.0,
                 "the cast reached past the line at {orientation}/{mirrored}: \
-                 lit {lit_reach} vs line {line_reach}"
+                 {furthest} vs {apex}"
             );
         }
     }
@@ -2577,6 +2679,9 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.line_glow = true;
         config.line_glow_radius_px = 4;
+        // Full strength: the radius is the reach, so the cast geometry is
+        // fixed instead of following the default intensity's short reach.
+        config.line_glow_intensity = 100;
         // This test computes the line's row from the plain pad and reserve; the
         // cursor's room would move it.
         config.sample_cursor = false;
@@ -2611,7 +2716,12 @@ mod tests {
     fn the_underglow_fades_with_depth_below_the_line() {
         let mut config = OverlayConfig::new();
         config.line_glow = true;
-        config.line_glow_radius_px = 4;
+        // A 20px radius at the default 10% reaches ~6px, so the scan below has
+        // a real gradient to read instead of a two-row stub.
+        config.line_glow_radius_px = 20;
+        // The cursor's room would move the axis; the 50% line would still sit
+        // on the formula's midpoint, but the room no longer belongs in it.
+        config.sample_cursor = false;
         config.first_target_mut().line_color = "#00ff00".to_string();
         let pixels = render_graph(
             300,
@@ -2645,6 +2755,12 @@ mod tests {
         let mut config = OverlayConfig::new();
         config.line_glow = true;
         config.line_glow_radius_px = 4;
+        // Full strength so each cast reaches the radius; this is about the
+        // draw order, not the reach.
+        config.line_glow_intensity = 100;
+        // The cursor's room would move the axis under the pinned core row;
+        // the cursor is not what this test is about.
+        config.sample_cursor = false;
         let now = Instant::now();
         let lower = samples(&[Some(500); 40]);
         let upper = samples(&[Some(522); 40]);
@@ -2713,11 +2829,9 @@ mod tests {
                 (width as f32, height as f32)
             };
             let pad = stroke_pad(config.line_stroke_px);
-            let top = pad + sample_cursor_room_px(&config) as f32;
-            let bottom = short_px
-                - pad
-                - line_glow_reserve_px(&config) as f32
-                - sample_cursor_room_px(&config) as f32;
+            let room = sample_cursor_room_px(&config) as f32;
+            let top = pad + room;
+            let bottom = short_px - pad - (line_glow_reserve_px(&config) as f32).max(room);
             let line_y = bottom - 0.2 * (bottom - top);
             let size = sample_cursor_size(&config) as f32;
             let base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN;

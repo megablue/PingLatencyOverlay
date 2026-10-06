@@ -217,15 +217,22 @@ pub struct OverlayConfig {
     /// rotates and mirrors with the overlay. The window reserves room past
     /// the zero line for it — `line_glow_reserve_px` is the one statement of
     /// how much — so a glowing line on the zero line is not sliced flat by
-    /// the window edge. `new()` turns this on, while an absent key reads as
-    /// off, so a profile written before the setting existed does not start
-    /// glowing on its own.
+    /// the window edge. The room follows the glow's reach, which shortens as
+    /// the intensity drops (`glow_reach_px`): a faint glow keeps the empty
+    /// space instead of casting into it. `new()` turns this on, while an
+    /// absent key reads as off, so a profile written before the setting
+    /// existed does not start glowing on its own.
     #[serde(default)]
     pub line_glow: bool,
     /// Strength of the underglow, 0 to 100.
+    ///
+    /// Lower strengths also shorten the cast's reach — the radius is the
+    /// reach at full strength — so a fainter glow takes less room past the
+    /// zero line.
     #[serde(default = "default_line_glow_intensity")]
     pub line_glow_intensity: u32,
-    /// How far the underglow reaches past a line, in physical pixels.
+    /// How far the underglow reaches past a line at full intensity, in
+    /// physical pixels.
     #[serde(default = "default_line_glow_radius_px")]
     pub line_glow_radius_px: u32,
     /// Draw a triangle on each line's newest drawn sample.

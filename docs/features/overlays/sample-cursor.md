@@ -49,9 +49,11 @@ Status: shipped (v0.2.37) · Read when: changing `draw_sample_cursor`,
   clock of its own and would otherwise move only when a sample arrives.
 - Two reserves, read by both `overlay::layout_in_rect` and the renderer:
   `sample_cursor_reserve_px` is a constant 2 px gutter at the leading edge
-  (edge margin + half the rim), and `sample_cursor_room_px` (twice the
-  `ceil(size * 0.7 + rim / 2 + 1)`) pads both ends of the latency axis so a
-  cursor on 0 ms or clamped at the ceiling stays whole.
+  (edge margin + half the rim), and `sample_cursor_room_px` (`ceil(size * 0.7
+  + rim / 2 + 1)`) pads the ceiling end of the latency axis. The zero-line
+  end shares its band with the glow's reserve, so `layout_in_rect` keeps
+  `max(glow reserve, cursor room)` there rather than adding both; a cursor on
+  0 ms or clamped at the ceiling stays whole either way.
 - Draw order: after the cores, before the border, per host. At the minimum
   size 4 the triangle is mostly rim — cosmetic, not a bug.
 

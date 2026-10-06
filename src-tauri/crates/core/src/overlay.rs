@@ -1818,11 +1818,14 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
     // configured size and a cursor on the zero line or the ceiling stays
     // whole. Physical pixels, like the glow radius.
     let cursor_reserve = sample_cursor_reserve_px(config) as i32;
-    let cursor_room = sample_cursor_room_px(config) as i32 * 2;
+    let cursor_room = sample_cursor_room_px(config) as i32;
+    // Below the zero line the cast's reserve and the cursor's room occupy the
+    // same band, so the window keeps whichever reaches further, not their sum.
+    let bottom_room = reserve.max(cursor_room);
     let (long_px, short_px) = if matches!(config.orientation, 90 | 270) {
         (
             (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
-                + reserve
+                + bottom_room
                 + cursor_room,
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
                 + cursor_reserve,
@@ -1832,7 +1835,7 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
                 + cursor_reserve,
             (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
-                + reserve
+                + bottom_room
                 + cursor_room,
         )
     };
@@ -2050,7 +2053,9 @@ mod tests {
 
     /// The underglow's reserve grows the window on the short side and leaves
     /// the axis the height `graphHeightPx` names; a rotated overlay carries it
-    /// on its width. Zero without the glow, so existing sizes do not move.
+    /// on its width. The reserve follows the cast's reach, so the default 10%
+    /// intensity takes a fraction of a 4px radius and full strength takes the
+    /// radius back. Zero without the glow, so existing sizes do not move.
     #[test]
     fn the_underglow_reserves_room_on_the_short_side() {
         let work = Rect {
@@ -2067,12 +2072,23 @@ mod tests {
 
         overlay.line_glow = true;
         overlay.line_glow_radius_px = 4;
+        // 10% intensity: reach = 4·√0.1 ≈ 1.26, so the room is ceil(1.26 + 0.5).
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120, 62));
+        assert_eq!(
+            line_glow_reserve_px(&overlay),
+            2,
+            "the reserve must match the window's growth"
+        );
+
+        // At full strength the reach is the radius: radius + 1 as always.
+        overlay.line_glow_intensity = 100;
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
         assert_eq!(size, (120, 65));
         assert_eq!(
             line_glow_reserve_px(&overlay),
             5,
-            "the reserve must match the window's growth"
+            "full strength keeps the radius's room"
         );
 
         overlay.orientation = 90;
@@ -2082,6 +2098,37 @@ mod tests {
         // The reserve is a physical size and is not scaled with the display.
         let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
         assert_eq!(scaled, (125, 240));
+    }
+
+    /// Below the zero line the cast's reserve and the cursor's room are the
+    /// same band: the window keeps the larger of the two and adds only the
+    /// ceiling end's room on top. A max-size glow with the cursor on is
+    /// `graphHeightPx + max(reserve, room) + room`, not the sum of all three.
+    #[test]
+    fn the_glow_and_cursor_share_the_room_below_the_zero_line() {
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let mut overlay = OverlayConfig::new();
+        overlay.line_glow = true;
+        overlay.line_glow_radius_px = 50;
+        overlay.line_glow_intensity = 100;
+        overlay.sample_cursor = true;
+        assert_eq!(line_glow_reserve_px(&overlay), 51);
+        assert_eq!(sample_cursor_room_px(&overlay), 9);
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120 + 2, 60 + 51 + 9));
+
+        // A short reach is swallowed by the cursor's room: the window is the
+        // same as with the glow off.
+        overlay.line_glow_radius_px = 4;
+        overlay.line_glow_intensity = 10;
+        assert_eq!(line_glow_reserve_px(&overlay), 2);
+        let (size, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(size, (120 + 2, 60 + 9 + 9));
     }
 
     /// The cursor reserves a constant 2px gutter on the leading side of the

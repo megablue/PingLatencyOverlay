@@ -146,9 +146,11 @@
     appears on the far side of a line — however sharp a spike, no glow wraps
     over its peak. Intensity (0–100, default 10) and radius (2–50 px, default
     30) are per overlay, and the startup prefill glows in the prefill colour.
-    The overlay box reserves room past the zero line for the cast, so the Y axis
-    keeps the height `graphHeightPx` names and a line sitting on the zero line
-    is not cut off.
+    A lower intensity also pulls the cast closer to its line — the radius is
+    how far it reaches at full intensity — and the overlay box reserves room
+    past the zero line only for that reach, so the Y axis keeps the height
+    `graphHeightPx` names, a line sitting on the zero line is not cut off, and
+    turning the glow down gives the empty space back.
   - Sample cursor (on by default, including for a profile written before the
     setting existed; an explicit off turns it off): a white triangle with a dark
     rim marks each line's leading end. Its base sits flush against the leading
