@@ -16,7 +16,7 @@ refactors with no behavior, mechanism, config or test change need no edit.
 
 | Feature | Doc | Read when |
 | --- | --- | --- |
-| Runtime & pipe | planned | processes, launch matrix, `transport.rs`, supervision |
+| Runtime & pipe | [runtime.md](runtime.md) | processes, launch matrix, `transport.rs`, supervision |
 | Tray | planned | tray icon and menu, resident loop, auto profile switching |
 | Config — window | planned | the egui window: `ui.rs`, panes, drafts, pickers, test seams |
 | Config — storage | planned | `config.rs`: schema, profiles, globals, `rules.json`, migrations |
