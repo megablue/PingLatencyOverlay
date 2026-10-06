@@ -18,6 +18,12 @@ Where a rule has a behavior half and a mechanism half, the behavior half is a
 pointer to `docs/SPEC.md` rather than a second copy: two copies of a default
 value is one more thing that can be wrong.
 
+## Read first
+`HANDOFF.md` holds the current state. Then `docs/features/README.md` — the
+feature map — and only the feature doc(s) for what you are about to change.
+`docs/SPEC.md` is user-visible behavior; this file is process and hard rules;
+the feature docs are the map, the mechanism and the traps.
+
 ## Layout
 - `src-tauri/` — the Cargo workspace; run Cargo commands here. The root
   manifest is both the workspace and the application package; `crates/core`,
@@ -82,6 +88,10 @@ value is one more thing that can be wrong.
 - `docs/GAME.md` — design document for the game module, which is **not
   built**. Nothing described there exists in the code. Read it before
   planning anything that draws something other than a latency graph.
+- `docs/features/README.md` — the feature map: one page per feature with its
+  files, mechanisms and tests, and the rule for keeping it current. Read it
+  before exploring, and update the matching page in the same commit as a
+  change.
 - The pre-egui Tauri/React implementation remains available on `main`. This
   file describes the native branch.
 
@@ -110,6 +120,13 @@ Capture (run from the repository root):
   photograph the Config window and every overlay; see *Workflow*
 
 ## Workflow
+- **The features map is part of the change, not the cleanup.** Before staging a
+  commit, update the feature doc(s) for whatever you changed
+  (`docs/features/`), and add an index row if the doc is new. User-visible
+  behavior also updates `docs/SPEC.md` in the same commit. A docs-only
+  follow-up commit is the one that gets skipped. Pure refactors with no
+  behavior, mechanism, config or test change need no doc edit — do not churn
+  the map.
 - **Measure layout, don't deduce it.** Reading the code and checking arithmetic
   against constants shipped three layout bugs in a row. Lay the real thing out
   headlessly with `Context::run_ui` and print the rects; the numbers name the
