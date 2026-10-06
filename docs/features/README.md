@@ -27,7 +27,7 @@ refactors with no behavior, mechanism, config or test change need no edit.
 | Overlays — sample cursor | [sample-cursor.md](overlays/sample-cursor.md) | cursor geometry, easing, its reserves |
 | Overlays — display modes | [display-modes.md](overlays/display-modes.md) | global / sticky / wallpaper, monitor pinning, follow |
 | Theming | planned | `theme.rs`, palettes, theme files |
-| Diagnostics | planned | the log file, `PLO_LOG`, fatal boxes |
+| Diagnostics | [diagnostics.md](diagnostics.md) | the log file, `PLO_LOG`, fatal boxes |
 | Packaging | [packaging.md](packaging.md) | version rule, icons, NSIS, executable names |
 
 Docs land one area at a time; a row's Doc cell becomes a link when its page
