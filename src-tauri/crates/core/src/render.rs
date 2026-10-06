@@ -265,6 +265,10 @@ const SAMPLE_CURSOR_EDGE_MARGIN: f32 = 1.0;
 const CURSOR_EASE_SECS: f32 = 0.15;
 /// How close the cursor must be to its target to count as settled, in pixels.
 const CURSOR_EASE_EPSILON: f32 = 0.25;
+/// One full dim → bright → dim cycle of the timeout blink.
+const CURSOR_TIMEOUT_BLINK_PERIOD: Duration = Duration::from_secs(2);
+/// The dimmest the blink's fill gets, as a fraction of its colour.
+const CURSOR_TIMEOUT_BLINK_FLOOR: f32 = 0.35;
 
 fn sample_cursor_size(config: &OverlayConfig) -> u32 {
     config
@@ -592,6 +596,7 @@ fn render_graph_into_internal(
     if config.sample_cursor {
         let size = sample_cursor_size(config) as f32;
         let target_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN - size;
+        let blink_color = parse_hex_color(&config.cursor_timeout_blink_color, [239, 68, 68]);
         for entry in &mut *series {
             let samples = visible(
                 entry.samples,
@@ -615,6 +620,22 @@ fn render_graph_into_internal(
                 Some(animation) => animation.advance(now, target),
                 None => target,
             };
+            // The raw samples, not the reveal-filtered slice: a timeout is
+            // recorded the moment it is probed, and the blink announces it
+            // immediately rather than waiting for the drawn head to catch up.
+            let blink = if config.cursor_timeout_blink {
+                timeout_blink_anchor(entry.samples, entry.max_sample_gap, now).map(|anchor| {
+                    let elapsed = now.saturating_duration_since(anchor).as_secs_f32();
+                    let cycle = elapsed / CURSOR_TIMEOUT_BLINK_PERIOD.as_secs_f32();
+                    let pulse = 0.5 - 0.5 * (cycle * std::f32::consts::TAU).cos();
+                    (
+                        blink_color,
+                        CURSOR_TIMEOUT_BLINK_FLOOR + (1.0 - CURSOR_TIMEOUT_BLINK_FLOOR) * pulse,
+                    )
+                })
+            } else {
+                None
+            };
             draw_sample_cursor(
                 &mut pixmap,
                 y,
@@ -622,7 +643,7 @@ fn render_graph_into_internal(
                 short_px,
                 config.orientation,
                 config.mirrored,
-                size,
+                CursorLook { size, blink },
             );
         }
     }
@@ -758,15 +779,58 @@ fn stroke_run(
     }
 }
 
+/// The first timestamp of the timeout run a host is currently inside, if any.
+///
+/// The newest real sample must be a timeout and no older than
+/// `max_sample_gap`: a host that stopped probing stops blinking instead of
+/// blinking forever. The anchor is the earliest sample of the contiguous run —
+/// walking back while each sample is a timeout and the step to the newer one
+/// is within `max_sample_gap`, stopping at a value or a hole. The blink's
+/// phase counts from there, so every run starts dim.
+pub(crate) fn timeout_blink_anchor(
+    samples: &[SamplePoint],
+    max_sample_gap: Duration,
+    now: Instant,
+) -> Option<Instant> {
+    let mut anchor = None;
+    let mut newer: Option<Instant> = None;
+    for sample in samples.iter().rev().filter(|sample| !sample.is_prefill) {
+        if sample.value.is_some() {
+            break;
+        }
+        if newer.is_none() && now.saturating_duration_since(sample.timestamp) > max_sample_gap {
+            return None;
+        }
+        if newer
+            .is_some_and(|next| next.saturating_duration_since(sample.timestamp) > max_sample_gap)
+        {
+            break;
+        }
+        anchor = Some(sample.timestamp);
+        newer = Some(sample.timestamp);
+    }
+    anchor
+}
+
+/// The cursor's size and, while a timeout run lasts, the blink's colour and
+/// the pulse's current brightness — everything `draw_sample_cursor` needs
+/// beyond its geometry.
+struct CursorLook {
+    size: f32,
+    blink: Option<([u8; 3], f32)>,
+}
+
 /// Draw the cursor triangle: base flush against the leading edge, apex on the
 /// drawn line, pointing back at the data.
 ///
 /// The vertices are built in graph coordinates and transformed like any
 /// sample, so the cursor rotates and mirrors with the overlay. `y` is the apex
-/// height, already resolved against the drawn line and eased; `size` is the
-/// distance from the base to the apex, so a larger cursor reaches further back
-/// along the line. White on a dark rim, fixed for every host, because the
-/// cursor is a marker rather than data.
+/// height, already resolved against the drawn line and eased; the look's size
+/// is the distance from the base to the apex, so a larger cursor reaches
+/// further back along the line. White on a dark rim while the host is healthy;
+/// while a timeout run lasts, the look's blink carries the colour and the
+/// pulse's brightness, and the fill is that colour scaled by it — dim at the
+/// start of the run, full at the cycle's peak. The rim stays dark for contrast.
 fn draw_sample_cursor(
     pixmap: &mut Pixmap,
     y: f32,
@@ -774,11 +838,11 @@ fn draw_sample_cursor(
     short_px: f32,
     orientation: u16,
     mirrored: bool,
-    size: f32,
+    look: CursorLook,
 ) {
-    let half = size * 0.7;
+    let half = look.size * 0.7;
     let base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN;
-    let apex_x = base_x - size;
+    let apex_x = base_x - look.size;
     let vertices = [
         transform_point((apex_x, y), long_px, short_px, orientation, mirrored),
         transform_point((base_x, y - half), long_px, short_px, orientation, mirrored),
@@ -793,13 +857,16 @@ fn draw_sample_cursor(
         return;
     };
 
+    let fill_rgb = match look.blink {
+        Some(([r, g, b], level)) => [
+            (r as f32 * level).round().clamp(0.0, 255.0) as u8,
+            (g as f32 * level).round().clamp(0.0, 255.0) as u8,
+            (b as f32 * level).round().clamp(0.0, 255.0) as u8,
+        ],
+        None => SAMPLE_CURSOR_FILL,
+    };
     let mut fill = Paint::default();
-    fill.set_color_rgba8(
-        SAMPLE_CURSOR_FILL[0],
-        SAMPLE_CURSOR_FILL[1],
-        SAMPLE_CURSOR_FILL[2],
-        255,
-    );
+    fill.set_color_rgba8(fill_rgb[0], fill_rgb[1], fill_rgb[2], 255);
     pixmap.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), None);
 
     let mut rim = Paint::default();
@@ -2781,6 +2848,167 @@ mod tests {
         assert!(
             run > 100,
             "the earlier host's core was tinted by the later host's glow: {run} pure pixels"
+        );
+    }
+
+    /// The brightest red pixel in a frame — the blink fill once it is tinted.
+    ///
+    /// The line is green and the timeout markers blue in these tests, and the
+    /// rim is darker in red than in green, so red can only come from the blink.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn reddest(pixels: &[u8]) -> u8 {
+        pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0 && pixel[0] > pixel[1] && pixel[0] > pixel[2])
+            .map(|pixel| pixel[0])
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// A sample list ending in `failures` one-second timeouts, with `held` as
+    /// the last good value before the run; the anchor is the first failure.
+    fn blink_samples(now: Instant, held: Option<u32>, failures: u64) -> Vec<SamplePoint> {
+        let mut samples = Vec::new();
+        if let Some(value) = held {
+            samples.push(SamplePoint {
+                value: Some(value),
+                timestamp: now - Duration::from_secs(failures + 1),
+                is_prefill: false,
+            });
+        }
+        for index in (0..failures).rev() {
+            samples.push(SamplePoint {
+                value: None,
+                timestamp: now - Duration::from_secs(index + 1),
+                is_prefill: false,
+            });
+        }
+        samples
+    }
+
+    fn blink_config() -> OverlayConfig {
+        let mut config = OverlayConfig::new();
+        config.line_glow = false;
+        config.sample_cursor = true;
+        config.cursor_timeout_blink = true;
+        config.cursor_timeout_blink_color = "#ff0000".to_string();
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.first_target_mut().timeout_color = "#0000ff".to_string();
+        config
+    }
+
+    /// The timeout blink breathes: the fill sits at its dim floor when a run
+    /// starts and reaches the full colour half a period later, on the run's
+    /// own clock rather than the sample cadence.
+    #[test]
+    fn the_timeout_blink_pulses_dim_then_bright() {
+        let now = Instant::now();
+        let config = blink_config();
+        let samples = blink_samples(now, Some(500), 2);
+        let dim = render_graph(300, 100, &config, &samples, now, false).expect("pixmap");
+        let bright = render_graph(
+            300,
+            100,
+            &config,
+            &samples,
+            now + CURSOR_TIMEOUT_BLINK_PERIOD / 2,
+            false,
+        )
+        .expect("pixmap");
+        assert!(reddest(&dim) > 0, "the blink never tinted the cursor");
+        assert!(
+            reddest(&bright) > reddest(&dim) + 60,
+            "the pulse did not rise: {} then {}",
+            reddest(&dim),
+            reddest(&bright)
+        );
+    }
+
+    /// A timeout is announced the moment it is probed, not when smooth
+    /// rendering's reveal cut lets the drawn frames catch up: the blink reads
+    /// the raw samples, so a failure inside the hold still pulses while the
+    /// line and its marker keep holding the last value.
+    #[test]
+    fn the_timeout_blink_starts_before_smooth_rendering_reveals_the_failure() {
+        let now = Instant::now();
+        let mut config = blink_config();
+        config.smooth_rendering = true;
+        // A drawn line from an old value, then a failure inside the reveal
+        // hold: the line and its marker hold the old value, but the blink
+        // reads the raw samples and pulses anyway.
+        let samples = vec![
+            SamplePoint {
+                value: Some(500),
+                timestamp: now - Duration::from_secs(5),
+                is_prefill: false,
+            },
+            SamplePoint {
+                value: None,
+                timestamp: now - Duration::from_millis(500),
+                is_prefill: false,
+            },
+        ];
+        let pixels = render_graph(300, 100, &config, &samples, now, true).expect("pixmap");
+        assert!(reddest(&pixels) > 0, "smooth rendering held the blink back");
+    }
+
+    /// A value at the head ends the blink immediately: the cursor is white
+    /// again as soon as the host answers.
+    #[test]
+    fn a_value_sample_ends_the_timeout_blink() {
+        let now = Instant::now();
+        let config = blink_config();
+        let samples = vec![
+            SamplePoint {
+                value: None,
+                timestamp: now - Duration::from_secs(2),
+                is_prefill: false,
+            },
+            SamplePoint {
+                value: Some(480),
+                timestamp: now - Duration::from_secs(1),
+                is_prefill: false,
+            },
+        ];
+        let pixels = render_graph(300, 100, &config, &samples, now, false).expect("pixmap");
+        assert_eq!(reddest(&pixels), 0, "the cursor stayed in its blink colour");
+    }
+
+    /// The blink's clock starts at the first failed sample of a contiguous
+    /// run. A value at the head means healthy, a stale head means the host
+    /// stopped probing instead of blinking forever, and a hole cuts the run.
+    #[test]
+    fn the_timeout_blink_anchor_is_the_start_of_the_failed_run() {
+        let now = Instant::now();
+        let gap = sample_gap_threshold(1_000);
+        let point = |age_secs: u64, value: Option<u32>| SamplePoint {
+            value,
+            timestamp: now - Duration::from_secs(age_secs),
+            is_prefill: false,
+        };
+
+        let live = vec![point(3, Some(500)), point(2, None), point(1, None)];
+        assert_eq!(
+            timeout_blink_anchor(&live, gap, now),
+            Some(live[1].timestamp),
+            "the anchor is the first failure of the run"
+        );
+
+        let healthy = vec![point(2, None), point(1, Some(500))];
+        assert_eq!(timeout_blink_anchor(&healthy, gap, now), None);
+
+        let holed = vec![point(7, None), point(1, None)];
+        assert_eq!(
+            timeout_blink_anchor(&holed, gap, now),
+            Some(holed[1].timestamp),
+            "the run can only start after the hole"
+        );
+
+        let stale = vec![point(30, None)];
+        assert_eq!(
+            timeout_blink_anchor(&stale, gap, now),
+            None,
+            "a host that stopped probing must not blink forever"
         );
     }
 

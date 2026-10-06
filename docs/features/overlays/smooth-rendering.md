@@ -14,7 +14,9 @@ Status: shipped (v0.2.39) · Read when: changing `map_x`, `visible`, the reveal 
 - `render_graph_into_internal`: `let reveal = (smooth && config.smooth_rendering).then(|| now - SMOOTH_REVEAL_DELAY);` then `map_x`, `visible`, the `draw_lines` closure, the marker loop, the cursor pass.
 - `draw_series` takes `reveal` and draws the partial tip; `line_y_at_x` takes the same cut.
 - Overlay side: `smooth_due` in `OverlayWindow::apply` via `smooth_frame_interval(smooth_fps)`; `render_window`'s `render_smooth`/`smooth` flags; `bin/renderer.rs::repaint_interval`.
-- The cursor's own easing repaint is a separate clock — see [sample-cursor.md](sample-cursor.md).
+- The cursor's own easing and timeout-blink repaints are separate clocks; the
+  blink deliberately reads the raw samples rather than the reveal cut — see
+  [sample-cursor.md](sample-cursor.md).
 
 ## How & why
 

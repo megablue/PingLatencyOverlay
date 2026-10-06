@@ -9,37 +9,36 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of `615f704` — 2026-10-06 (two uncommitted glow-room changes in the
-working tree, awaiting the visual check).
+As of `b87be52` — 2026-10-06 (cursor timeout blink in the working tree,
+awaiting the visual check).
 
 ## State
 
-- The tip is pushed and the tree holds two uncommitted glow-room changes:
-  the glow's reach scales with its intensity and the reserve follows it, and
-  the room below the zero line is now shared with the cursor instead of
-  summed (any cast reserves `ceil(reach + 0.5)`; the bottom keeps
-  `max(reserve, cursor_room)`). Built and captured; awaiting the user's
-  visual check before commit. Read `git log -1` for the tip and
+- The tip is pushed (`b87be52`: the glow's reach scales with its intensity
+  and the zero-line room is shared between the cast and the cursor) and the
+  tree holds one uncommitted change: the cursor's timeout blink — off by
+  default, pulsed from the raw samples so smooth rendering does not hold it
+  back, with its own 16.7 ms repaint interval. Awaiting the user's visual
+  check before commit. Read `git log -1` for the tip and
   `git rev-list --count HEAD` for the commit count the version derives from —
   do not trust a number written here.
-- Tests: 293 across the workspace. Last bundle:
-  `PingLatencyOverlay_0.2.39_x64-setup.exe` (commit `7468388`); the next
+- Tests: 298 across the workspace. Last bundle:
+  `PingLatencyOverlay_0.2.57_x64-setup.exe` (commit `b87be52`); the next
   release build takes its version from the commit count.
 - The features-map migration is complete: 13 pages under `docs/features/` with
   the README index, and `AGENTS.md` is process plus hard rules only.
 
 ## Open threads
 
-- **Glow reach and shared room, uncommitted.** `glow_reach_px` = `radius ·
-  √(intensity/100)`, `line_glow_reserve_px` = `ceil(reach + 0.5)` (0 when no
-  band survives the 3/255 floor), and both the renderer and the reserve read
-  `glow_bands`; below the zero line the window keeps `max(reserve,
-  cursor_room)` rather than their sum. At the live settings R25/I20 reserves
-  12px where it used to reserve 26, and the maxed Default overlay is 312x135
-  where it was 312x144; full strength is still radius + 1. Release build is in
-  `src-tauri/target/release`; the capture is in
-  `%LOCALAPPDATA%\Temp\opencode\plo-capture-glow\`. Commit after the user
-  confirms, then bundle.
+- **Cursor timeout blink, uncommitted.** New per-overlay `cursorTimeoutBlink`
+  (off by default and for an absent key) and `cursorTimeoutBlinkColor`
+  (default `#ef4444`) under Colors → Blink on timeout / Blink color; both
+  require the sample cursor. The triangle's fill pulses 35% → 100% → 35% over
+  two seconds from the run's first failed sample (`timeout_blink_anchor`),
+  reading the raw samples so it starts immediately under smooth rendering;
+  `blink_due` and `timeout_blink_repaint_interval` keep it at frame rate.
+  Release build pending for the visual check; commit after the user confirms,
+  then bundle.
 - The smooth-rendering investigation (the newest segment appearing to
   skip instead of scrolling with the rest of the line) is closed: the line
   path had no regression, and the reveal hold plus the shifted time mapping

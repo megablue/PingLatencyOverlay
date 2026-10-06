@@ -15,8 +15,8 @@ use crate::monitors::{MonitorInfo, Rect};
 use crate::probes::SampleStore;
 use crate::render::{
     cosmetic_prefill_samples, line_glow_reserve_px, render_series_into_with_border,
-    sample_cursor_reserve_px, sample_cursor_room_px, sample_gap_threshold, CursorAnimation,
-    SamplePoint, Series,
+    sample_cursor_reserve_px, sample_cursor_room_px, sample_gap_threshold, timeout_blink_anchor,
+    CursorAnimation, SamplePoint, Series,
 };
 use crate::rules::CompiledMatcher;
 use crate::sticky;
@@ -456,6 +456,10 @@ struct WindowSeries {
     generation: u64,
     /// The prefill and the live samples merged in time order.
     history: Vec<SamplePoint>,
+    /// The gap that separates one probe from the next, refreshed from the
+    /// target on every series sync; the blink reads it to tell a live timeout
+    /// run from a host that stopped probing.
+    max_sample_gap: Duration,
     /// Where the sample cursor was last drawn, and whether it is still easing.
     cursor: CursorAnimation,
 }
@@ -467,6 +471,7 @@ impl WindowSeries {
             samples: Vec::new(),
             generation: 0,
             history: Vec::new(),
+            max_sample_gap: Duration::ZERO,
             cursor: CursorAnimation::default(),
         }
     }
@@ -564,6 +569,9 @@ fn sync_series(series: &mut Vec<WindowSeries>, targets: &[TargetConfig]) -> bool
             .zip(wanted.iter())
             .all(|(existing, target)| existing.target_id == target.id)
     {
+        for (entry, target) in series.iter_mut().zip(wanted) {
+            entry.max_sample_gap = sample_gap_threshold(target.timeout_ms);
+        }
         return false;
     }
 
@@ -577,9 +585,11 @@ fn sync_series(series: &mut Vec<WindowSeries>, targets: &[TargetConfig]) -> bool
     *series = wanted
         .iter()
         .map(|target| {
-            previous
+            let mut entry = previous
                 .remove(&target.id)
-                .unwrap_or_else(|| WindowSeries::new(&target.id))
+                .unwrap_or_else(|| WindowSeries::new(&target.id));
+            entry.max_sample_gap = sample_gap_threshold(target.timeout_ms);
+            entry
         })
         .collect();
     true
@@ -1051,7 +1061,22 @@ impl OverlayManager {
             let cursor_due = window.config.sample_cursor
                 && window.series.iter().any(|series| series.cursor.is_active())
                 && window.last_rendered.elapsed() >= border_frame_interval();
-            if changed || surface_changed || smooth_due || prefill_due || border_due || cursor_due {
+            // A live timeout run pulses the cursor on its own wall clock, so it
+            // needs frames even after the ease has settled on the held value.
+            let blink_due = window.config.sample_cursor
+                && window.config.cursor_timeout_blink
+                && window.series.iter().any(|series| {
+                    timeout_blink_anchor(&series.samples, series.max_sample_gap, now).is_some()
+                })
+                && window.last_rendered.elapsed() >= border_frame_interval();
+            if changed
+                || surface_changed
+                || smooth_due
+                || prefill_due
+                || border_due
+                || cursor_due
+                || blink_due
+            {
                 if Self::render_window(window, smooth) {
                     window.last_rendered = Instant::now();
                 } else {
@@ -1238,6 +1263,27 @@ impl OverlayManager {
             .values()
             .filter(|window| !window.hidden && window.config.sample_cursor)
             .any(|window| window.series.iter().any(|series| series.cursor.is_active()))
+            .then(border_frame_interval)
+    }
+
+    /// How fast the renderer must redraw while a timeout run is pulsing a
+    /// sample cursor.
+    ///
+    /// The pulse's phase is read from the wall clock, so index mode would
+    /// otherwise get one frame per arrived sample and the blink would jump
+    /// instead of breathing.
+    pub fn timeout_blink_repaint_interval(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.windows
+            .values()
+            .filter(|window| {
+                !window.hidden && window.config.sample_cursor && window.config.cursor_timeout_blink
+            })
+            .any(|window| {
+                window.series.iter().any(|series| {
+                    timeout_blink_anchor(&series.samples, series.max_sample_gap, now).is_some()
+                })
+            })
             .then(border_frame_interval)
     }
 

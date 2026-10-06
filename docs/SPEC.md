@@ -160,7 +160,13 @@
     timeout — and it eases to a new value instead of jumping. Through a timeout
     it holds the last value the line drew, because a timeout writes no point.
     It rotates and mirrors with the graph. Size is configurable
-    (`sampleCursorSizePx`, 4–20 px, default 10). The overlay box reserves a
+    (`sampleCursorSizePx`, 4–20 px, default 10). With the timeout blink on
+    (`cursorTimeoutBlink`, off by default, absent key included), the cursor
+    pulses in its own colour while a host's newest sample is a failure — dim
+    to bright and back every two seconds, starting with the failed probe
+    rather than waiting for smooth rendering's held frames, and returning to
+    white as soon as a value arrives. The colour is per overlay
+    (`cursorTimeoutBlinkColor`, default `#ef4444`). The overlay box reserves a
     constant gutter at the leading edge for the base and room at both ends of
     the Y axis, so the axis keeps its length and height and a cursor on the zero
     line or clamped at the ceiling stays whole.

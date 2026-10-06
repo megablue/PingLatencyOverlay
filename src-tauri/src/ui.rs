@@ -6261,6 +6261,36 @@ fn edit_overlay(
                     *changed = true;
                 }
                 ui.end_row();
+
+                ui.label("Blink on timeout").on_hover_text(
+                    "Pulse the cursor in the blink color while the newest sample \
+                     is a timeout.\nThe pulse starts with the first failed probe \
+                     instead of waiting for smooth rendering to reveal it.",
+                );
+                if ui
+                    .add_enabled(
+                        overlay.sample_cursor,
+                        egui::Checkbox::new(&mut overlay.cursor_timeout_blink, "Enabled"),
+                    )
+                    .on_hover_text("Requires the sample cursor.")
+                    .changed()
+                {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.add_enabled_ui(
+                    overlay.sample_cursor && overlay.cursor_timeout_blink,
+                    |ui| {
+                        color_field(
+                            ui,
+                            "Blink color",
+                            &mut overlay.cursor_timeout_blink_color,
+                            changed,
+                        );
+                    },
+                );
+                ui.end_row();
             });
     });
 

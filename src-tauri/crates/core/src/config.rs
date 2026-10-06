@@ -80,6 +80,8 @@ pub const MAX_LINE_STROKE_PX: f32 = 6.0;
 /// Default length of the triangle marking a line's newest drawn sample, in
 /// physical pixels.
 pub const DEFAULT_SAMPLE_CURSOR_SIZE_PX: u32 = 10;
+/// Default colour the sample cursor blinks in while a host is timing out.
+pub const DEFAULT_CURSOR_TIMEOUT_BLINK_COLOR: &str = "#ef4444";
 /// Smallest accepted cursor size, in physical pixels.
 pub const MIN_SAMPLE_CURSOR_SIZE_PX: u32 = 4;
 /// Largest accepted cursor size, in physical pixels.
@@ -248,6 +250,19 @@ pub struct OverlayConfig {
     /// Length of the sample cursor's triangle, in physical pixels.
     #[serde(default = "default_sample_cursor_size_px")]
     pub sample_cursor_size_px: u32,
+    /// Pulse the sample cursor in the blink colour while a host's newest
+    /// sample is a timeout.
+    ///
+    /// Off by default and for a profile written before the setting existed,
+    /// and it does nothing without the sample cursor. The pulse is driven by
+    /// the timeout run's first failed sample, so it starts the moment the
+    /// failure is recorded — smooth rendering does not hold it back the way it
+    /// holds the cursor's position.
+    #[serde(default = "default_cursor_timeout_blink")]
+    pub cursor_timeout_blink: bool,
+    /// Colour the sample cursor pulses in while a timeout lasts.
+    #[serde(default = "default_cursor_timeout_blink_color")]
+    pub cursor_timeout_blink_color: String,
     /// The display this overlay belongs to, as a Win32 device name
     /// (`\\.\DISPLAY2`), or `None` to follow the primary monitor.
     ///
@@ -558,6 +573,8 @@ impl OverlayConfig {
             line_glow_radius_px: default_line_glow_radius_px(),
             sample_cursor: true,
             sample_cursor_size_px: default_sample_cursor_size_px(),
+            cursor_timeout_blink: false,
+            cursor_timeout_blink_color: default_cursor_timeout_blink_color(),
             monitor_device: None,
             display_mode: DisplayMode::Global,
             sticky_target: None,
@@ -696,6 +713,12 @@ fn default_sample_cursor() -> bool {
 }
 fn default_sample_cursor_size_px() -> u32 {
     DEFAULT_SAMPLE_CURSOR_SIZE_PX
+}
+fn default_cursor_timeout_blink() -> bool {
+    false
+}
+fn default_cursor_timeout_blink_color() -> String {
+    DEFAULT_CURSOR_TIMEOUT_BLINK_COLOR.to_string()
 }
 
 fn anchor_has_horizontal_edge(anchor: Anchor) -> bool {
@@ -2211,6 +2234,11 @@ mod tests {
         assert_eq!(overlay.line_glow_radius_px, DEFAULT_LINE_GLOW_RADIUS_PX);
         assert!(overlay.sample_cursor);
         assert_eq!(overlay.sample_cursor_size_px, DEFAULT_SAMPLE_CURSOR_SIZE_PX);
+        assert!(!overlay.cursor_timeout_blink);
+        assert_eq!(
+            overlay.cursor_timeout_blink_color,
+            DEFAULT_CURSOR_TIMEOUT_BLINK_COLOR
+        );
     }
 
     /// The underglow is off for every profile written before it existed, and
@@ -2242,6 +2270,32 @@ mod tests {
             config.overlays[0].line_glow_radius_px,
             MIN_LINE_GLOW_RADIUS_PX
         );
+    }
+
+    /// The timeout blink is off for every profile written before it existed,
+    /// and off for a new overlay too: it is an opt-in. It round-trips with its
+    /// colour under the camelCase keys.
+    #[test]
+    fn cursor_timeout_blink_defaults_off_and_round_trips() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert!(!overlay.cursor_timeout_blink);
+        assert_eq!(
+            overlay.cursor_timeout_blink_color,
+            DEFAULT_CURSOR_TIMEOUT_BLINK_COLOR
+        );
+
+        let opted_in: OverlayConfig = serde_json::from_str(
+            r##"{"id":"blink","probe":{"protocol":"icmp","host":"1.1.1.1"},"cursorTimeoutBlink":true,"cursorTimeoutBlinkColor":"#ff00ff"}"##,
+        )
+        .expect("explicit on");
+        assert!(opted_in.cursor_timeout_blink);
+        assert_eq!(opted_in.cursor_timeout_blink_color, "#ff00ff");
+
+        let json = serde_json::to_string(&opted_in).expect("serialize");
+        assert!(json.contains("cursorTimeoutBlink"));
+        assert!(json.contains("#ff00ff"));
     }
 
     /// The sample cursor is on for every profile, including one written before
