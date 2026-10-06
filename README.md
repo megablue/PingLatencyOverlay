@@ -66,11 +66,11 @@ Everything is sampled once a second.
 | **Protocol** | ICMP (ping) or TCP (connect). |
 | **Target host / IP** | Hostname or address to probe. |
 | **Port (TCP only)** | Port to connect to. |
-| **Timeout (ms)** | Above this, the sample is drawn as a timeout instead of a latency. |
-| **Sampling (sec)** | How much history the graph holds. |
+| **Timeout** | Above this, the sample is drawn as a timeout instead of a latency. |
+| **Sampling** | How much history the graph holds. |
 | **X axis scale** | How many seconds each pixel of width covers. Lower means finer detail over a shorter span. |
 | **Y axis height** | Height of the overlay in pixels. |
-| **Latency Ceiling** | The latency that reaches the top of the graph. Values above it clamp. |
+| **Latency ceiling** | The latency that reaches the top of the graph. Values above it clamp. |
 | **Orientation** | Rotates the graph anticlockwise, so 90° makes time run bottom-to-top. |
 | **Mirrored** | Flips the graph. |
 | **Smooth rendering** | Interpolates between samples instead of stepping. |
@@ -79,10 +79,10 @@ Everything is sampled once a second.
 | **Timeout color** | The trace for samples that timed out. |
 | **Background color** / **Background opacity** | The panel behind the graph. Fully transparent gives you a bare line on a bare screen. |
 | **Position** | A small picker showing the screen. Click where you want the overlay. See below. |
-| **Horizontal / Vertical margin (px)** | Nudges the overlay away from its anchor. |
+| **Horizontal / Vertical margin** | Nudges the overlay away from its anchor. |
 | **Enabled** | Turns probing on or off for this overlay without deleting it. |
 
-There are also start-up options — **Cosmetic Startup Prefill**, its animation
+There are also start-up options — **Cosmetic startup prefill**, its animation
 length, and a **Startup border effect** with its own timing — if you want the
 overlay to announce itself when it appears.
 

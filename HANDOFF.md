@@ -9,36 +9,28 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of `b87be52` — 2026-10-06 (cursor timeout blink in the working tree,
-awaiting the visual check).
+As of `a3c2587` — 2026-10-06 (the UI label/unit pass, committed here).
 
 ## State
 
-- The tip is pushed (`b87be52`: the glow's reach scales with its intensity
-  and the zero-line room is shared between the cast and the cursor) and the
-  tree holds one uncommitted change: the cursor's timeout blink — off by
-  default, pulsed from the raw samples so smooth rendering does not hold it
-  back, with its own 16.7 ms repaint interval. Awaiting the user's visual
-  check before commit. Read `git log -1` for the tip and
-  `git rev-list --count HEAD` for the commit count the version derives from —
-  do not trust a number written here.
+- The tip is pushed (`a3c2587`: the cursor's timeout blink, bundled as
+  0.2.58) and the UI label/unit pass is committed in this change. Read
+  `git log -1` for the tip and `git rev-list --count HEAD` for the commit
+  count the version derives from — do not trust a number written here.
 - Tests: 298 across the workspace. Last bundle:
-  `PingLatencyOverlay_0.2.57_x64-setup.exe` (commit `b87be52`); the next
+  `PingLatencyOverlay_0.2.58_x64-setup.exe` (commit `a3c2587`); the next
   release build takes its version from the commit count.
 - The features-map migration is complete: 13 pages under `docs/features/` with
   the README index, and `AGENTS.md` is process plus hard rules only.
 
 ## Open threads
 
-- **Cursor timeout blink, uncommitted.** New per-overlay `cursorTimeoutBlink`
-  (off by default and for an absent key) and `cursorTimeoutBlinkColor`
-  (default `#ef4444`) under Colors → Blink on timeout / Blink color; both
-  require the sample cursor. The triangle's fill pulses 35% → 100% → 35% over
-  two seconds from the run's first failed sample (`timeout_blink_anchor`),
-  reading the raw samples so it starts immediately under smooth rendering;
-  `blink_due` and `timeout_blink_repaint_interval` keep it at frame rate.
-  Release build pending for the visual check; commit after the user confirms,
-  then bundle.
+- **UI label/unit pass, committed here.** Units moved out of the labels into
+  the value suffixes (`Sampling 30 seconds`, `Y axis height 60 px`, `Timeout
+  1000 ms`, margins `px`), and the display-mode, startup and border-effect
+  labels settled into sentence case. Known wart left open: a DragValue suffix
+  is static, so a value of 1 reads "1 seconds" (most visible on Border fade
+  out); pluralising the second fields is an easy follow-up if asked.
 - The smooth-rendering investigation (the newest segment appearing to
   skip instead of scrolling with the rest of the line) is closed: the line
   path had no regression, and the reveal hold plus the shifted time mapping

@@ -79,7 +79,7 @@ Status: shipped (v0.2.37) · Read when: changing `draw_sample_cursor`,
 | Key | Default | Range / clamp | Control |
 | --- | --- | --- | --- |
 | `sampleCursor` | on (new and absent) | on/off | Colors → Sample cursor |
-| `sampleCursorSizePx` | 10 | 4–20 | Colors → Cursor size (px) |
+| `sampleCursorSizePx` | 10 | 4–20 | Colors → Cursor size |
 | `cursorTimeoutBlink` | off (new and absent) | on/off | Colors → Blink on timeout |
 | `cursorTimeoutBlinkColor` | `#ef4444` | hex | Colors → Blink color |
 

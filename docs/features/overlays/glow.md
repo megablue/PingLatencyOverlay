@@ -81,7 +81,7 @@ in `render.rs`, its reserve in `overlay.rs`, or the Colors pane rows.
 |---|---|---|---|
 | `lineGlow` | new: on; absent key: off | on/off | Colors → Line glow |
 | `lineGlowIntensity` | 10 | 0–100 | Glow intensity slider (%); scales the reach too |
-| `lineGlowRadiusPx` | 30 | 2–50 | Glow radius slider (px); the reach at 100% |
+| `lineGlowRadiusPx` | 30 | 2–50 | Glow radius slider; the reach at 100% |
 
 ## Tests that pin it
 

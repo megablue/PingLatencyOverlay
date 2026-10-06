@@ -100,7 +100,7 @@
     explicit preference; the per-overlay smooth FPS controls the intermediate
     redraw rate, and gaps in the data are never interpolated.
 - Startup behaviors:
-  - `Cosmetic Startup Prefill` can show a deterministic fake latency graph
+  - `Cosmetic startup prefill` can show a deterministic fake latency graph
     before the first real probe result arrives.
   - The prefill uses its own line color (default `#64748b`) and reveals from
     left to right over the configured number of seconds (default 3).

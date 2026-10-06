@@ -5728,10 +5728,14 @@ fn edit_target(ui: &mut Ui, target: &mut TargetConfig, changed: &mut bool) {
             }
             ui.end_row();
 
-            ui.label("Timeout (ms)");
+            ui.label("Timeout");
             let mut timeout = target.timeout_ms.max(1) as i64;
             if ui
-                .add(egui::DragValue::new(&mut timeout).range(1..=600_000))
+                .add(
+                    egui::DragValue::new(&mut timeout)
+                        .range(1..=600_000)
+                        .suffix(" ms"),
+                )
                 .changed()
             {
                 target.timeout_ms = timeout.clamp(1, 600_000) as u32;
@@ -5897,16 +5901,18 @@ fn edit_overlay(
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Horizontal margin (px)").on_hover_text(
+                ui.label("Horizontal margin").on_hover_text(
                     "Positive shifts right on centered anchors or inward from a left/right edge; negative shifts the opposite way.",
                 );
                 let mut horizontal_margin = overlay.horizontal_margin_px as i64;
                 if ui
                     .add(
-                        egui::DragValue::new(&mut horizontal_margin).range(
-                            config::MIN_MARGIN_OFFSET_PX as i64
-                                ..=config::MAX_MARGIN_OFFSET_PX as i64,
-                        ),
+                        egui::DragValue::new(&mut horizontal_margin)
+                            .range(
+                                config::MIN_MARGIN_OFFSET_PX as i64
+                                    ..=config::MAX_MARGIN_OFFSET_PX as i64,
+                            )
+                            .suffix(" px"),
                     )
                     .changed()
                 {
@@ -5918,16 +5924,18 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Vertical margin (px)").on_hover_text(
+                ui.label("Vertical margin").on_hover_text(
                     "Positive shifts down on centered anchors or inward from a top/bottom edge; negative shifts the opposite way.",
                 );
                 let mut vertical_margin = overlay.vertical_margin_px as i64;
                 if ui
                     .add(
-                        egui::DragValue::new(&mut vertical_margin).range(
-                            config::MIN_MARGIN_OFFSET_PX as i64
-                                ..=config::MAX_MARGIN_OFFSET_PX as i64,
-                        ),
+                        egui::DragValue::new(&mut vertical_margin)
+                            .range(
+                                config::MIN_MARGIN_OFFSET_PX as i64
+                                    ..=config::MAX_MARGIN_OFFSET_PX as i64,
+                            )
+                            .suffix(" px"),
                     )
                     .changed()
                 {
@@ -5943,14 +5951,14 @@ fn edit_overlay(
 
     section(ui, "Display Mode", |ui| {
         let mut mode = overlay.display_mode;
-        ui.radio_value(&mut mode, DisplayMode::Global, "Global Overlay")
+        ui.radio_value(&mut mode, DisplayMode::Global, "Global overlay")
             .on_hover_text("Placed on a display, pinned by name when you choose one.");
-        ui.radio_value(&mut mode, DisplayMode::Sticky, "Sticky Overlay")
+        ui.radio_value(&mut mode, DisplayMode::Sticky, "Sticky overlay")
             .on_hover_text(
                 "Follows a window: the overlay moves and resizes with its \
                  client area, and hides while the window is minimized or gone.",
             );
-        ui.radio_value(&mut mode, DisplayMode::Wallpaper, "Wallpaper Mode")
+        ui.radio_value(&mut mode, DisplayMode::Wallpaper, "Wallpaper mode")
             .on_hover_text(
                 "Keeps the overlay on the desktop: above the wallpaper, below \
                  the desktop icons and every normal window, with the taskbar \
@@ -6001,10 +6009,14 @@ fn edit_overlay(
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Sampling (sec)");
+                ui.label("Sampling");
                 let mut window_seconds = overlay.window_seconds as i64;
                 if ui
-                    .add(egui::DragValue::new(&mut window_seconds).range(30..=86_400))
+                    .add(
+                        egui::DragValue::new(&mut window_seconds)
+                            .range(30..=86_400)
+                            .suffix(" seconds"),
+                    )
                     .changed()
                 {
                     overlay.window_seconds = window_seconds.clamp(30, 86_400) as u32;
@@ -6045,7 +6057,11 @@ fn edit_overlay(
                 ui.label("Y axis height");
                 let mut graph_height = overlay.graph_height_px.max(10) as i64;
                 if ui
-                    .add(egui::DragValue::new(&mut graph_height).range(10..=10_000))
+                    .add(
+                        egui::DragValue::new(&mut graph_height)
+                            .range(10..=10_000)
+                            .suffix(" px"),
+                    )
                     .changed()
                 {
                     overlay.graph_height_px = graph_height.clamp(10, 10_000) as u32;
@@ -6053,10 +6069,14 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Latency Ceiling");
+                ui.label("Latency ceiling");
                 let mut max_y = overlay.max_y_ms.max(1) as i64;
                 if ui
-                    .add(egui::DragValue::new(&mut max_y).range(1..=1_000_000))
+                    .add(
+                        egui::DragValue::new(&mut max_y)
+                            .range(1..=1_000_000)
+                            .suffix(" ms"),
+                    )
                     .changed()
                 {
                     overlay.max_y_ms = max_y.clamp(1, 1_000_000) as u32;
@@ -6204,7 +6224,7 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Glow radius (px)")
+                ui.label("Glow radius")
                     .on_hover_text("How far the glow reaches past each line at full intensity.");
                 let mut glow_radius = overlay.line_glow_radius_px as i64;
                 if ui
@@ -6238,7 +6258,7 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Cursor size (px)")
+                ui.label("Cursor size")
                     .on_hover_text("Length of the triangle's body.");
                 let mut cursor_size = overlay.sample_cursor_size_px as i64;
                 if ui
@@ -6299,7 +6319,7 @@ fn edit_overlay(
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Cosmetic Startup Prefill")
+                ui.label("Cosmetic startup prefill")
                     .on_hover_text("Show a cosmetic fake graph before real samples arrive.");
                 if ui
                     .checkbox(&mut overlay.cosmetic_startup_prefill, "Enabled")
@@ -6317,7 +6337,7 @@ fn edit_overlay(
                 );
                 ui.end_row();
 
-                ui.label("Prefill animation (sec)");
+                ui.label("Prefill animation");
                 let mut prefill_animation = overlay.prefill_animation_sec as i64;
                 if ui
                     .add_enabled(
@@ -6327,7 +6347,7 @@ fn edit_overlay(
                                 config::MIN_PREFILL_ANIMATION_SEC as i64
                                     ..=config::MAX_PREFILL_ANIMATION_SEC as i64,
                             )
-                            .suffix(" sec"),
+                            .suffix(" seconds"),
                     )
                     .changed()
                 {
@@ -6350,7 +6370,7 @@ fn edit_overlay(
                         ui.selectable_value(
                             &mut border_effect,
                             BorderEffect::RgbNoise,
-                            "RGB Noise",
+                            "RGB noise",
                         );
                         ui.selectable_value(&mut border_effect, BorderEffect::Disabled, "Disabled");
                     });
@@ -6360,7 +6380,7 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Border animation (sec)");
+                ui.label("Border animation");
                 let mut border_animation = overlay.border_animation_sec as i64;
                 if ui
                     .add_enabled(
@@ -6370,7 +6390,7 @@ fn edit_overlay(
                                 config::MIN_BORDER_ANIMATION_SEC as i64
                                     ..=config::MAX_BORDER_ANIMATION_SEC as i64,
                             )
-                            .suffix(" sec"),
+                            .suffix(" seconds"),
                     )
                     .changed()
                 {
@@ -6382,14 +6402,14 @@ fn edit_overlay(
                 }
                 ui.end_row();
 
-                ui.label("Border fade out (sec)");
+                ui.label("Border fade out");
                 let mut border_fade = overlay.border_fade_sec as i64;
                 if ui
                     .add_enabled(
                         overlay.startup_border_effect != BorderEffect::Disabled,
                         egui::DragValue::new(&mut border_fade)
                             .range(0..=config::MAX_BORDER_FADE_SEC as i64)
-                            .suffix(" sec"),
+                            .suffix(" seconds"),
                     )
                     .changed()
                 {
@@ -6447,7 +6467,7 @@ fn color_to_hex(color: Color32) -> String {
 fn border_effect_label(effect: BorderEffect) -> &'static str {
     match effect {
         BorderEffect::RgbLoop => "RGB loop",
-        BorderEffect::RgbNoise => "RGB Noise",
+        BorderEffect::RgbNoise => "RGB noise",
         BorderEffect::Disabled => "Disabled",
     }
 }
@@ -9774,7 +9794,7 @@ mod tests {
             app.config.overlays[0].display_mode,
             config::DisplayMode::Global
         );
-        click_text(&mut app, &ctx, "Sticky Overlay");
+        click_text(&mut app, &ctx, "Sticky overlay");
         assert_eq!(
             app.config.overlays[0].display_mode,
             config::DisplayMode::Sticky,
