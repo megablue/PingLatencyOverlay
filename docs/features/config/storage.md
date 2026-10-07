@@ -137,6 +137,6 @@ see `overlays/*.md`.
 
 ## Related
 
-- [runtime.md](../runtime.md) — how a loaded config reaches the renderer.
+- [live-edits.md](../live-edits.md) — how a loaded config reaches the renderer.
 - `config/window.md` — the editor that stages and saves these files.
 - `overlays/*.md` — the profile schema per overlay feature.

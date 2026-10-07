@@ -54,6 +54,9 @@ in `render.rs`, its reserve in `overlay.rs`, or the Colors pane rows.
   graph's +Y basis (toward Y0) under the same rotation and mirror
   `transform_point` uses — they share `rotation`. 0° casts down, 90° right,
   180° up, 270° left, each flipped by the mirror.
+
+### Reach, the reserve, and draw order
+
 - **Reach and reserved room**: `glow_reach_px(radius, intensity)` =
   `radius · √(intensity / 100)` — full strength reaches the radius, and 0%
   reaches nothing. `line_glow_reserve_px` = `ceil(reach + 0.5)` physical px

@@ -60,6 +60,9 @@ Status: shipped (v0.2.x) · Read when: changing `src/theme.rs`, the theme tiles,
   on the way in and the built-ins are held to WCAG AA in a test
   (`both_builtin_themes_are_readable`,
   `an_unreadable_theme_loads_and_is_only_caught_by_contrast`).
+
+### The tiles, `sync_theme`, and the live preference
+
 - `choose_theme` writes the live `prefs` **and** `prefs_draft`, because
   `sync_theme` re-reads the saved preference every pass; a draft-only write is
   applied then silently undone. Discard restores `prefs` and the same pass puts

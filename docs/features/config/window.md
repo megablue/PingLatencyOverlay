@@ -53,6 +53,9 @@ pickers or the driving tests.
   `list_pane_row_width_for`.
 - Preference writers: `set_background_tracking`,
   `set_selection_border_animation`, `choose_theme`.
+
+### Test seams
+
 - Tests: `PingApp::for_test` (temp root; the tray and renderer spawns are
   skipped by `attach: false` in the shared `build` body), `frame_ui` versus
   `frame_logic` (driving tests never call the latter), `drive` / `drive_tall`,
@@ -88,6 +91,9 @@ pickers or the driving tests.
   profile mutations and by arriving on the Profiles page (`sync_profiles`
   watching `last_page`); a count absent from the map draws nothing, never
   `unwrap_or(0)`.
+
+### Painted rows and layout traps
+
 - **Rows are painted, not widgets** (`allocate_exact_size`, `rect_filled`,
   `new_child`), so a label can sit beside a control. A painted row is
   allocated at `list_pane_row_height`, never at its content height.
@@ -149,4 +155,5 @@ pickers or the driving tests.
 
 - `theming.md` — the window's palette and its files.
 - `config/storage.md` — what the drafts become on disk.
-- `runtime.md` — the config window's process and pipe role.
+- `runtime.md` — the config window's process role; `live-edits.md` — the
+  edits it pushes while it stays open.

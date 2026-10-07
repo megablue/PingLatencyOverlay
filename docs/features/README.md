@@ -16,7 +16,10 @@ refactors with no behavior, mechanism, config or test change need no edit.
 
 | Feature | Doc | Read when |
 | --- | --- | --- |
-| Runtime & pipe | [runtime.md](runtime.md) | processes, launch matrix, `transport.rs`, supervision |
+| Runtime | [runtime.md](runtime.md) | the three processes, launch matrix, the window message pump |
+| The pipe | [pipe.md](pipe.md) | `transport.rs`: wire format, the server loop, single-instance mutexes |
+| Supervision | [supervision.md](supervision.md) | the tray's restart and storm guard, `App::starting` |
+| Live edits | [live-edits.md](live-edits.md) | `sync_runtime_config`, `push_config`, `persist_current` |
 | Tray | [tray.md](tray.md) | tray icon and menu, resident loop, auto profile switching |
 | Config — window | [window.md](config/window.md) | the egui window: `ui.rs`, panes, drafts, pickers, test seams |
 | Config — storage | [storage.md](config/storage.md) | `config.rs`: schema, profiles, globals, `rules.json`, migrations |

@@ -35,14 +35,14 @@ auto profile switching, or anything the tray supervises.
   enumeration (`GetWindowTextW`, a Toolhelp process snapshot; tool windows
   (`WS_EX_TOOLWINDOW`) and invisible windows are not candidates).
 - `crates/core/src/transport.rs` — `Message` and `SingleInstance` (see
-  runtime.md); `crates/tray/src/bin/tray_probe.rs` — the icon/menu-only
+  pipe.md); `crates/tray/src/bin/tray_probe.rs` — the icon/menu-only
   diagnostic, behind the `tray-probe` feature, never shipped.
 
 ## How & why
 
 - **The tray owns switching because it is the only process alive while the
   Config window is closed.** No new process and no new pipe message: a switch
-  is the `SetConfig` a profile load already sends (runtime.md).
+  is the `SetConfig` a profile load already sends (live-edits.md).
 - **`rules.json` is the window→tray channel.** The tray re-reads it on
   `(mtime, len)`; `Store::save_rules` writes atomically so the stamp can be
   trusted. A parse failure keeps the rules already loaded — compiling "no
@@ -69,12 +69,15 @@ auto profile switching, or anything the tray supervises.
 - **The tray never retires probes.** Background tracking keeps a departure's
   probes alive, and only the Config window knows which removals are permanent
   (probes.md).
+
+### Reading the active window, and the pipe it supervises
+
 - Titles come from `GetWindowTextW`, which Windows documents not to send
   `WM_GETTEXT` to another process's window and so cannot block on a hung game;
   process names come from a Toolhelp snapshot, which needs no handle into the
   target and works for an elevated game where `OpenProcess` would fail.
 - The tray supervises the pipe, not a child handle; its crash guard is
-  `should_restart(now)` / `forget_expired` (runtime.md).
+  `should_restart(now)` / `forget_expired` (supervision.md).
 
 ## Config keys / UI
 
@@ -109,7 +112,10 @@ auto profile switching, or anything the tray supervises.
 
 ## Related
 
-- runtime.md — the three processes, the pipe and supervision.
+- runtime.md — the three processes and who launches whom.
+- pipe.md — the protocol and the single-instance mutexes.
+- supervision.md — the crash guard and when a restart is charged.
+- live-edits.md — the `SetConfig` a profile switch sends.
 - probes.md — background tracking and what the tray retires (nothing).
 - config/storage.md — profiles, `globalconfig.json`, `rules.json`.
 - config/window.md — the window's own engine and its preview.

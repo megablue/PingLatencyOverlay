@@ -42,6 +42,7 @@ Status: shipped (v0.2.37) · Read when: changing `draw_sample_cursor`,
   "Blink on timeout" checkbox and "Blink color" picker.
 
 ## How & why
+
 - Graph-space geometry, all three vertices through `transform_point`, so it
   rotates and mirrors with the line: apex `(base_x - size, y)`, base corners
   `(base_x, y ± size * 0.7)`, where `base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN`.
@@ -65,6 +66,9 @@ Status: shipped (v0.2.37) · Read when: changing `draw_sample_cursor`,
   2 s)`, and a value sample restores white. `blink_due` in `apply` and
   `timeout_blink_repaint_interval` in the renderer's chain supply the frames
   while the run lives.
+
+### The reserves, and the draw order
+
 - Two reserves, read by both `overlay::layout_in_rect` and the renderer:
   `sample_cursor_reserve_px` is a constant 2 px gutter at the leading edge
   (edge margin + half the rim), and `sample_cursor_room_px` (`ceil(size * 0.7

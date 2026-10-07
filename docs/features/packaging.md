@@ -63,6 +63,9 @@ script, or an executable name.
   `ExecWait`, so `nsExec::ExecToStack` (CREATE_NO_WINDOW) is used for the
   kills. The previous uninstaller is a windowed program with no console to
   flash, so it stays on `ExecWait`.
+
+### Installer traps and the uninstall section
+
 - **MUI's finish page has exactly two checkbox slots.** The desktop shortcut
   reuses `MUI_FINISHPAGE_SHOWREADME` with a custom `_FUNCTION`; the macro name
   is misleading, which the script says at the definition.

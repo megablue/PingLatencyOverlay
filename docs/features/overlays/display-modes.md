@@ -57,6 +57,9 @@ follows a window, or how a display is pinned.
   expected: `apply` notices the dead window and the ordinary creation path
   rebuilds it. The once-a-second re-assert skips this mode; re-setting topmost
   would break it.
+
+### Wallpaper placement, `hidden`, and the picker
+
 - **Wallpaper mode is a measured decision.** A layered child of the shell's
   desktop presents nothing on current Windows builds, and the only other way
   to live in that layer is a GPU present path the renderer deliberately does
