@@ -15,9 +15,11 @@ Colors rows.
   while it moves, so it animates in index mode too.
 - When a live timeout reaches the point it is drawn from, it leaves the line
   for the top of the graph: half the triangle hangs out of the overlay's edge,
-  it shakes for ~0.6 s, and it waits there until a value arrives. A *stale*
-  timeout — a host that stopped probing — holds the last drawn value instead,
-  and during the startup prefill it rides the prefill head.
+  it shakes for ~0.9 s, and it waits there until a value arrives. Each further
+  timeout in the run restarts the shake, so a host that keeps failing keeps
+  shaking rather than shaking once and parking. A *stale* timeout — a host that
+  stopped probing — holds the last drawn value instead, and during the startup
+  prefill it rides the prefill head.
 - Default on, including a profile written before the setting existed (absent
   key = on), unlike the underglow.
 - With the timeout blink on, the cursor pulses in its own colour while the
@@ -36,7 +38,8 @@ Colors rows.
   `sample_cursor_half_height` / `sample_cursor_reserve_px` /
   `sample_cursor_room_px`; the bounce's `cursor_shake_offset`, `CURSOR_BOUNCE_Y`
   / `CURSOR_BOUNCE_SHAKE_SECS` / `CURSOR_BOUNCE_SHAKE_HZ` /
-  `CURSOR_BOUNCE_SHAKE_PX`; the run's `timeout_run_anchor`,
+  `CURSOR_BOUNCE_SHAKE_FRACTION`; the run's `timeout_run_anchor` and
+  `timeout_run_latest`,
   `CURSOR_TIMEOUT_BLINK_PERIOD` / `CURSOR_TIMEOUT_BLINK_FLOOR`.
 - `overlay.rs`: `WindowSeries.cursor` and `.max_sample_gap`, the `cursor_due`
   and `blink_due` terms in the `apply` render gate, `cursor_repaint_interval`
@@ -68,7 +71,7 @@ Colors rows.
   clock of its own and would otherwise move only when a sample arrives.
 - The timeout blink reads the raw samples, not the reveal-filtered slice, so
   a failure starts pulsing the moment it is recorded. `timeout_run_anchor` —
-  the one run detector, shared with the bounce — requires the newest sample it
+  the detector the blink counts from — requires the newest sample it
   is shown to be a failure no older than `max_sample_gap` (a host that stopped
   probing stops blinking), walks back over the contiguous run and returns its
   first timestamp; the fill is the blink colour scaled from 35% to 100% by
@@ -83,17 +86,31 @@ Colors rows.
   line is drawn to — so the cursor leaves the line when the break reaches it.
   The blink deliberately does the opposite, reading the raw samples at the wall
   clock; [smooth-rendering.md](smooth-rendering.md) keeps both rules.
-- `timeout_run_anchor` is reused unchanged: the newest drawn sample must be a
-  failure no older than `max_sample_gap`, and the walk back over contiguous
-  failures gives the run's first timestamp. That age check is the whole
-  liveness rule — a host that stopped probing (profile switched away, Pause on)
-  fails it, and the cursor goes back to holding the last drawn value.
-- The shake's clock is `head − run`: zero on the frame the run arrives, and the
-  same number in index and smooth mode. `cursor_shake_offset` is a decaying
-  sine — `2 px · (1 − t / 0.6 s) · sin(2π · 12 Hz · t)` — zero at both ends, so
-  starting or stopping it cannot step the cursor. A run already in progress
-  when the cursor appears (a hidden overlay shown mid-run, the cursor switched
-  on) is drawn parked and does not shake: the moment it would mark has passed.
+- The liveness rule is the age check: the newest drawn sample must be a failure
+  no older than `max_sample_gap` (`timeout_run_latest`), and the walk back over
+  contiguous failures gives the run's first timestamp (`timeout_run_anchor`,
+  which the blink counts from). A host that stopped probing (profile switched
+  away, Pause on) fails the check, and the cursor goes back to holding the last
+  drawn value.
+- The shake's clock is `head − latest`, where `latest` is the newest failure the
+  drawn head has reached (`timeout_run_latest`), not the run's first: zero on
+  the frame a failure arrives, and restarted by each further failure so a run
+  that keeps failing keeps shaking. It is the same number in index and smooth
+  mode. The blink keeps `timeout_run_anchor`'s oldest timestamp, so its pulse
+  does not reset mid-run. `cursor_shake_offset` is a decaying
+  sine — `0.6 · half-height · (1 − t / 0.9 s) · sin(2π · 4.5 Hz · t)` — zero at
+  both ends, so starting or stopping it cannot step the cursor. A run already in
+  progress when the cursor appears (a hidden overlay shown mid-run, the cursor
+  switched on) shakes only for what is left of the newest failure's window;
+  once that has passed it is drawn parked.
+- **The shake's numbers are unexciting on purpose.** Shipped first at 12 Hz and
+  2 px, it was invisible in the running app: a 30 fps overlay samples a 12 Hz
+  sine on unrelated phases, so it reads as a twitch, and 2 px against a 12 px
+  triangle is a wobble nobody sees. The amplitude now follows the cursor's
+  half-height — a bigger triangle shakes further — at 0.6 of it, which keeps a
+  sliver of white on the canvas at the far end of the swing; at the full
+  half-height only the dark rim is left up there, which against the background
+  reads as the cursor blinking out rather than bouncing.
 - The rest position is `CURSOR_BOUNCE_Y = 0`, the canvas edge in graph
   coordinates, so half the triangle is clipped by the window. It is
   deliberately outside the room `sample_cursor_room_px` keeps at the ceiling:
@@ -131,6 +148,7 @@ The bounce has no key of its own: it is part of the cursor and follows
 `the_sample_cursor_apex_moves_with_its_size`,
 `the_cursor_bounces_off_the_top_when_the_timeout_reaches_it`,
 `the_bounced_cursor_shakes_then_settles_at_the_top`,
+`a_second_timeout_in_a_row_restarts_the_shake`,
 `a_value_sample_brings_the_cursor_back_onto_the_line`,
 `the_bounce_waits_for_the_reveal_hold_in_smooth_mode`,
 `a_stale_timeout_does_not_pin_the_cursor_to_the_top`,

@@ -280,15 +280,23 @@ const CURSOR_TIMEOUT_BLINK_FLOOR: f32 = 0.35;
 /// graph's own high-latency end and rotates and mirrors with everything else
 /// — in a mirrored overlay that end is the bottom of the window.
 const CURSOR_BOUNCE_Y: f32 = 0.0;
-/// How long a bounce shakes for, measured from the moment the drawn head
-/// entered the timeout run.
-const CURSOR_BOUNCE_SHAKE_SECS: Duration = Duration::from_millis(600);
-/// The shake's frequency, in cycles per second: slow enough that a frame clock
-/// draws the oscillation instead of aliasing it away.
-const CURSOR_BOUNCE_SHAKE_HZ: f32 = 12.0;
-/// The shake's amplitude at the start of a run, in graph pixels. It fades to
-/// nothing by the end of `CURSOR_BOUNCE_SHAKE_SECS`.
-const CURSOR_BOUNCE_SHAKE_PX: f32 = 2.0;
+/// How long a bounce shakes for, measured from the newest failure the drawn
+/// head has reached. Long enough to catch at a glance, short enough to still
+/// read as one bounce rather than a permanent wobble; a run that keeps failing
+/// restarts it with each failure, so the cursor keeps shaking.
+const CURSOR_BOUNCE_SHAKE_SECS: Duration = Duration::from_millis(900);
+/// The shake's frequency, in cycles per second. Deliberately far under a
+/// 30 fps frame clock: at 12 Hz the sampled frames land on unrelated phases and
+/// the oscillation reads as a twitch — or as nothing at all — rather than a
+/// shake.
+const CURSOR_BOUNCE_SHAKE_HZ: f32 = 4.5;
+/// The shake's amplitude, as a fraction of the cursor's half-height, so a
+/// bigger triangle shakes further instead of twitching in place. Three fifths
+/// swings it by one and a fifth times its own height, and still leaves white on
+/// the canvas at the far end of the swing: at 1.0 only the dark rim is left up
+/// there, which against the background reads as the cursor blinking out rather
+/// than bouncing.
+const CURSOR_BOUNCE_SHAKE_FRACTION: f32 = 0.6;
 /// The height of the Stub timeout indicator, in pixels: a short line resting
 /// on the canvas bottom instead of the full-height Stick.
 const TIMEOUT_STUB_HEIGHT: f32 = 2.0;
@@ -335,22 +343,23 @@ pub fn sample_cursor_room_px(config: &OverlayConfig) -> u32 {
     }
 }
 
-/// The offset a bounce's shake adds to the cursor this frame, in graph pixels,
-/// or `None` once the shake has run its course.
+/// The offset a bounce's shake adds to the cursor this frame, in canvas
+/// pixels, or `None` once the shake has run its course. `amplitude` is how far
+/// the first swing throws it; the envelope fades that to nothing.
 ///
 /// A decaying sine rather than a random jitter: the phase is a function of the
 /// elapsed time alone, so the same instant draws the same frame whatever the
 /// frame rate, and a test can name the frame it expects. Both ends are zero —
 /// the sine starts there and the fade reaches it at the window's end — so
 /// starting or ending a shake cannot step the cursor.
-fn cursor_shake_offset(elapsed: Duration) -> Option<f32> {
+fn cursor_shake_offset(elapsed: Duration, amplitude: f32) -> Option<f32> {
     let t = elapsed.as_secs_f32();
     let window = CURSOR_BOUNCE_SHAKE_SECS.as_secs_f32();
     if t >= window {
         return None;
     }
     let fade = 1.0 - t / window;
-    Some(CURSOR_BOUNCE_SHAKE_PX * fade * (t * CURSOR_BOUNCE_SHAKE_HZ * std::f32::consts::TAU).sin())
+    Some(amplitude * fade * (t * CURSOR_BOUNCE_SHAKE_HZ * std::f32::consts::TAU).sin())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -653,6 +662,9 @@ fn render_graph_into_internal(
         // reaches it instead of when the probe failed; in index mode the two
         // are the same instant.
         let head = reveal.unwrap_or(now);
+        // The cursor's own height sets how far the shake throws it, so a bigger
+        // triangle wobbles further rather than twitching in place.
+        let shake_amplitude = sample_cursor_half_height(config) * CURSOR_BOUNCE_SHAKE_FRACTION;
         for entry in &mut *series {
             let samples = visible(
                 entry.samples,
@@ -670,14 +682,20 @@ fn render_graph_into_internal(
                 continue;
             };
             // A live run at the drawn head sends the cursor to the top of the
-            // canvas. The shake's clock is how long the head has been inside
-            // the run, which is zero on the frame the run arrives and the same
-            // number in index and smooth mode.
-            let (target, shake) = timeout_run_anchor(drawn, entry.max_sample_gap, head)
-                .map(|run| {
+            // canvas. The shake's clock is how long ago the *newest* failure
+            // was recorded, so every timeout in a run restarts it: a run that
+            // keeps failing keeps shaking instead of shaking once at its start
+            // and then parking while failures keep arriving. The clock is zero
+            // on the frame a failure reaches the head, and the same number in
+            // index and smooth mode.
+            let (target, shake) = timeout_run_latest(drawn, entry.max_sample_gap, head)
+                .map(|latest| {
                     (
                         CURSOR_BOUNCE_Y,
-                        cursor_shake_offset(head.saturating_duration_since(run)),
+                        cursor_shake_offset(
+                            head.saturating_duration_since(latest),
+                            shake_amplitude,
+                        ),
                     )
                 })
                 .unwrap_or((target, None));
@@ -858,7 +876,8 @@ fn stroke_run(
 /// sample of the contiguous run — walking back while each sample is a timeout
 /// and the step to the newer one is within `max_sample_gap`, stopping at a
 /// value or a hole. The blink's phase counts from there, so every run starts
-/// dim, and the bounce's shake counts from the same instant.
+/// dim. The bounce's shake counts from the newest failure instead — see
+/// `timeout_run_latest` — so a run that keeps failing keeps shaking.
 pub(crate) fn timeout_run_anchor(
     samples: &[SamplePoint],
     max_sample_gap: Duration,
@@ -882,6 +901,29 @@ pub(crate) fn timeout_run_anchor(
         newer = Some(sample.timestamp);
     }
     anchor
+}
+
+/// The newest live failure at `now`, or `None` when the newest sample is a
+/// value or the run has gone stale.
+///
+/// The bounce reads this rather than `timeout_run_anchor`'s oldest timestamp:
+/// its shake's clock is how long ago the *newest* failure was recorded, so a
+/// run that keeps failing restarts the shake with every sample instead of
+/// shaking once at the run's start and then parking. It agrees with
+/// `timeout_run_anchor` on whether a live run exists — both reject a newest
+/// sample that is a value or older than `max_sample_gap` — but names the other
+/// end of the run. The blink keeps the older anchor, so its pulse does not
+/// reset mid-run.
+pub(crate) fn timeout_run_latest(
+    samples: &[SamplePoint],
+    max_sample_gap: Duration,
+    now: Instant,
+) -> Option<Instant> {
+    let newest = samples.iter().rev().find(|sample| !sample.is_prefill)?;
+    if newest.value.is_some() || now.saturating_duration_since(newest.timestamp) > max_sample_gap {
+        return None;
+    }
+    Some(newest.timestamp)
 }
 
 /// The cursor's size and, while a timeout run lasts, the blink's colour and
@@ -3418,17 +3460,17 @@ mod tests {
                 render_graph(300, 100, &config, &points, now + offset, false).expect("pixmap");
             cursor_rows(&pixels).1
         };
-        // The first crest of the 12 Hz shake is at 21 ms, its first trough at
-        // 63 ms; the envelope has barely faded by either.
+        // The first crest of the 4.5 Hz shake is at 56 ms, its first trough at
+        // 167 ms; the envelope has barely faded by either.
         let start = bottom_at(Duration::ZERO);
-        let crest = bottom_at(Duration::from_millis(21));
-        let trough = bottom_at(Duration::from_millis(63));
+        let crest = bottom_at(Duration::from_millis(56));
+        let trough = bottom_at(Duration::from_millis(167));
         assert!(
             crest >= start && trough <= start && crest - trough >= 3,
             "the cursor did not shake around its parked position: {start}, {crest}, {trough}"
         );
-        let settled = bottom_at(Duration::from_millis(700));
-        let later = bottom_at(Duration::from_millis(1_200));
+        let settled = bottom_at(Duration::from_millis(950));
+        let later = bottom_at(Duration::from_millis(1_300));
         assert_eq!(
             settled, later,
             "the shake outlived its window: {settled} then {later}"
@@ -3436,6 +3478,77 @@ mod tests {
         assert!(
             settled <= 12,
             "the settled cursor did not stay at the top: {settled}"
+        );
+    }
+
+    /// A run that keeps failing keeps shaking: each new failure restarts the
+    /// shake's clock, so a second timeout in a row shakes even though the run
+    /// itself is already older than the shake's window.
+    #[test]
+    fn a_second_timeout_in_a_row_restarts_the_shake() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 10;
+        config.line_glow = false;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let now = Instant::now();
+        // Two failures in a row. The run is a second old, so a shake anchored
+        // to its start would be long over by the frame below; the newest
+        // failure is what the clock must read.
+        let points = vec![
+            SamplePoint {
+                value: Some(200),
+                timestamp: now - Duration::from_secs(2),
+                is_prefill: false,
+            },
+            SamplePoint {
+                value: None,
+                timestamp: now - SAMPLE_INTERVAL,
+                is_prefill: false,
+            },
+            SamplePoint {
+                value: None,
+                timestamp: now,
+                is_prefill: false,
+            },
+        ];
+        // A frame just after the newest failure is near the first crest.
+        let pixels = render_graph(
+            300,
+            100,
+            &config,
+            &points,
+            now + Duration::from_millis(56),
+            false,
+        )
+        .expect("pixmap");
+        let (_, shaking) = cursor_rows(&pixels);
+        // The same run without the second failure is the bug: anchored to the
+        // run's start, that one has settled and sits parked at the top.
+        let single = vec![
+            SamplePoint {
+                value: Some(200),
+                timestamp: now - Duration::from_secs(2),
+                is_prefill: false,
+            },
+            SamplePoint {
+                value: None,
+                timestamp: now - SAMPLE_INTERVAL,
+                is_prefill: false,
+            },
+        ];
+        let parked_pixels = render_graph(
+            300,
+            100,
+            &config,
+            &single,
+            now + Duration::from_millis(56),
+            false,
+        )
+        .expect("pixmap");
+        let (_, parked) = cursor_rows(&parked_pixels);
+        assert_ne!(
+            shaking, parked,
+            "a second timeout in a row did not restart the shake: {shaking} vs parked {parked}"
         );
     }
 
@@ -3547,18 +3660,26 @@ mod tests {
     #[test]
     fn the_shake_starts_and_ends_at_rest() {
         assert_eq!(
-            cursor_shake_offset(Duration::ZERO),
+            cursor_shake_offset(Duration::ZERO, 8.0),
             Some(0.0),
             "the shake must start where the cursor already is"
         );
         assert_eq!(
-            cursor_shake_offset(CURSOR_BOUNCE_SHAKE_SECS),
+            cursor_shake_offset(CURSOR_BOUNCE_SHAKE_SECS, 8.0),
             None,
             "the shake must end with its window"
         );
         assert!(
-            cursor_shake_offset(CURSOR_BOUNCE_SHAKE_SECS / 2).is_some(),
+            cursor_shake_offset(CURSOR_BOUNCE_SHAKE_SECS / 2, 8.0).is_some(),
             "the shake must still be running inside its window"
+        );
+        // A quarter of a cycle in is the first crest, and it must be thrown as
+        // far as the amplitude asks: a shake that ignores its amplitude is a
+        // twitch, which is what this whole rule exists to avoid.
+        let crest = cursor_shake_offset(Duration::from_millis(56), 8.0).expect("crest");
+        assert!(
+            crest > 7.0,
+            "the crest must reach the amplitude it was given: {crest}"
         );
     }
 

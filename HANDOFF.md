@@ -9,22 +9,23 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the sample-cursor bounce commit — 2026-10-08 (bounce shipped; the
-sandbox-integrity trap below is the session's other find).
+As of the continuous-shake fix — 2026-10-08 (the shake revision and the
+per-timeout restart shipped, and were confirmed in a live session).
 
 ## State
 
-- **The tip ships the sample-cursor bounce.** When a live timeout reaches the
-  point the cursor is drawn from, it leaves the line for the top of the graph,
-  hangs half out of the overlay's edge, shakes for ~0.6 s, and eases back when
-  a value arrives. No new config key; the reserves, layout and draw order are
-  untouched. `cargo test --all-features` is green (202 in the core lib, six of
-  them new) and clippy is clean with `-D warnings`. The bounce itself has not
-  been watched in a live session yet — the frames were rendered straight from
-  the renderer to PNGs (see the capture trap below) and the geometry is pinned
-  by the tests, so it is worth an eye when a host times out on screen. Read
-  `git log -1` for the tip and `git rev-list --count HEAD` for the commit
-  count the version derives from — do not trust a number written here.
+- **The tip ships the bounce's revised shake and its continuous shake.**
+  `ce1ab95` shipped the bounce; this commit changes the shake from
+  12 Hz / 2 px / 0.6 s to 4.5 Hz / 0.6 × the cursor's half-height / 0.9 s, and
+  makes the shake's clock the *newest* failure (`timeout_run_latest`) instead
+  of the run's first, so a run that keeps failing restarts the shake with every
+  timeout instead of shaking once and parking. No new config key; the reserves,
+  layout and draw order are untouched. `cargo test --all-features` is green
+  (203 in the core lib; `a_second_timeout_in_a_row_restarts_the_shake` is the
+  regression test) and clippy is clean with `-D warnings`. Confirmed working in
+  a live session. Read `git log -1` for the tip and `git rev-list --count HEAD`
+  for the commit count the version derives from — do not trust a number written
+  here.
 - The commit before it (`b40f042`) was the feature-map refresh:
   `docs/features/runtime.md` was split into `runtime.md` / `pipe.md` /
   `supervision.md` / `live-edits.md`, and nine oversized sections across eight

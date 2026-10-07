@@ -163,9 +163,11 @@
     timeout reaches the point it is drawn from — the break arriving on the same
     three-second hold the line itself is drawn with — the cursor leaves the line
     and is flung to the top of the latency axis, where it hangs half out of the
-    overlay's edge and shakes for about half a second before settling there; it
-    eases back onto the line when a value arrives. A host that has stopped being
-    probed is not a live timeout, and the cursor stays on the last value the line
+    overlay's edge and shakes for about a second before settling there, with
+    each further timeout in the run restarting the shake so a host that keeps
+    failing keeps shaking; it eases back onto the line when a value arrives. A
+    host that has stopped being probed is not a live timeout, and the cursor
+    stays on the last value the line
     drew. It rotates and mirrors with the graph, so "the top" is the high-latency
     end of its own axis. Size is configurable
     (`sampleCursorSizePx`, 4–20 px, default 10). With the timeout blink on
