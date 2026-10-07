@@ -6,8 +6,8 @@ use tiny_skia::{FillRule, IntSize, LineJoin, Paint, PathBuilder, Pixmap, Rect, S
 
 use crate::border::{self, BorderVisual};
 use crate::config::{
-    OverlayConfig, MAX_LINE_STROKE_PX, MAX_SAMPLE_CURSOR_SIZE_PX, MIN_LINE_STROKE_PX,
-    MIN_SAMPLE_CURSOR_SIZE_PX,
+    OverlayConfig, TimeoutIndicator, MAX_LINE_STROKE_PX, MAX_SAMPLE_CURSOR_SIZE_PX,
+    MIN_LINE_STROKE_PX, MIN_SAMPLE_CURSOR_SIZE_PX,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -269,6 +269,9 @@ const CURSOR_EASE_EPSILON: f32 = 0.25;
 const CURSOR_TIMEOUT_BLINK_PERIOD: Duration = Duration::from_secs(2);
 /// The dimmest the blink's fill gets, as a fraction of its colour.
 const CURSOR_TIMEOUT_BLINK_FLOOR: f32 = 0.35;
+/// The height of the Stub timeout indicator, in pixels: a short line resting
+/// on the canvas bottom instead of the full-height Stick.
+const TIMEOUT_STUB_HEIGHT: f32 = 2.0;
 
 fn sample_cursor_size(config: &OverlayConfig) -> u32 {
     config
@@ -526,10 +529,11 @@ fn render_graph_into_internal(
         }
     };
 
-    // Casts first, then the markers, then the cores. A marker spans the whole
-    // canvas, through the cast's reserved band, so it is drawn over the casts —
-    // a glow laid over it would tint it into the glow. The cores come last,
-    // which keeps the old rule that a line sits on top of a marker it crosses.
+    // Casts first, then the markers, then the cores. A Stick marker spans the
+    // whole canvas, through the cast's reserved band, so it is drawn over the
+    // casts — a glow laid over it would tint it into the glow. The cores come
+    // last, which keeps the old rule that a line sits on top of a marker it
+    // crosses.
     if glow.is_some() {
         draw_lines(&mut pixmap, LinePass::Glow, &mut *series);
     }
@@ -560,8 +564,16 @@ fn render_graph_into_internal(
                 continue;
             }
             if sample.value.is_none() {
+                let end_y = short_px - pad;
+                let start_y = match config.timeout_indicator {
+                    TimeoutIndicator::Stick => top,
+                    TimeoutIndicator::Stub => end_y - TIMEOUT_STUB_HEIGHT,
+                    // Gap keeps no mark: the line's break across the timeout
+                    // is the mark.
+                    TimeoutIndicator::Gap => continue,
+                };
                 let start = transform_point(
-                    (x, top),
+                    (x, start_y),
                     long_px,
                     short_px,
                     config.orientation,
@@ -570,7 +582,7 @@ fn render_graph_into_internal(
                 // The far end is the canvas edge, not the zero line: the band
                 // the cast reserves below y0 is part of the marker's height.
                 let end = transform_point(
-                    (x, short_px - pad),
+                    (x, end_y),
                     long_px,
                     short_px,
                     config.orientation,
@@ -2174,15 +2186,41 @@ mod tests {
         config.window_seconds = 60;
         config.first_target_mut().line_color = "#00ff00".to_string();
         config.prefill_line_color = "#ff00ff".to_string();
-        let mut samples = cosmetic_prefill_samples(&config, "t", now - Duration::from_secs(2));
+        // Explicit samples rather than the cosmetic generator: that generator
+        // is seeded from the overlay id, which `new()` randomises, and smooth
+        // rendering holds the newest three seconds back, so a generated
+        // history can leave the real stretch outside the drawn window and
+        // turn this test into a coin toss.
+        let mut samples = vec![
+            SamplePoint {
+                value: Some(200),
+                timestamp: now - Duration::from_secs(20),
+                is_prefill: true,
+            },
+            SamplePoint {
+                value: Some(210),
+                timestamp: now - Duration::from_secs(19),
+                is_prefill: true,
+            },
+            SamplePoint {
+                value: Some(220),
+                timestamp: now - Duration::from_secs(18),
+                is_prefill: true,
+            },
+            SamplePoint {
+                value: Some(230),
+                timestamp: now - Duration::from_secs(17),
+                is_prefill: true,
+            },
+        ];
         samples.push(SamplePoint {
             value: Some(500),
-            timestamp: now - Duration::from_secs(1),
+            timestamp: now - Duration::from_secs(12),
             is_prefill: false,
         });
         samples.push(SamplePoint {
             value: Some(450),
-            timestamp: now,
+            timestamp: now - Duration::from_secs(11),
             is_prefill: false,
         });
         let mut pixels = Vec::new();
@@ -2341,6 +2379,71 @@ mod tests {
         assert!(
             deepest >= height - 3,
             "the marker stopped at row {deepest}; the canvas is {height} tall"
+        );
+    }
+
+    /// The Stub keeps the timeout colour but rests on the canvas bottom: every
+    /// timeout pixel sits in the two-pixel band above the bottom edge, and the
+    /// band is really painted.
+    #[test]
+    fn the_timeout_stub_marks_only_the_canvas_bottom() {
+        let mut config = OverlayConfig::new();
+        config.timeout_indicator = TimeoutIndicator::Stub;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
+        let width = 300;
+        let height = 100;
+        let pixels = render_graph(
+            width as u32,
+            height as u32,
+            &config,
+            &samples(&[None]),
+            Instant::now(),
+            false,
+        )
+        .expect("pixmap");
+        let rows: Vec<usize> = positions_of_color(&pixels, width, [255, 0, 0])
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect();
+        assert!(!rows.is_empty(), "the stub was not drawn");
+        let bottom = height as f32 - stroke_pad(config.line_stroke_px);
+        let shallowest = *rows.iter().min().unwrap() as f32;
+        let deepest = *rows.iter().max().unwrap() as f32;
+        assert!(
+            deepest >= bottom - 1.0,
+            "the stub misses the bottom edge: deepest row {deepest}, bottom {bottom}"
+        );
+        assert!(
+            shallowest >= bottom - TIMEOUT_STUB_HEIGHT - 2.0,
+            "the stub runs above its band: row {shallowest}, bottom {bottom}"
+        );
+    }
+
+    /// Gap draws no marker at all: nothing wears the timeout colour, while the
+    /// line itself is still there.
+    #[test]
+    fn the_timeout_gap_draws_no_marker() {
+        let mut config = OverlayConfig::new();
+        config.timeout_indicator = TimeoutIndicator::Gap;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
+        let pixels = render_graph(
+            300,
+            100,
+            &config,
+            &samples(&[Some(100), None, Some(120)]),
+            Instant::now(),
+            false,
+        )
+        .expect("pixmap");
+        assert!(
+            positions_of_color(&pixels, 300, [255, 0, 0]).is_empty(),
+            "Gap mode painted a timeout marker"
+        );
+        assert!(
+            !positions_of_color(&pixels, 300, [0, 255, 0]).is_empty(),
+            "the line itself went missing"
         );
     }
 

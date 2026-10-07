@@ -77,6 +77,7 @@ Everything is sampled once a second.
 | **Smooth FPS** | How often the smoothed graph redraws. |
 | **Line color** | The latency trace. |
 | **Timeout color** | The trace for samples that timed out. |
+| **Timeout indicator** | How a timeout is marked: a full-height **Stick** (the default), a two-pixel **Stub** at the bottom edge, or a **Gap** that draws nothing. |
 | **Background color** / **Background opacity** | The panel behind the graph. Fully transparent gives you a bare line on a bare screen. |
 | **Position** | A small picker showing the screen. Click where you want the overlay. See below. |
 | **Horizontal / Vertical margin** | Nudges the overlay away from its anchor. |

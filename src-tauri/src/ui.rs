@@ -16,7 +16,7 @@ use eframe::{App, CreationContext, NativeOptions};
 // whole point — nothing in this binary can draw a graph.
 use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, DisplayMode, OverlayConfig, ProbeConfig, StickyTarget,
-    StickyZOrder, TargetConfig,
+    StickyZOrder, TargetConfig, TimeoutIndicator,
 };
 use ping_latency_overlay_core::monitors::{self, MonitorInfo};
 use ping_latency_overlay_core::probes::{enabled_target_keys, TaskKey};
@@ -6112,6 +6112,33 @@ fn edit_overlay(
                 });
                 ui.end_row();
 
+                ui.label("Timeout indicator").on_hover_text(
+                    "How a timeout is marked: a full-height Stick, a two-pixel Stub resting \
+                     on the bottom edge, or a Gap that draws nothing and lets the break in \
+                     the line be the mark.",
+                );
+                let mut timeout_indicator = overlay.timeout_indicator;
+                ComboBox::from_id_salt("timeout-indicator")
+                    .selected_text(timeout_indicator_label(timeout_indicator))
+                    .show_ui(ui, |ui| {
+                        for value in [
+                            TimeoutIndicator::Stick,
+                            TimeoutIndicator::Stub,
+                            TimeoutIndicator::Gap,
+                        ] {
+                            ui.selectable_value(
+                                &mut timeout_indicator,
+                                value,
+                                timeout_indicator_label(value),
+                            );
+                        }
+                    });
+                if timeout_indicator != overlay.timeout_indicator {
+                    overlay.timeout_indicator = timeout_indicator;
+                    *changed = true;
+                }
+                ui.end_row();
+
                 ui.label("Smooth rendering");
                 if ui
                     .checkbox(&mut overlay.smooth_rendering, "Enabled")
@@ -6469,6 +6496,14 @@ fn border_effect_label(effect: BorderEffect) -> &'static str {
         BorderEffect::RgbLoop => "RGB loop",
         BorderEffect::RgbNoise => "RGB noise",
         BorderEffect::Disabled => "Disabled",
+    }
+}
+
+fn timeout_indicator_label(indicator: TimeoutIndicator) -> &'static str {
+    match indicator {
+        TimeoutIndicator::Stick => "Stick",
+        TimeoutIndicator::Stub => "Stub",
+        TimeoutIndicator::Gap => "Gap",
     }
 }
 

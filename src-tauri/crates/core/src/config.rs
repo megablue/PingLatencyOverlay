@@ -263,6 +263,14 @@ pub struct OverlayConfig {
     /// Colour the sample cursor pulses in while a timeout lasts.
     #[serde(default = "default_cursor_timeout_blink_color")]
     pub cursor_timeout_blink_color: String,
+    /// How a timeout is marked on the graph.
+    ///
+    /// `Stick` is the full-height line, `Stub` a two-pixel line resting on the
+    /// canvas bottom, and `Gap` no mark at all — the break in the line is it.
+    /// Stick is what every profile written before the setting drew, so an
+    /// absent key keeps the graph still.
+    #[serde(default)]
+    pub timeout_indicator: TimeoutIndicator,
     /// The display this overlay belongs to, as a Win32 device name
     /// (`\\.\DISPLAY2`), or `None` to follow the primary monitor.
     ///
@@ -317,6 +325,19 @@ pub enum DisplayMode {
     /// Parked directly above the shell's desktop window: above the wallpaper
     /// and below the desktop icons, covered by ordinary windows.
     Wallpaper,
+}
+
+/// How a timeout is marked on the graph.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimeoutIndicator {
+    /// The full-height vertical line in the host's timeout colour.
+    #[default]
+    Stick,
+    /// A two-pixel line resting on the bottom edge of the canvas.
+    Stub,
+    /// Nothing: the line's break across the timeout is the mark.
+    Gap,
 }
 
 /// The window a Sticky Mode overlay follows.
@@ -575,6 +596,7 @@ impl OverlayConfig {
             sample_cursor_size_px: default_sample_cursor_size_px(),
             cursor_timeout_blink: false,
             cursor_timeout_blink_color: default_cursor_timeout_blink_color(),
+            timeout_indicator: TimeoutIndicator::Stick,
             monitor_device: None,
             display_mode: DisplayMode::Global,
             sticky_target: None,
@@ -2239,6 +2261,7 @@ mod tests {
             overlay.cursor_timeout_blink_color,
             DEFAULT_CURSOR_TIMEOUT_BLINK_COLOR
         );
+        assert_eq!(overlay.timeout_indicator, TimeoutIndicator::Stick);
     }
 
     /// The underglow is off for every profile written before it existed, and
@@ -2296,6 +2319,26 @@ mod tests {
         let json = serde_json::to_string(&opted_in).expect("serialize");
         assert!(json.contains("cursorTimeoutBlink"));
         assert!(json.contains("#ff00ff"));
+    }
+
+    /// The timeout indicator is Stick for every profile written before it
+    /// existed, so an absent key keeps the graph still, and it round-trips
+    /// under its camelCase key.
+    #[test]
+    fn timeout_indicator_defaults_to_stick_and_round_trips() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert_eq!(overlay.timeout_indicator, TimeoutIndicator::Stick);
+
+        let stubbed: OverlayConfig = serde_json::from_str(
+            r#"{"id":"stub","probe":{"protocol":"icmp","host":"1.1.1.1"},"timeoutIndicator":"stub"}"#,
+        )
+        .expect("explicit stub");
+        assert_eq!(stubbed.timeout_indicator, TimeoutIndicator::Stub);
+
+        let json = serde_json::to_string(&stubbed).expect("serialize");
+        assert!(json.contains("\"timeoutIndicator\":\"stub\""));
     }
 
     /// The sample cursor is on for every profile, including one written before

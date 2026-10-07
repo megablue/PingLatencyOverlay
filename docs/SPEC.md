@@ -68,9 +68,11 @@
 - Plot start: the first point is the first responding latency, not y0.
 - Timeouts (a ping exceeding the overlay's timeout counts as no response):
   - The line is not interpolated across a timeout.
-  - At each timeout, draw a vertical line spanning the full height of the
-    overlay box, through the underglow's reserved band, in the timeout color
-    (default red). It is drawn over the glows and under the lines.
+  - Each timeout is marked in the timeout color (default red), drawn over the
+    glows and under the lines. **Timeout indicator** chooses the mark: a
+    **Stick** spanning the full height of the overlay box (the default), a
+    **Stub** — a two-pixel mark at the bottom edge — or a **Gap** that draws
+    nothing, so the break in the line is the mark.
   - On resumption, the next segment starts at the next responding sample's X,
     using the last responding Y, then continues with actual samples.
 - A stretch with no samples at all is not drawn across either: a target whose
@@ -257,13 +259,16 @@
   thing copying cannot usefully do is copy the colour. The set is a cycle, so a
   group larger than it has two hosts sharing a colour — never two neighbours,
   because each step is relative to the host added before it.
-- **A timeout is a full-height vertical line in that host's own timeout colour.**
-  It spans the whole overlay box, through the underglow's reserved band when a
-  glow is on. Two hosts dropping in the same second draw their markers over each other and
-  only the later one is visible, which is the same thing that happens to two
-  lines crossing. Markers are not drawn for a host that has never answered,
-  because a line along the bottom would read as "extremely fast" rather than
-  "has said nothing".
+- **A timeout is marked on the graph in that host's own timeout colour**, and
+  the overlay's **Timeout indicator** says how: the full-height **Stick** (the
+  default) spans the whole overlay box, through the underglow's reserved band
+  when a glow is on; the **Stub** is a two-pixel mark resting on the bottom
+  edge; the **Gap** draws nothing at all. Two hosts dropping in the same
+  second draw their markers over each other and only the later one is
+  visible, which is the same thing that happens to two lines crossing.
+  Markers are not drawn for a host that has never answered, because a line
+  along the bottom would read as "extremely fast" rather than "has said
+  nothing".
 - **A host's history is its own.** A host added to an existing group has none of
   the history the others have, and its line is placed by its own samples, not
   shifted by how much history it is missing.
