@@ -9,41 +9,24 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of `7f391b2` — 2026-10-07 (timeout indicator in the working tree,
-awaiting the visual check).
+As of `808b72b` — 2026-10-07 (timeout indicator shipped; session closed).
 
 ## State
 
-- The tip is pushed (`7f391b2`: the UI label/unit pass, bundled as 0.2.59)
-  and the tree holds one uncommitted change: the per-overlay timeout
-  indicator (Stick / Stub / Gap), plus a fix to the flaky
-  `prefill_history_and_real_samples_render_together`. Awaiting the user's
-  visual check before commit. Read `git log -1` for the tip and
+- The tip (`808b72b`, "Let each overlay mark its timeouts with a Stick,
+  Stub or Gap") shipped the per-overlay timeout indicator and the flaky
+  prefill-test fix; it is pushed and bundled as 0.2.60. This handoff refresh
+  is the only change on top. Read `git log -1` for the tip and
   `git rev-list --count HEAD` for the commit count the version derives
   from — do not trust a number written here.
 - Tests: 301 across the workspace. Last bundle:
-  `PingLatencyOverlay_0.2.59_x64-setup.exe` (commit `7f391b2`); the next
+  `PingLatencyOverlay_0.2.60_x64-setup.exe` (commit `808b72b`); the next
   release build takes its version from the commit count.
 - The features-map migration is complete: 13 pages under `docs/features/` with
   the README index, and `AGENTS.md` is process plus hard rules only.
 
 ## Open threads
 
-- **Timeout indicator, uncommitted.** Per overlay (`timeoutIndicator`:
-  `stick` the default / `stub` / `gap`), chosen on the Graph pane. `stick` is
-  the old full-height bar; `stub` is a two-pixel mark resting on the canvas
-  bottom (`TIMEOUT_STUB_HEIGHT`); `gap` draws nothing and lets the break in
-  the line be the mark. Release build pending for the visual check; captures
-  with a refused TCP target are in
-  `%LOCALAPPDATA%\Temp\opencode\plo-capture-timeout-stub\` and
-  `...\plo-capture-timeout-gap\`. Commit after the user confirms, then
-  bundle (0.2.60).
-- **Flaky prefill test fixed in the same change.**
-  `prefill_history_and_real_samples_render_together` asserted a green count
-  over pixels that were really the cursor rim's antialiasing; the real line
-  was never drawn because its samples sat inside smooth rendering's
-  three-second reveal hold. Explicit older samples now pin it; 60/60
-  repeats pass.
 - **UI label/unit pass, shipped in `7f391b2`.** Known wart left open: a
   DragValue suffix is static, so a value of 1 reads "1 seconds" (most visible
   on Border fade out); pluralising the second fields is an easy follow-up.
