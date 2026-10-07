@@ -15,7 +15,7 @@ use crate::monitors::{MonitorInfo, Rect};
 use crate::probes::SampleStore;
 use crate::render::{
     cosmetic_prefill_samples, line_glow_reserve_px, render_series_into_with_border,
-    sample_cursor_reserve_px, sample_cursor_room_px, sample_gap_threshold, timeout_blink_anchor,
+    sample_cursor_reserve_px, sample_cursor_room_px, sample_gap_threshold, timeout_run_anchor,
     CursorAnimation, SamplePoint, Series,
 };
 use crate::rules::CompiledMatcher;
@@ -1066,7 +1066,7 @@ impl OverlayManager {
             let blink_due = window.config.sample_cursor
                 && window.config.cursor_timeout_blink
                 && window.series.iter().any(|series| {
-                    timeout_blink_anchor(&series.samples, series.max_sample_gap, now).is_some()
+                    timeout_run_anchor(&series.samples, series.max_sample_gap, now).is_some()
                 })
                 && window.last_rendered.elapsed() >= border_frame_interval();
             if changed
@@ -1281,7 +1281,7 @@ impl OverlayManager {
             })
             .any(|window| {
                 window.series.iter().any(|series| {
-                    timeout_blink_anchor(&series.samples, series.max_sample_gap, now).is_some()
+                    timeout_run_anchor(&series.samples, series.max_sample_gap, now).is_some()
                 })
             })
             .then(border_frame_interval)

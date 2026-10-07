@@ -6277,8 +6277,9 @@ fn edit_overlay(
 
                 ui.label("Sample cursor").on_hover_text(
                     "Mark each line's newest drawn sample with a triangle.\n\
-                     The cursor sits at the last value the line drew and \
-                     rotates with the graph.",
+                     The cursor rides the line and rotates with the graph; when \
+                     a timeout reaches it, it is flung off the top of the graph \
+                     and shakes there until a value arrives.",
                 );
                 if ui.checkbox(&mut overlay.sample_cursor, "Enabled").changed() {
                     *changed = true;

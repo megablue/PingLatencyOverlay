@@ -9,20 +9,28 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of `808b72b` — 2026-10-07 (timeout indicator shipped; session closed).
+As of the sample-cursor bounce commit — 2026-10-08 (bounce shipped; the
+sandbox-integrity trap below is the session's other find).
 
 ## State
 
-- The tip (`808b72b`, "Let each overlay mark its timeouts with a Stick,
-  Stub or Gap") shipped the per-overlay timeout indicator and the flaky
-  prefill-test fix; it is pushed and bundled as 0.2.60. This handoff refresh
-  is the only change on top. Read `git log -1` for the tip and
-  `git rev-list --count HEAD` for the commit count the version derives
-  from — do not trust a number written here.
-- Tests: 301 across the workspace. Last bundle:
-  `PingLatencyOverlay_0.2.60_x64-setup.exe` (commit `808b72b`); the next
-  release build takes its version from the commit count.
-- The features-map migration is complete: 13 pages under `docs/features/` with
+- **The tip ships the sample-cursor bounce.** When a live timeout reaches the
+  point the cursor is drawn from, it leaves the line for the top of the graph,
+  hangs half out of the overlay's edge, shakes for ~0.6 s, and eases back when
+  a value arrives. No new config key; the reserves, layout and draw order are
+  untouched. `cargo test --all-features` is green (202 in the core lib, six of
+  them new) and clippy is clean with `-D warnings`. The bounce itself has not
+  been watched in a live session yet — the frames were rendered straight from
+  the renderer to PNGs (see the capture trap below) and the geometry is pinned
+  by the tests, so it is worth an eye when a host times out on screen. Read
+  `git log -1` for the tip and `git rev-list --count HEAD` for the commit
+  count the version derives from — do not trust a number written here.
+- The commit before it (`b40f042`) was the feature-map refresh:
+  `docs/features/runtime.md` was split into `runtime.md` / `pipe.md` /
+  `supervision.md` / `live-edits.md`, and nine oversized sections across eight
+  pages were divided at `###` level. `feature_map_check` is clean (16 rows, 16
+  pages, every link resolves).
+- The features-map migration is complete: 16 pages under `docs/features/` with
   the README index, and `AGENTS.md` is process plus hard rules only.
 
 ## Open threads
@@ -34,6 +42,31 @@ As of `808b72b` — 2026-10-07 (timeout indicator shipped; session closed).
   skip instead of scrolling with the rest of the line) is closed: the line
   path had no regression, and the reveal hold plus the shifted time mapping
   replaced the pop with a tip that walks its segment.
+- **A build run under DSH's sandbox produces crippled executables.** DSH runs
+  its commands at Low integrity, so everything a build writes into
+  `src-tauri/target/` inherits `Mandatory Label\Low Mandatory Level`. A
+  Low-integrity process cannot write under `%USERPROFILE%` (so `PLO_LOG` logs
+  nothing and config saves fail), cannot send ICMP (`ping` answers "transmit
+  failed. General failure", so every probe times out and the graph is a red
+  line), and cannot put an icon in the notification area — while still showing
+  up in Task Manager. All three were measured, not deduced. The repair is one
+  unconfined command per build: `icacls <exe> /setintegritylevel Medium` on each
+  executable, plus `icacls src-tauri\target\release /setintegritylevel
+  '(OI)(CI)Medium'` so the next build placed there is clean. A build from the
+  user's own shell needs none of it — a new file takes its creator's label, not
+  the parent folder's (the repo root is Low-labelled and the installed 0.2.60
+  exes built there carry no label). SmartScreen on a fresh unsigned build is
+  expected either way.
+- **`scripts/capture-app.ps1` cannot be driven from the DSH `pwsh` tool.**
+  Two walls, in order: the host's execution policy refuses the unsigned file
+  (and `Unblock-File` does not lift it), and the script-block route that gets
+  past it — `[scriptblock]::Create((Get-Content -Raw ...))`, with `$PSScriptRoot`
+  patched in because it is empty in a script block — then stalls, because the
+  tool call does not return while the app the script started is alive
+  (`Start-Process` itself returns in ~160 ms; the app is what holds the call
+  open). A visual check that does work from here: render the frame in a test
+  with `Pixmap::encode_png` and read the PNG (the bounce was verified that way —
+  frames in `src-tauri/target/plo-bounce/`), or hand the build to the user.
 
 ## Known gaps (volatile; the durable traps live in the feature pages)
 

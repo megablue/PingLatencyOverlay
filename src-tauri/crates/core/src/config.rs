@@ -239,12 +239,16 @@ pub struct OverlayConfig {
     pub line_glow_radius_px: u32,
     /// Draw a triangle on each line's newest drawn sample.
     ///
-    /// The cursor keeps pointing at the last value the line drew: a timeout
-    /// writes no point, so the cursor stays where the line stopped, and the
-    /// startup prefill's head counts as drawn. The window reserves a band on
-    /// the leading edge for it — `sample_cursor_reserve_px` is the one
-    /// statement of how much — plus a little room at both ends of the axis so
-    /// the triangle is never sliced. On by default, absent key included.
+    /// The cursor rides the drawn line and eases to a new value instead of
+    /// jumping. When a live timeout run reaches it, it is flung to the top of
+    /// the graph, half out of the window, and shakes there until a value
+    /// arrives; a host that has stopped probing is not a live timeout, and the
+    /// cursor holds the last value the line drew instead. The startup prefill's
+    /// head counts as drawn. The window reserves a band on the leading edge for
+    /// it — `sample_cursor_reserve_px` is the one statement of how much — plus
+    /// a little room at both ends of the axis, so the triangle is never sliced
+    /// by a value on the zero line or clamped at the ceiling. On by default,
+    /// absent key included.
     #[serde(default = "default_sample_cursor")]
     pub sample_cursor: bool,
     /// Length of the sample cursor's triangle, in physical pixels.
