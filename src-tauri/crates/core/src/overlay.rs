@@ -1849,6 +1849,9 @@ fn layout_for(config: &OverlayConfig, monitor: &MonitorInfo) -> ((i32, i32), (i3
 /// rectangle is actually on.
 #[cfg(windows)]
 fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, i32), (i32, i32)) {
+    // History compression draws inside this width rather than adding to it: the
+    // bands divide the axis the window and the scale name, so the canvas is the
+    // same size with the feature on as with it off.
     let long_logical =
         (config.window_seconds.max(1) as f64 * config.scale.max(1) as f64).clamp(1.0, 8192.0);
     let short_logical = (config.graph_height_px.max(10) as f64).clamp(1.0, 8192.0);
@@ -2144,6 +2147,41 @@ mod tests {
         // The reserve is a physical size and is not scaled with the display.
         let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
         assert_eq!(scaled, (125, 240));
+    }
+
+    /// History compression draws inside the configured canvas rather than
+    /// widening it: the box is the same size with the feature on as with it off,
+    /// at every share, and the short side is untouched.
+    #[test]
+    fn the_canvas_keeps_the_configured_size() {
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let mut overlay = OverlayConfig::new();
+        overlay.line_glow = false;
+        overlay.sample_cursor = false;
+        let (plain, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(plain, (120, 60), "off is the configured size");
+
+        // On, at the default share, at a quarter share and at an extreme one:
+        // the bands divide the axis, so the box never moves.
+        overlay.history_compression = true;
+        for share in [50u32, 25, 1] {
+            overlay.history_compression_no_zone_share = share;
+            let (sized, _) = layout_in_rect(&overlay, work, 1.0);
+            assert_eq!(
+                sized, plain,
+                "a {share}% share moved the canvas to {sized:?}"
+            );
+        }
+
+        // Rotated it is the same box the other way round.
+        overlay.orientation = 90;
+        let (rotated, _) = layout_in_rect(&overlay, work, 1.0);
+        assert_eq!(rotated, (60, 120));
     }
 
     /// Below the zero line the cast's reserve and the cursor's room are the

@@ -26,6 +26,7 @@ refactors with no behavior, mechanism, config or test change need no edit.
 | Probes | [probes.md](probes.md) | `probe.rs` / `probes.rs`: ICMP and TCP, the address cache, cadence |
 | Overlays — rendering | [rendering.md](overlays/rendering.md) | `overlay.rs` / `render.rs`: layered windows, draw order, reserves |
 | Overlays — smooth rendering | [smooth-rendering.md](overlays/smooth-rendering.md) | the reveal hold and the smooth x mapping |
+| Overlays — history compression | [history-compression.md](overlays/history-compression.md) | squashing older history into the same axis: zones, ratio, gate |
 | Overlays — glow | [glow.md](overlays/glow.md) | the underglow: sweep, reserve, per-overlay settings |
 | Overlays — sample cursor | [sample-cursor.md](overlays/sample-cursor.md) | cursor geometry, easing, its reserves |
 | Overlays — display modes | [display-modes.md](overlays/display-modes.md) | global / sticky / wallpaper, monitor pinning, follow |

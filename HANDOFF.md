@@ -9,11 +9,56 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the continuous-shake fix — 2026-10-08 (the shake revision and the
-per-timeout restart shipped, and were confirmed in a live session).
+As of the bands revision of history compression — 2026-10-08 (the background
+grid and history compression are both built; the ramp-and-growth design was
+rejected and replaced by discrete bands inside the canvas the config names, gated
+and photographed, handed over as a restarted release build to look at before
+anything is committed).
 
 ## State
 
+- **History compression draws discrete bands inside the canvas the config names,
+  and it is waiting on a look.** The user rejected the grown axis: the box is
+  `windowSeconds × scale` logical px with the feature on or off, and the
+  compressed history is drawn *inside* it. `crates/core/src/compression.rs` is
+  the one statement of the geometry. The newest band — the larger of
+  `noZoneShare` and `noZoneMinPx` — is drawn at the raw density, `scale` px/s,
+  so one pixel per sample at 1×; then a ladder of equally wide bands whose ratios
+  step evenly from 2× to `historyCompressionRatio`; then the reserve at that
+  ratio. The ladder holds `min(ratio − 1, floor(middle_px / 10))` bands, so the
+  count follows the canvas width and never steps finer than 1×; with no room for
+  one the reserve takes the middle and there is a single step, raw to the
+  maximum. Density is constant inside a band and steps at every join, and the
+  background grid follows it — 30 px cells in the newest band, `30 / ratio_k` in
+  band k. `render.rs` maps x through `x_of`, crops to the span, spreads the
+  cosmetic prefill over it and bounds marker overdraw in the deep bands; the
+  editor's section prints `Shows about` from the same geometry and a new `Zones`
+  row replaces the old `Axis width`. The user's own profile (120 s × scale 2,
+  ratio 12, share 0 with the 30 px floors) resolves to 12 bands over about 825 s
+  — under 14 minutes — on its 240 logical px canvas. **Nothing is committed
+  yet.** Gate green: fmt, clippy `-D warnings`, `cargo test --all-features`
+  (232 in the core lib, 95 in the shell, 6 + 2 + 3 + 1 elsewhere) and
+  `cargo build --release`. Frames for the eye at `src-tauri/target/plo-grid/`:
+  `plain-480.png` (grid on, no compression), `ratio12-480.png`,
+  `ratio64-480.png` (43 bands, about 66 min), `nogrid-480.png` and
+  `profile-300.png` (the user's profile at 125% DPI). A scratch test rendered
+  them and was removed afterwards; the older `ratio-16-*` and `plain-grid.png`
+  frames of the rejected growth design were deleted. Next: the user's look, then
+  the commit, then `npm run bundle` — the version counts commits, so the bundle
+  comes after. Read `docs/features/overlays/history-compression.md` before
+  touching any of it.
+- **A background grid is built on top of the compression work, and both are
+  waiting on a look.** Per overlay, off by default: `backgroundGrid` and
+  `backgroundGridColor` (default `#334155`), drawn as a checkbox and a colour
+  under **Colors** in the editor, straight after the background rows. Its cells
+  are 30 × 20 px wherever the X axis is uncompressed, and the *columns* are
+  placed through the same x mapping the lines are drawn through — so with
+  compression on the cells step down band by band and pack tight in the reserve,
+  and the grid is what shows the density at a glance. One path, one 1 px stroke
+  (`GRID_STROKE_PX`, not `lineStrokePx`), a column within 1 px of the previous
+  one skipped, drawn first in the graph's own frame so it rotates and mirrors
+  with the lines. Read `docs/features/overlays/rendering.md` for the drawing and
+  `history-compression.md` for what the steps mean.
 - **The tip ships the bounce's revised shake and its continuous shake.**
   `ce1ab95` shipped the bounce; this commit changes the shake from
   12 Hz / 2 px / 0.6 s to 4.5 Hz / 0.6 × the cursor's half-height / 0.9 s, and

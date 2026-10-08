@@ -1,4 +1,4 @@
-﻿//! Everything the renderer needs, and nothing it does not.
+//! Everything the renderer needs, and nothing it does not.
 //!
 //! This crate holds latency probing, the software graph renderer, the runtime
 //! border effect, and the native layered windows the graph is drawn into. It
@@ -20,6 +20,11 @@
 // that rides on top of it, and the one-shot ICMP/TCP measurement.
 pub mod border;
 pub mod render;
+
+// The x mapping that squashes older history into the same axis. Pure geometry,
+// and the one statement of it: the renderer draws through it and the editor
+// reads the same numbers back for its "shows about" line.
+pub mod compression;
 
 // Internal to this crate: the one-shot measurement a probe task calls.
 pub mod probe;

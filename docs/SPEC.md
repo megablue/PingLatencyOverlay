@@ -86,10 +86,26 @@
     The slider snaps from 1× through 10×; the numeric input also accepts larger
     values for wide graphs (default 2×).
   - The overlay window's long axis is sized `window(s) x scale` (e.g. 60 s at 2x
-    = 120 px).
-  - The graph fills the window's actual size, so the effective pixels-per-tick is
-    `viewport / windowSeconds`. The window is sized in logical pixels, so under
-    Windows DPI and text scaling that is not the same as `scale`.
+    = 120 px), whether history compression is on or off: the canvas is the
+    configured size and the compressed history is drawn inside it, not added to
+    it.
+  - The graph fills the window's actual size, so the effective pixels-per-tick in
+    the uncompressed part of the axis is the configured axis over the window —
+    `scale` px/s in logical pixels. The window is sized in logical pixels, so
+    under Windows DPI and text scaling that is not the same as `scale`.
+  - Optional **history compression** shows older history behind the sampling
+    window, so a graph can show far more than its time window. The canvas is cut
+    into bands: the newest is drawn at exactly the density the graph has with the
+    feature off, then a ladder of equally wide bands steps the density up to a
+    fixed ratio (4× to 64×, default 16×), and the oldest band holds that ratio.
+    Each band is sized by a share of the drawn axis and a minimum in logical
+    pixels, whichever is larger; the ladder holds as many bands as the width
+    affords at ten logical pixels each, and never more than one per whole ratio.
+    The graph is drawn uncompressed — at its configured size — whenever the
+    configured X axis is shorter than a minimum (default 120 px). It is off by
+    default, and off for profiles written before it existed. With the background
+    grid on, its cells step with the same mapping, so the bands are visible
+    without a legend.
   - Optional smooth rendering scrolls the timestamped graph between probe
     samples, drawn three sample intervals behind live, with the window shifted
     so the newest revealed instant sits at the leading edge: each incoming
@@ -140,6 +156,15 @@
   - Background color (`bgColor`, default `#0f172a`) and opacity (`bgOpacity`,
     0–100, default 0 = fully transparent), drawn behind the graph and not
     rotated with it.
+  - Optional **background grid** (`backgroundGrid`, off by default) with its
+    colour (`backgroundGridColor`, default `#334155`): a grid behind the graph
+    whose cells are 30 px wide and 20 px tall wherever the X axis is
+    uncompressed. The columns follow the X mapping, so history compression
+    narrows them through the ramp and squeezes them tightest in the reserve —
+    the grid is what shows at a glance how much history is packed where. The
+    rows are a plain 20 px ladder up from the zero line, the grid is drawn
+    under every line and marker, it rotates with the graph, and `lineStrokePx`
+    does not apply to it.
   - Line glow (on by default for a new overlay, off for a profile written
     before the setting existed): every line casts a soft glow in its own colour,
     so each host of a group glows in the colour of its line. The cast falls

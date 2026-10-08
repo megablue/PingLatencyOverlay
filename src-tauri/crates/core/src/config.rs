@@ -59,6 +59,9 @@ pub const MAX_MARGIN_OFFSET_PX: i32 = 10_000;
 pub const DEFAULT_BG_COLOR: &str = "#0f172a";
 /// Default overlay background opacity (0 = fully transparent).
 pub const DEFAULT_BG_OPACITY: u32 = 0;
+/// Default colour of the background grid: slate-700, visible on the default
+/// background without competing with the line drawn over it.
+pub const DEFAULT_BACKGROUND_GRID_COLOR: &str = "#334155";
 /// Default strength of the underglow cast below each line, in percent.
 pub const DEFAULT_LINE_GLOW_INTENSITY: u32 = 10;
 /// Smallest accepted underglow strength, in percent (0 = invisible).
@@ -86,6 +89,24 @@ pub const DEFAULT_CURSOR_TIMEOUT_BLINK_COLOR: &str = "#ef4444";
 pub const MIN_SAMPLE_CURSOR_SIZE_PX: u32 = 4;
 /// Largest accepted cursor size, in physical pixels.
 pub const MAX_SAMPLE_CURSOR_SIZE_PX: u32 = 20;
+/// Default density ratio the deepest band of the ladder holds.
+pub const DEFAULT_HISTORY_COMPRESSION_RATIO: u32 = 16;
+/// Smallest accepted history-compression ratio.
+pub const MIN_HISTORY_COMPRESSION_RATIO: u32 = 4;
+/// Largest accepted history-compression ratio.
+pub const MAX_HISTORY_COMPRESSION_RATIO: u32 = 64;
+/// Default share of the long axis kept uncompressed, in percent.
+pub const DEFAULT_HISTORY_NO_ZONE_SHARE: u32 = 50;
+/// Default share of the long axis held at the maximum ratio, in percent.
+pub const DEFAULT_HISTORY_MAX_ZONE_SHARE: u32 = 15;
+/// Default floor for the two config-sized bands, in logical pixels.
+pub const DEFAULT_HISTORY_ZONE_MIN_PX: u32 = 30;
+/// Largest accepted floor for the two config-sized bands, in logical pixels.
+pub const MAX_HISTORY_ZONE_MIN_PX: u32 = 500;
+/// Default shortest long axis on which compression takes effect, in logical pixels.
+pub const DEFAULT_HISTORY_COMPRESSION_MIN_AXIS_PX: u32 = 120;
+/// Largest accepted shortest long axis, in logical pixels.
+pub const MAX_HISTORY_COMPRESSION_MIN_AXIS_PX: u32 = 2_000;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +155,55 @@ pub struct OverlayConfig {
     /// Legacy millisecond setting accepted when loading older configurations.
     #[serde(rename = "smoothDelayMs", default, skip_serializing)]
     legacy_smooth_delay_ms: Option<u32>,
+    /// Show older history behind the window by packing it into bands.
+    ///
+    /// Off for a profile written before the setting existed, and off for a new
+    /// overlay as well: it changes how the whole graph reads, so it is opted
+    /// into rather than inherited. The canvas stays the size the window and the
+    /// scale name — its newest stretch keeps the density `scale` names and the
+    /// older history is drawn into the rest at the ratios the ladder resolves —
+    /// and `crate::compression` is the one statement of the geometry, read by
+    /// the renderer and the editor's own readout.
+    #[serde(default)]
+    pub history_compression: bool,
+    /// How much denser the deepest band is than the newest one, 4 to 64.
+    ///
+    /// A density rather than a length: at 16, one pixel of the reserve holds
+    /// sixteen times the time one pixel of the newest band holds. It is the top
+    /// of the ladder, so it also bounds how many bands there can be: never more
+    /// than one per whole ratio.
+    #[serde(default = "default_history_compression_ratio")]
+    pub history_compression_ratio: u32,
+    /// Share of the drawn axis drawn at the raw density, in percent.
+    ///
+    /// The canvas is `window_seconds × scale` either way: this decides how much
+    /// of it keeps the density `scale` names — one pixel per sample at 1× — and
+    /// what is left is where the compressed bands go.
+    #[serde(default = "default_history_no_zone_share")]
+    pub history_compression_no_zone_share: u32,
+    /// Floor on the newest band's share, in logical pixels.
+    ///
+    /// The larger of the share above and this sizes the band, so a canvas whose
+    /// share would draw it too thin to read keeps the floor of raw density.
+    #[serde(default = "default_history_zone_min_px")]
+    pub history_compression_no_zone_min_px: u32,
+    /// Share of the long axis held at the maximum ratio, in percent.
+    ///
+    /// The reserve takes the whole middle as well when the canvas has no room
+    /// for a ladder of its own.
+    #[serde(default = "default_history_max_zone_share")]
+    pub history_compression_max_zone_share: u32,
+    /// Smallest the maximum-ratio reserve may be, in logical pixels.
+    #[serde(default = "default_history_zone_min_px")]
+    pub history_compression_max_zone_min_px: u32,
+    /// Shortest long axis, in logical pixels, on which compression takes effect.
+    ///
+    /// A graph with too few pixels has no room for bands, so below this
+    /// the overlay is drawn exactly as it would be with the feature off. The
+    /// length is the logical one — `window_seconds × scale`, before DPI — so
+    /// the threshold means the same thing on every display.
+    #[serde(default = "default_history_compression_min_axis_px")]
+    pub history_compression_min_axis_px: u32,
     /// Show a cosmetic fake graph until the first real probe result arrives.
     #[serde(default = "default_true")]
     pub cosmetic_startup_prefill: bool,
@@ -204,6 +274,17 @@ pub struct OverlayConfig {
     /// Background opacity, 0 (transparent) to 100 (opaque).
     #[serde(default = "default_bg_opacity")]
     pub bg_opacity: u32,
+    /// Draw a grid behind the graph, in `background_grid_color`.
+    ///
+    /// Off for every profile written before it existed. The grid's columns
+    /// follow the x mapping, so with history compression on the cells step
+    /// where the graph is dense — the grid is what makes the compression
+    /// legible at a glance.
+    #[serde(default)]
+    pub background_grid: bool,
+    /// Colour of the background grid.
+    #[serde(default = "default_background_grid_color")]
+    pub background_grid_color: String,
     /// Width every line and timeout marker is stroked with, in pixels.
     ///
     /// One value for the whole overlay: the host lines, the startup prefill
@@ -574,6 +655,13 @@ impl OverlayConfig {
             smooth_rendering: true,
             smooth_fps: default_smooth_fps(),
             legacy_smooth_delay_ms: None,
+            history_compression: false,
+            history_compression_ratio: default_history_compression_ratio(),
+            history_compression_no_zone_share: default_history_no_zone_share(),
+            history_compression_no_zone_min_px: default_history_zone_min_px(),
+            history_compression_max_zone_share: default_history_max_zone_share(),
+            history_compression_max_zone_min_px: default_history_zone_min_px(),
+            history_compression_min_axis_px: default_history_compression_min_axis_px(),
             cosmetic_startup_prefill: true,
             prefill_line_color: default_prefill_line_color(),
             prefill_animation_sec: default_prefill_animation_sec(),
@@ -592,6 +680,8 @@ impl OverlayConfig {
             legacy_margin_px: None,
             bg_color: default_bg_color(),
             bg_opacity: default_bg_opacity(),
+            background_grid: false,
+            background_grid_color: default_background_grid_color(),
             line_stroke_px: default_line_stroke_px(),
             line_glow: true,
             line_glow_intensity: default_line_glow_intensity(),
@@ -683,6 +773,21 @@ fn default_scale() -> u32 {
 fn default_smooth_fps() -> u32 {
     DEFAULT_SMOOTH_FPS
 }
+fn default_history_compression_ratio() -> u32 {
+    DEFAULT_HISTORY_COMPRESSION_RATIO
+}
+fn default_history_no_zone_share() -> u32 {
+    DEFAULT_HISTORY_NO_ZONE_SHARE
+}
+fn default_history_max_zone_share() -> u32 {
+    DEFAULT_HISTORY_MAX_ZONE_SHARE
+}
+fn default_history_zone_min_px() -> u32 {
+    DEFAULT_HISTORY_ZONE_MIN_PX
+}
+fn default_history_compression_min_axis_px() -> u32 {
+    DEFAULT_HISTORY_COMPRESSION_MIN_AXIS_PX
+}
 fn default_prefill_line_color() -> String {
     DEFAULT_PREFILL_LINE_COLOR.to_string()
 }
@@ -724,6 +829,9 @@ fn default_bg_color() -> String {
 }
 fn default_bg_opacity() -> u32 {
     DEFAULT_BG_OPACITY
+}
+fn default_background_grid_color() -> String {
+    DEFAULT_BACKGROUND_GRID_COLOR.to_string()
 }
 fn default_line_stroke_px() -> f32 {
     DEFAULT_LINE_STROKE_PX
@@ -837,6 +945,24 @@ impl Config {
                 o.smooth_fps = smooth_fps_from_legacy_delay(delay_ms);
             }
             o.smooth_fps = o.smooth_fps.clamp(MIN_SMOOTH_FPS, MAX_SMOOTH_FPS);
+            // The band shares are clamped here and their sum is not: whether
+            // the bands fit, and how many there are, depends on the canvas,
+            // which this function does not know, so that rule lives in
+            // `crate::compression` alone.
+            o.history_compression_ratio = o
+                .history_compression_ratio
+                .clamp(MIN_HISTORY_COMPRESSION_RATIO, MAX_HISTORY_COMPRESSION_RATIO);
+            o.history_compression_no_zone_share = o.history_compression_no_zone_share.min(100);
+            o.history_compression_max_zone_share = o.history_compression_max_zone_share.min(100);
+            o.history_compression_no_zone_min_px = o
+                .history_compression_no_zone_min_px
+                .min(MAX_HISTORY_ZONE_MIN_PX);
+            o.history_compression_max_zone_min_px = o
+                .history_compression_max_zone_min_px
+                .min(MAX_HISTORY_ZONE_MIN_PX);
+            o.history_compression_min_axis_px = o
+                .history_compression_min_axis_px
+                .min(MAX_HISTORY_COMPRESSION_MIN_AXIS_PX);
             o.prefill_animation_sec = o
                 .prefill_animation_sec
                 .clamp(MIN_PREFILL_ANIMATION_SEC, MAX_PREFILL_ANIMATION_SEC);
@@ -2323,6 +2449,109 @@ mod tests {
         let json = serde_json::to_string(&opted_in).expect("serialize");
         assert!(json.contains("cursorTimeoutBlink"));
         assert!(json.contains("#ff00ff"));
+    }
+
+    /// History compression is off for every profile written before it existed,
+    /// and its seven keys round-trip under their camelCase names.
+    #[test]
+    fn history_compression_defaults_off_and_round_trips() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert!(!overlay.history_compression);
+        assert_eq!(
+            overlay.history_compression_ratio,
+            DEFAULT_HISTORY_COMPRESSION_RATIO
+        );
+        assert_eq!(
+            overlay.history_compression_no_zone_share,
+            DEFAULT_HISTORY_NO_ZONE_SHARE
+        );
+        assert_eq!(
+            overlay.history_compression_no_zone_min_px,
+            DEFAULT_HISTORY_ZONE_MIN_PX
+        );
+        assert_eq!(
+            overlay.history_compression_max_zone_share,
+            DEFAULT_HISTORY_MAX_ZONE_SHARE
+        );
+        assert_eq!(
+            overlay.history_compression_max_zone_min_px,
+            DEFAULT_HISTORY_ZONE_MIN_PX
+        );
+        assert_eq!(
+            overlay.history_compression_min_axis_px,
+            DEFAULT_HISTORY_COMPRESSION_MIN_AXIS_PX
+        );
+
+        let opted_in: OverlayConfig = serde_json::from_str(
+            r#"{"id":"compressed","probe":{"protocol":"icmp","host":"1.1.1.1"},"historyCompression":true,"historyCompressionRatio":32}"#,
+        )
+        .expect("explicit on");
+        assert!(opted_in.history_compression);
+        assert_eq!(opted_in.history_compression_ratio, 32);
+
+        let json = serde_json::to_string(&opted_in).expect("serialize");
+        assert!(json.contains("historyCompression"));
+        assert!(json.contains("historyCompressionRatio"));
+        assert!(json.contains("historyCompressionMinAxisPx"));
+    }
+
+    /// The background grid is off for every profile written before it existed,
+    /// and its two keys round-trip under their camelCase names.
+    #[test]
+    fn background_grid_defaults_off_and_round_trips() {
+        let overlay: OverlayConfig =
+            serde_json::from_str(r#"{"id":"legacy","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("legacy config");
+        assert!(!overlay.background_grid);
+        assert_eq!(overlay.background_grid_color, DEFAULT_BACKGROUND_GRID_COLOR);
+
+        let opted_in: OverlayConfig = serde_json::from_str(
+            r##"{"id":"grid","probe":{"protocol":"icmp","host":"1.1.1.1"},"backgroundGrid":true,"backgroundGridColor":"#ff00ff"}"##,
+        )
+        .expect("explicit on");
+        assert!(opted_in.background_grid);
+        assert_eq!(opted_in.background_grid_color, "#ff00ff");
+
+        let json = serde_json::to_string(&opted_in).expect("serialize");
+        assert!(json.contains("backgroundGrid"));
+        assert!(json.contains("backgroundGridColor"));
+    }
+
+    /// A hand-edited file cannot put the geometry out of range. The zone shares
+    /// are clamped one at a time and never against each other: whether three
+    /// zones fit depends on the axis, which only `crate::compression` knows.
+    #[test]
+    fn normalize_clamps_the_history_compression_values() {
+        let mut config: Config = serde_json::from_str(
+            r#"{"overlays":[{"id":"wild","probe":{"protocol":"icmp","host":"1.1.1.1"},
+                "historyCompression":true,"historyCompressionRatio":0,
+                "historyCompressionNoZoneShare":400,"historyCompressionMaxZoneShare":400,
+                "historyCompressionNoZoneMinPx":9000,"historyCompressionMaxZoneMinPx":9000,
+                "historyCompressionMinAxisPx":90000}]}"#,
+        )
+        .expect("config");
+        config.normalize();
+        let overlay = &config.overlays[0];
+        assert_eq!(
+            overlay.history_compression_ratio,
+            MIN_HISTORY_COMPRESSION_RATIO
+        );
+        assert_eq!(overlay.history_compression_no_zone_share, 100);
+        assert_eq!(overlay.history_compression_max_zone_share, 100);
+        assert_eq!(
+            overlay.history_compression_no_zone_min_px,
+            MAX_HISTORY_ZONE_MIN_PX
+        );
+        assert_eq!(
+            overlay.history_compression_max_zone_min_px,
+            MAX_HISTORY_ZONE_MIN_PX
+        );
+        assert_eq!(
+            overlay.history_compression_min_axis_px,
+            MAX_HISTORY_COMPRESSION_MIN_AXIS_PX
+        );
     }
 
     /// The timeout indicator is Stick for every profile written before it

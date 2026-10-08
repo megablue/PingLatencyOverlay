@@ -23,7 +23,7 @@ Status: shipped (v0.2.39) · Read when: changing `map_x`, `visible`, the reveal 
 
 ## How & why
 
-- **Position by age, not index.** Smooth: `x = axis_long * (1 - (age - D) / window)`; index: `x = (index + 0.5) * step` with `step = axis_long / windowSeconds`. Ages inside the hold (age < D) map past the axis end; only the partial tip's interpolation reads them — nothing newer than D is ever stroked.
+- **Position by age, not index.** Smooth: `x = axis_long * (1 - (age - D) / window)`; index: `x = (index + 0.5) * step` with `step = axis_long / windowSeconds`. Ages inside the hold (age < D) map past the axis end; only the partial tip's interpolation reads them — nothing newer than D is ever stroked. With history compression on, this is the linear branch of a three-zone mapping instead of the whole mapping — see [history-compression.md](history-compression.md).
 - **One instant owns the cut.** The frame is drawn to `now - D`: `draw_series` stops at the first sample newer than the cut and draws a partial segment up to it (never while a new run is starting); the marker loop skips samples newer than it; `line_y_at_x` is handed the
   same cut slice (`drawn_samples`), and so is the cursor's timeout run. The
   whole frame agrees on where "now" ends.
@@ -53,6 +53,7 @@ Status: shipped (v0.2.39) · Read when: changing `map_x`, `visible`, the reveal 
 ## Related
 
 - [rendering.md](rendering.md) — the draw order, reserves and transforms
+- [history-compression.md](history-compression.md) — the compressed axis this mapping becomes part of
 - [sample-cursor.md](sample-cursor.md) — the eased cursor that rides this mapping
 - [../probes.md](../probes.md) — the sample cadence the hold is measured in
 - `docs/SPEC.md` — the X-axis section describes the user-visible behavior

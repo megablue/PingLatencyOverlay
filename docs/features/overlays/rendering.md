@@ -5,7 +5,7 @@ Status: shipped (v0.2.39) · Read when: changing `overlay.rs` or `render.rs`, th
 ## What it does
 
 - Every overlay is a native `WS_EX_LAYERED` popup drawn with `UpdateLayeredWindow`: true per-pixel alpha, no DWM frame, no taskbar button, no focus, and mouse passthrough.
-- One overlay draws the optional background fill, one line per host, per-host timeout marks (Stick / Stub / Gap), the startup prefill, the underglow, the sample cursor, and the selection/preview border.
+- One overlay draws the optional background fill, the optional background grid, one line per host, per-host timeout marks (Stick / Stub / Gap), the startup prefill, the underglow, the sample cursor, and the selection/preview border.
 - Orientation (0/90/180/270) and mirror decide how the graph maps into the window; an anchor plus margins place the window in the work area.
 - Where the window lives (normal, sticky to a window, wallpaper) is a display mode — see [display-modes.md](display-modes.md).
 
@@ -25,6 +25,7 @@ Status: shipped (v0.2.39) · Read when: changing `overlay.rs` or `render.rs`, th
 - `render_graph_into_with_border` / `render_series_into_with_border` → `render_graph_into_internal`.
 - `Series`, `SamplePoint`; `draw_series` (one host's polyline), `draw_sample_cursor`, `line_y_at_x`, `stroke_run`, `LinePass`; `TimeoutIndicator`, `TIMEOUT_STUB_HEIGHT`.
 - `map_x` / `map_y` / `visible`; `transform_point` / `rotation` / `glow_direction`; `parse_hex_color`; the prefill generators.
+- `draw_background_grid` with `GRID_CELL_WIDTH_PX` / `GRID_CELL_HEIGHT_PX` / `GRID_STROKE_PX` — the grid, stroked into the graph's own frame before everything else.
 - Reserves: `line_glow_reserve_px`, `stroke_pad`, `sample_cursor_reserve_px`, `sample_cursor_room_px`; `SMOOTH_REVEAL_DELAY`, `SAMPLE_INTERVAL`.
 
 `crates/core/src/border.rs` — `BorderAnimator`, `draw_border`, the manual premultiplied `blend_pixel`, `border_frame_interval`.
@@ -36,9 +37,11 @@ Status: shipped (v0.2.39) · Read when: changing `overlay.rs` or `render.rs`, th
 ## How & why
 
 - **The pixels are premultiplied RGBA until the DIB.** `render.rs` writes premultiplied RGBA; `overlay.rs` swaps R/B to premultiplied BGRA for the 32-bit DIB. `bgOpacity = 0` leaves alpha at zero; a positive value fills the panel first.
-- **The draw order is one order: casts, markers, cores, cursor, border.** With the glow on, every series casts first (`LinePass::Glow`), then every timeout marker, then every core. A `Stick` marker spans the canvas even through the glow's reserved band, so a cast can never tint a marker into the glow, and a core still lands on top of a marker it crosses. The cursor draws over the cores; the border last.
+- **The draw order is one order: grid, casts, markers, cores, cursor, border.** With the glow on, every series casts first (`LinePass::Glow`), then every timeout marker, then every core. A `Stick` marker spans the canvas even through the glow's reserved band, so a cast can never tint a marker into the glow, and a core still lands on top of a marker it crosses. The cursor draws over the cores; the border last. The background grid goes in first of all, so nothing it draws can land on a line or a marker.
 - **A reserve is one number read by both the box and the drawing.** `line_glow_reserve_px` = `ceil(reach + 0.5)` grows the window's short dimension and insets the graph's `bottom`, where the reach is `glow_reach_px` — the radius at full intensity, scaled by its square root, so a fainter glow takes less room; `stroke_pad` = `(width / 2 + 0.5).max(2)` keeps a thick line from being sliced at a pixmap edge; `sample_cursor_reserve_px` is a constant 2px gutter on the long axis; `sample_cursor_room_px` pads the ceiling end of the short axis and shares the zero-line end with the glow reserve, which keeps `max(reserve, cursor_room)` there rather than their sum. Layout and renderer must never disagree, which is why each is a single function.
-- **The axis keeps the size the config names.** `graphHeightPx` survives the glow reserve and the cursor room because the box grows first; `axis_long = long_px - cursor_reserve` keeps the time axis at its configured length.
+- **The short axis keeps the size the config names; so does the long one.** `graphHeightPx` survives the glow reserve and the cursor room because the box grows first; `axis_long = long_px - cursor_reserve` keeps the time axis at its configured length, with `historyCompression` on or off: the bands divide that axis and never widen it, which is what `overlay::tests::the_canvas_keeps_the_configured_size` pins.
+- **The long axis is a run of bands.** With `historyCompression` on, that `axis_long` holds its newest stretch at the raw density — exactly what the same overlay draws with the feature off — then a ladder of equally wide bands whose ratios step evenly from 2× to the configured maximum, then the reserve at that ratio, so `map_x` is no longer linear and the crop reaches further back. The geometry is a sibling of the reserves rather than a second opinion about them: one function, `compression::geometry`, read by the renderer and the editor's readout. See [history-compression.md](history-compression.md).
+- **The background grid is the x mapping drawn as cells.** Its cell is a constant 30 × 20 px (`GRID_CELL_WIDTH_PX` / `GRID_CELL_HEIGHT_PX`, physical pixels like every other drawing size) and its columns are placed by the same distance the lines are: `d = k × 30 / base` through `x_of`, so they sit 30 px apart where the axis is uncompressed and `30 / ratio_k` apart in compressed band k, with every join a visible step. The rows are a plain 20 px ladder up from the zero line, so a cell boundary lands on the baseline. With compression off the mapping is linear and the grid is exactly the 30 × 20 px grid. It is one path, stroked once at `GRID_STROKE_PX` (not `lineStrokePx`), and a column within 1 px of the previous one is skipped: at 64× the reserve packs two columns into a pixel and the guard bounds the strokes without changing the band. It is built in the graph's own frame and inside the plot only — `x` from 0 to `axis_long`, `y` from `top` to `bottom` — so it rotates and mirrors with the lines. See [history-compression.md](history-compression.md) for what the steps mean.
 - **`transform_point` owns orientation and mirror.** 90/270 swap the long and short axes; the graph's own +Y direction (toward the zero line) is `glow_direction`, which shares `rotation` with `transform_point`, so a rotated overlay's cast rotates with it.
 
 ### Size, series, gaps and the paint order
@@ -62,10 +65,12 @@ Status: shipped (v0.2.39) · Read when: changing `overlay.rs` or `render.rs`, th
 | `maxYMs` | 1000 | — | DragValue |
 | `timeoutIndicator` | stick | stick / stub / gap | combo |
 | `bgColor` / `bgOpacity` | `#0f172a` / 0 | opacity 0–100 | colour + slider |
+| `backgroundGrid` / `backgroundGridColor` | false / `#334155` | — | checkbox + colour, under Colors, after the background |
 | `lineStrokePx` | 1.5 | 0.5–6 | slider |
 | `horizontalMarginPx` / `verticalMarginPx` | 0 | — | sliders |
 | `monitorDevice` | primary | — | combo (unplugged pin stays listed) |
 | `lineGlow*`, `sampleCursor*` | — | — | see [glow.md](glow.md), [sample-cursor.md](sample-cursor.md) |
+| `historyCompression*` | off | ratio 4–64, floors 0–500 px | see [history-compression.md](history-compression.md) |
 
 ## Tests that pin it
 
@@ -77,10 +82,13 @@ Status: shipped (v0.2.39) · Read when: changing `overlay.rs` or `render.rs`, th
 - `the_timeout_stub_marks_only_the_canvas_bottom`, `the_timeout_gap_draws_no_marker`
 - `the_stroke_pad_keeps_the_default_and_grows_with_the_stroke`, `a_thick_stroke_at_the_axis_edges_is_not_sliced`
 - `the_underglow_reserves_room_on_the_short_side`, `the_sample_cursor_reserves_room_on_both_axes`
+- `the_background_grid_draws_a_30_by_20_cell`, `the_grid_cells_step_at_the_band_joins`, `the_grid_is_drawn_behind_the_line`, `the_grid_follows_orientation_and_mirror`
+- `background_grid_defaults_off_and_round_trips`, `the_background_grid_controls_sit_after_the_background_rows`
 
 ## Related
 
 - [smooth-rendering.md](smooth-rendering.md) — the reveal hold and the x mapping
+- [history-compression.md](history-compression.md) — the bands the long axis is cut into
 - [glow.md](glow.md) — the underglow's sweep and reserve
 - [sample-cursor.md](sample-cursor.md) — cursor geometry, easing, its reserves
 - [display-modes.md](display-modes.md) — global / sticky / wallpaper

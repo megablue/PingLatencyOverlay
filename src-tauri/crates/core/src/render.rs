@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tiny_skia::{FillRule, IntSize, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::border::{self, BorderVisual};
+use crate::compression;
 use crate::config::{
     OverlayConfig, TimeoutIndicator, MAX_LINE_STROKE_PX, MAX_SAMPLE_CURSOR_SIZE_PX,
     MIN_LINE_STROKE_PX, MIN_SAMPLE_CURSOR_SIZE_PX,
@@ -421,6 +422,21 @@ fn render_graph_into_internal(
     let visible_samples = config.window_seconds.max(1) as usize;
     let window_duration = Duration::from_secs(visible_samples as u64);
     let step = axis_long / visible_samples as f32;
+    // History compression, when it is on and the axis is long enough for it, is
+    // the x mapping for the whole frame. `None` is the answer for every overlay
+    // that has it off, and for a graph too short to hold three zones: both draw
+    // exactly as they always have, which is what every crop and mapping below
+    // falls back to.
+    let compression = compression::geometry(config, axis_long);
+    // The oldest instant the axis reaches. Without compression that is the
+    // window; with it, the window plus everything the compressed zones hold.
+    let span_duration =
+        Duration::from_secs_f64(compression.map_or(visible_samples as f64, |c| c.span() as f64));
+    // How many slots of the buffer the axis covers in index mode. Samples are
+    // one per slot there, so the span in slots is the count — rounded, because
+    // a span of 575.4 slots cannot show a 576th sample without drawing it past
+    // the axis's own edge.
+    let visible_slots = compression.map_or(visible_samples, |c| c.span().round() as usize);
     // The instant this frame presents, in smooth mode: the same three-sample
     // hold the marker loop and the cursor's walk use, so the whole frame
     // agrees on where "now" ends. Index mode shows the samples it has as soon
@@ -449,26 +465,41 @@ fn render_graph_into_internal(
         let t = (value as f32).min(y_max) / y_max;
         bottom - t * (bottom - top)
     };
-    let map_x = |index: usize, sample: &SamplePoint| -> Option<f32> {
+    // `visible_len` is the length of the slice the caller is walking. Index
+    // mode needs it because a series with fewer samples than the axis covers is
+    // drawn at the leading edge of the no-compression zone rather than
+    // stretched over the whole axis — where index mode has always drawn it —
+    // and the slice's own length is what tells the two cases apart.
+    let map_x = |index: usize, sample: &SamplePoint, visible_len: usize| -> Option<f32> {
         if smooth {
             // Move every point by its real age so the whole graph scrolls as
             // one surface; index-based positions would jump when a sample
             // arrives at the right edge. The reveal hold shifts the window a
             // whole delay later, so the newest revealed instant sits at the
-            // axis end and the drawn ages run from the delay to the window
-            // after it. The crop is the only visibility gate: an age past the
-            // window plus hold maps to a negative x, which the line pass wants
-            // for the one older sample it keeps so the polyline leaves the
-            // canvas instead of starting at x = 0.
+            // axis end and the drawn ages run from the delay to the span after
+            // it. The crop is the only visibility gate: an age past the span
+            // plus hold maps to a negative x, which the line pass wants for the
+            // one older sample it keeps so the polyline leaves the canvas
+            // instead of starting at x = 0.
             let age = now.saturating_duration_since(sample.timestamp);
-            Some(
-                axis_long
-                    * (1.0
-                        - (age.as_secs_f32() - SMOOTH_REVEAL_DELAY.as_secs_f32())
-                            / window_duration.as_secs_f32()),
-            )
+            let distance = age.as_secs_f32() - SMOOTH_REVEAL_DELAY.as_secs_f32();
+            Some(match compression {
+                Some(compression) => compression.x_of(distance),
+                None => axis_long * (1.0 - distance / window_duration.as_secs_f32()),
+            })
         } else {
-            Some((index as f32 + 0.5) * step)
+            Some(match compression {
+                Some(compression) => {
+                    // Slots back from the newest instant the axis presents: the
+                    // slice's last sample is that instant, and half a slot is
+                    // where it sits. A series shorter than the axis shows all it
+                    // has, its newest still half a slot in from the edge of the
+                    // uncompressed zone.
+                    let newest = visible_len.max(visible_samples) as f32 - 0.5;
+                    compression.x_of(newest - index as f32)
+                }
+                None => (index as f32 + 0.5) * step,
+            })
         }
     };
 
@@ -490,16 +521,16 @@ fn render_graph_into_internal(
         samples: &[SamplePoint],
         smooth: bool,
         now: Instant,
-        window_duration: Duration,
-        visible_samples: usize,
+        span_duration: Duration,
+        visible_slots: usize,
         keep_older: bool,
     ) -> &[SamplePoint] {
         let start = if smooth {
             // The axis ends at the newest revealed instant, so the oldest
-            // point it shows is the window plus the reveal hold old.
+            // point it shows is the span plus the reveal hold old.
             let cut = samples.partition_point(|sample| {
                 now.saturating_duration_since(sample.timestamp)
-                    > window_duration + SMOOTH_REVEAL_DELAY
+                    > span_duration + SMOOTH_REVEAL_DELAY
             });
             if keep_older {
                 cut.saturating_sub(1)
@@ -507,7 +538,7 @@ fn render_graph_into_internal(
                 cut
             }
         } else {
-            samples.len().saturating_sub(visible_samples)
+            samples.len().saturating_sub(visible_slots)
         };
         &samples[start..]
     }
@@ -516,6 +547,20 @@ fn render_graph_into_internal(
         width: stroke_width,
         ..Stroke::default()
     };
+
+    // The grid is the first thing drawn in the graph's own frame: the
+    // background belongs to the window, and everything else — the casts, the
+    // markers, the lines, the cursor — is drawn over it.
+    draw_background_grid(
+        &mut pixmap,
+        config,
+        compression,
+        axis_long,
+        top,
+        bottom,
+        long_px,
+        short_px,
+    );
 
     // The prefill colour is shared by every target: it is the overlay's
     // cosmetic line colour, and one muted colour for the whole reveal reads as
@@ -544,8 +589,8 @@ fn render_graph_into_internal(
                 entry.samples,
                 smooth,
                 now,
-                window_duration,
-                visible_samples,
+                span_duration,
+                visible_slots,
                 true,
             );
             if samples.is_empty() {
@@ -599,18 +644,30 @@ fn render_graph_into_internal(
             entry.samples,
             smooth,
             now,
-            window_duration,
-            visible_samples,
+            span_duration,
+            visible_slots,
             false,
         );
+        // The x of the last marker this series drew, so a compressed column of
+        // failures is not stroked once per failure. Read only when compression
+        // is on, so an ordinary frame strokes exactly what it always has.
+        let mut last_marker_x: Option<f32> = None;
         for (index, sample) in samples.iter().enumerate() {
-            let Some(x) = map_x(index, sample) else {
+            let Some(x) = map_x(index, sample, samples.len()) else {
                 continue;
             };
             if reveal.is_some_and(|cut| sample.timestamp > cut) {
                 continue;
             }
             if sample.value.is_none() {
+                // A compressed reserve packs many failures into one pixel
+                // column, and a marker is a full-height stick: the ones behind
+                // the first add nothing to the picture but do add strokes.
+                if compression.is_some() && last_marker_x.is_some_and(|last| (x - last).abs() < 1.0)
+                {
+                    continue;
+                }
+                last_marker_x = Some(x);
                 let end_y = short_px - pad;
                 let start_y = match config.timeout_indicator {
                     TimeoutIndicator::Stick => top,
@@ -670,8 +727,8 @@ fn render_graph_into_internal(
                 entry.samples,
                 smooth,
                 now,
-                window_duration,
-                visible_samples,
+                span_duration,
+                visible_slots,
                 false,
             );
             // The samples this frame has drawn — the same slice the walk reads,
@@ -1024,7 +1081,7 @@ fn drawn_samples(samples: &[SamplePoint], reveal: Option<Instant>) -> &[SamplePo
 fn line_y_at_x(
     samples: &[SamplePoint],
     max_sample_gap: Duration,
-    map_x: &dyn Fn(usize, &SamplePoint) -> Option<f32>,
+    map_x: &dyn Fn(usize, &SamplePoint, usize) -> Option<f32>,
     map_y: &dyn Fn(u32) -> f32,
     target_x: f32,
 ) -> Option<f32> {
@@ -1038,7 +1095,7 @@ fn line_y_at_x(
     let mut last_timestamp: Option<Instant> = None;
 
     for (index, sample) in samples.iter().enumerate() {
-        let Some(x) = map_x(index, sample) else {
+        let Some(x) = map_x(index, sample, samples.len()) else {
             continue;
         };
         let gap = last_timestamp.is_some_and(|previous| {
@@ -1112,6 +1169,125 @@ fn cover(result: &mut Option<f32>, from: (f32, f32), to: (f32, f32), target_x: f
     *result = Some(y);
 }
 
+/// The width of one background grid cell, in physical pixels: its size where
+/// the axis is uncompressed.
+pub const GRID_CELL_WIDTH_PX: f32 = 30.0;
+/// The height of one background grid cell, in physical pixels.
+pub const GRID_CELL_HEIGHT_PX: f32 = 20.0;
+/// The grid is a hairline whatever the lines themselves are stroked at.
+const GRID_STROKE_PX: f32 = 1.0;
+
+/// Draw the background grid into the graph's own frame.
+///
+/// The columns step by one cell's worth of *distance* — `d = k × cell / base`,
+/// through the same mapping the lines are drawn through — so they sit 30 px
+/// apart where the axis is uncompressed and `30 / ratio` apart in the reserve,
+/// with the ramp between the two. The rows are a plain 20 px ladder up from the
+/// zero line. The grid is therefore a picture of the compression rather than a
+/// decoration over it: the cells are the resolution the graph is drawn at,
+/// column by column.
+#[allow(clippy::too_many_arguments)]
+fn draw_background_grid(
+    pixmap: &mut Pixmap,
+    config: &OverlayConfig,
+    compression: Option<compression::Compression>,
+    axis_long: f32,
+    top: f32,
+    bottom: f32,
+    long_px: f32,
+    short_px: f32,
+) {
+    if !config.background_grid || bottom <= top || axis_long <= 0.0 {
+        return;
+    }
+
+    // Newest instant first, leftwards. Without compression the spacing is the
+    // cell itself; with it, the mapping decides where the next one lands.
+    let columns: Vec<f32> = match compression {
+        Some(compression) => {
+            let step = GRID_CELL_WIDTH_PX / compression.base();
+            let mut columns: Vec<f32> = Vec::new();
+            let mut k = 0.0f32;
+            loop {
+                let x = compression.x_of(k * step);
+                if x < 0.0 {
+                    break;
+                }
+                // A high ratio packs the reserve into a solid band; one stroke
+                // per pixel column is as much as the picture can hold, and the
+                // guard bounds the strokes without changing it.
+                if columns.last().is_none_or(|last: &f32| last - x >= 1.0) {
+                    columns.push(x);
+                }
+                k += 1.0;
+            }
+            columns
+        }
+        None => {
+            let mut columns: Vec<f32> = Vec::new();
+            let mut x = axis_long;
+            while x >= 0.0 {
+                columns.push(x);
+                x -= GRID_CELL_WIDTH_PX;
+            }
+            columns
+        }
+    };
+
+    let mut path = PathBuilder::new();
+    for x in columns {
+        let from = transform_point(
+            (x, top),
+            long_px,
+            short_px,
+            config.orientation,
+            config.mirrored,
+        );
+        let to = transform_point(
+            (x, bottom),
+            long_px,
+            short_px,
+            config.orientation,
+            config.mirrored,
+        );
+        path.move_to(from.0, from.1);
+        path.line_to(to.0, to.1);
+    }
+    // Up from the zero line, so a cell boundary lands on the baseline; the
+    // topmost cell is whatever is left over.
+    let mut y = bottom;
+    while y >= top {
+        let from = transform_point(
+            (0.0, y),
+            long_px,
+            short_px,
+            config.orientation,
+            config.mirrored,
+        );
+        let to = transform_point(
+            (axis_long, y),
+            long_px,
+            short_px,
+            config.orientation,
+            config.mirrored,
+        );
+        path.move_to(from.0, from.1);
+        path.line_to(to.0, to.1);
+        y -= GRID_CELL_HEIGHT_PX;
+    }
+
+    let [r, g, b] = parse_hex_color(&config.background_grid_color, [51, 65, 85]);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(r, g, b, 255);
+    let stroke = Stroke {
+        width: GRID_STROKE_PX,
+        ..Stroke::default()
+    };
+    if let Some(path) = path.finish() {
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
 /// Stroke one target's line, breaking it at timeouts, data gaps and prefill
 /// boundaries. In smooth mode `reveal` stops the walk at the instant the frame
 /// presents, drawing a partial last segment so the tip advances with time
@@ -1131,7 +1307,7 @@ fn draw_series(
     prefill_line_paint: &Paint,
     prefill_line_rgb: [u8; 3],
     stroke: &Stroke,
-    map_x: &dyn Fn(usize, &SamplePoint) -> Option<f32>,
+    map_x: &dyn Fn(usize, &SamplePoint, usize) -> Option<f32>,
     map_y: &dyn Fn(u32) -> f32,
     long_px: f32,
     short_px: f32,
@@ -1156,7 +1332,7 @@ fn draw_series(
     let mut last_point: Option<(f32, f32)> = None;
     let mut last_timestamp: Option<Instant> = None;
     for (index, sample) in samples.iter().enumerate() {
-        let Some(x) = map_x(index, sample) else {
+        let Some(x) = map_x(index, sample, samples.len()) else {
             continue;
         };
         if let Some(cut) = reveal.filter(|cut| sample.timestamp > *cut) {
@@ -1295,6 +1471,19 @@ fn prefill_unit(state: &mut u64) -> f32 {
     (prefill_step(state) >> 40) as f32 / (1u64 << 24) as f32
 }
 
+/// How much history the cosmetic prefill covers: the whole axis when history
+/// compression is on, the window when it is off.
+///
+/// The prefill is a picture of a working connection filling the graph, so it
+/// should fill whatever the graph now shows. It resolves against the *logical*
+/// axis, because it has no window to measure: the number it wants is a
+/// duration, and a duration does not care about DPI.
+fn prefill_span_seconds(config: &OverlayConfig) -> f64 {
+    let logical_axis = (config.window_seconds.max(1) as u64 * config.scale.max(1) as u64) as f32;
+    compression::geometry(config, logical_axis)
+        .map_or(config.window_seconds.max(1) as f64, |c| c.span() as f64)
+}
+
 /// Build a deterministic, plausible-looking cosmetic latency curve.
 ///
 /// Seeded from `seed` rather than from the overlay alone. With one target the
@@ -1314,7 +1503,9 @@ fn prefill_unit(state: &mut u64) -> f32 {
 /// one; plausible latency is a property of the connection. The walk rests in
 /// the tens of milliseconds and spikes above that, clamped to the axis.
 pub fn cosmetic_prefill_values(config: &OverlayConfig, seed: &str) -> Vec<u32> {
-    let count = config.window_seconds.max(1).min(PREFILL_MAX_SAMPLES as u32) as usize;
+    let count = prefill_span_seconds(config)
+        .round()
+        .clamp(1.0, PREFILL_MAX_SAMPLES as f64) as usize;
     let mut hasher = DefaultHasher::new();
     config.id.hash(&mut hasher);
     seed.hash(&mut hasher);
@@ -1355,7 +1546,7 @@ pub fn cosmetic_prefill_values(config: &OverlayConfig, seed: &str) -> Vec<u32> {
         .collect()
 }
 
-/// Build timestamped cosmetic samples that occupy one graph window.
+/// Build timestamped cosmetic samples that occupy the whole drawn axis.
 pub fn cosmetic_prefill_samples(
     config: &OverlayConfig,
     seed: &str,
@@ -1363,7 +1554,7 @@ pub fn cosmetic_prefill_samples(
 ) -> Vec<SamplePoint> {
     let values = cosmetic_prefill_values(config, seed);
     let count = values.len();
-    let window_duration = Duration::from_secs(config.window_seconds.max(1) as u64);
+    let span_seconds = prefill_span_seconds(config);
     values
         .into_iter()
         .enumerate()
@@ -1373,8 +1564,7 @@ pub fn cosmetic_prefill_samples(
             } else {
                 index as f32 / (count - 1) as f32
             };
-            let age =
-                Duration::from_secs_f64(window_duration.as_secs_f64() * (1.0 - fraction as f64));
+            let age = Duration::from_secs_f64(span_seconds * (1.0 - fraction as f64));
             SamplePoint {
                 value: Some(value),
                 timestamp: now.checked_sub(age).unwrap_or(now),
@@ -3745,6 +3935,683 @@ mod tests {
             assert!(
                 !white.iter().any(|(row, _)| *row == edge_row),
                 "the cursor reached the pixmap edge at value {value}"
+            );
+        }
+    }
+
+    /// The grid's cells are 30 px wide and 20 px tall where the axis is
+    /// uncompressed, and the option being off draws nothing at all.
+    #[test]
+    fn the_background_grid_draws_a_30_by_20_cell() {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        config.scale = 4;
+        config.sample_cursor = false;
+        let now = Instant::now();
+        let points = aged_samples(now, &[(0, 100), (1, 100)]);
+
+        let grid = [51u8, 65, 85];
+        let columns_between = |pixels: &[u8], from: usize, to: usize| -> Vec<usize> {
+            let mut columns: Vec<usize> = positions_of_color(pixels, 300, grid)
+                .into_iter()
+                .filter(|(row, _)| *row >= from && *row <= to)
+                .map(|(_, column)| column)
+                .collect();
+            columns.sort_unstable();
+            columns.dedup();
+            columns
+        };
+        // Rows are read between two columns, so a vertical line cannot stand in
+        // for a horizontal one.
+        let rows_between = |pixels: &[u8], from: usize, to: usize| -> Vec<usize> {
+            let mut rows: Vec<usize> = positions_of_color(pixels, 300, grid)
+                .into_iter()
+                .filter(|(_, column)| *column >= from && *column <= to)
+                .map(|(row, _)| row)
+                .collect();
+            rows.sort_unstable();
+            rows.dedup();
+            rows
+        };
+        let within = |positions: &[usize], value: f32| {
+            positions
+                .iter()
+                .any(|position| (*position as f32 - value).abs() <= 1.0)
+        };
+
+        let plain = render_graph(300, 100, &config, &points, now, false).expect("frame");
+        assert!(
+            positions_of_color(&plain, 300, grid).is_empty(),
+            "the grid was drawn with the option off"
+        );
+
+        config.background_grid = true;
+        let frame = render_graph(300, 100, &config, &points, now, false).expect("frame");
+        let axis = 300.0 - sample_cursor_reserve_px(&config) as f32;
+        let (_, bottom) = graph_bounds(&config, 100.0);
+        // Read the columns between two rows and the rows between two columns, so
+        // a horizontal line cannot stand in for a vertical one.
+        let columns = columns_between(&frame, (bottom - 15.0) as usize, (bottom - 5.0) as usize);
+        assert!(within(&columns, axis), "no column at the leading edge");
+        assert!(within(&columns, axis - 30.0), "no column 30 px back");
+        assert!(
+            !within(&columns, axis - 15.0),
+            "a column half a cell off the 30 px spacing: {} columns lit",
+            columns.len()
+        );
+
+        let rows = rows_between(&frame, (axis - 25.0) as usize, (axis - 5.0) as usize);
+        assert!(within(&rows, bottom), "no row on the zero line");
+        assert!(within(&rows, bottom - 20.0), "no row 20 px above it");
+        assert!(
+            !within(&rows, bottom - 10.0),
+            "a row half a cell off the 20 px spacing: {} rows lit",
+            rows.len()
+        );
+    }
+
+    /// The columns follow the x mapping, and the bands are what it steps at: one
+    /// cell per 30 px where the axis is uncompressed, half that once the 2x band
+    /// begins, and a packed grid in the reserve.
+    #[test]
+    fn the_grid_cells_step_at_the_band_joins() {
+        let mut config = compressed_config();
+        config.background_grid = true;
+        config.sample_cursor = false;
+        let now = Instant::now();
+        let points = aged_samples(now, &[(0, 100)]);
+        let pixels = render_graph(300, 100, &config, &points, now, false).expect("frame");
+
+        let (_, bottom) = graph_bounds(&config, 100.0);
+        let posts: Vec<(usize, usize)> = positions_of_color(&pixels, 300, [51, 65, 85])
+            .into_iter()
+            .filter(|(row, _)| *row >= (bottom - 15.0) as usize && *row <= (bottom - 5.0) as usize)
+            .collect();
+        // One entry per post: a post can light two runs a pixel apart, so the
+        // columns are clustered before the gaps between them are read.
+        let mut columns: Vec<usize> = posts.iter().map(|(_, column)| *column).collect();
+        columns.sort_unstable();
+        columns.dedup();
+        let mut clustered: Vec<usize> = Vec::new();
+        for column in columns {
+            if clustered
+                .last()
+                .is_none_or(|last| column.saturating_sub(*last) > 2)
+            {
+                clustered.push(column);
+            }
+        }
+        let columns = clustered;
+
+        // The geometry's own numbers rather than the shares repeated here.
+        let geometry = compression_of(&config, 300, 100);
+        let axis = 300.0 - sample_cursor_reserve_px(&config) as f32;
+        let join = axis - geometry.no_zone();
+
+        // Inside the no-compression band every gap is the grid's own 30 px.
+        let gaps: Vec<usize> = columns
+            .windows(2)
+            .filter(|pair| pair[0] as f32 > join)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        assert!(
+            gaps.len() >= 2,
+            "not enough columns in the newest band: {columns:?}"
+        );
+        assert!(
+            gaps.iter().all(|gap| *gap == GRID_CELL_WIDTH_PX as usize),
+            "the newest cells are not {} px apart: {gaps:?}",
+            GRID_CELL_WIDTH_PX
+        );
+
+        // The cells step at the join: the nearest column either side of it is
+        // one cell of the next band apart, and that band is 2x.
+        let nearest = columns
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                (*a as f32 - join)
+                    .abs()
+                    .partial_cmp(&(*b as f32 - join).abs())
+                    .expect("a total order over the distances")
+            })
+            .expect("a column near the join");
+        let older = columns
+            .iter()
+            .copied()
+            .filter(|column| *column < nearest)
+            .max()
+            .expect("a column in the first band");
+        let across = (nearest - older) as f32;
+        let expected = GRID_CELL_WIDTH_PX / geometry.zones()[0].ratio();
+        assert!(
+            (across - expected).abs() <= 1.5,
+            "the cells did not step at the join: {across} px against {expected}"
+        );
+
+        // And the reserve packs several cells into the width of one: the grid is
+        // nearly solid where the newest band is mostly gaps.
+        let lit = |from: f32, to: f32| -> f32 {
+            let count = posts
+                .iter()
+                .filter(|(_, column)| (*column as f32) >= from && (*column as f32) < to)
+                .count();
+            count as f32 / (to - from).max(1.0)
+        };
+        let packed = lit(0.0, geometry.max_zone());
+        let sparse = lit(join, axis);
+        assert!(
+            packed > sparse * 3.0,
+            "the reserve is not drawn tighter: {packed} against {sparse}"
+        );
+    }
+
+    /// The point of a canvas that does not grow: inside the no-compression band
+    /// the newest samples are drawn at exactly the density the same overlay has
+    /// with the feature off, so the two frames agree pixel for pixel there.
+    #[test]
+    fn the_newest_band_draws_the_newest_samples_at_the_plain_density() {
+        let now = Instant::now();
+        let points: Vec<SamplePoint> = (0..40)
+            .map(|index| SamplePoint {
+                value: Some(60 + (index * 37) % 140),
+                timestamp: now - Duration::from_secs(index as u64),
+                is_prefill: false,
+            })
+            .collect();
+        let mut config = compressed_config();
+        config.line_glow = false;
+        config.sample_cursor = false;
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        let mut plain = config.clone();
+        plain.history_compression = false;
+
+        // The same canvas either way — the bands divide the width, they never
+        // widen it — so the two frames compare column for column.
+        let old = render_graph(300, 100, &plain, &points, now, false).expect("plain frame");
+        let banded = render_graph(300, 100, &config, &points, now, false).expect("banded frame");
+
+        let geometry = compression_of(&config, 300, 100);
+        let axis = 300.0 - sample_cursor_reserve_px(&config) as f32;
+        // Two sample steps of margin skip the band's own left edge, where the
+        // segment reaching into the compressed history differs between the two
+        // frames and nowhere else does.
+        let from = (axis - geometry.no_zone()).ceil() as usize + (geometry.base() * 2.0) as usize;
+
+        let mut expected: Vec<(usize, usize)> = positions_of_color(&old, 300, [0, 255, 0])
+            .into_iter()
+            .filter(|(_, column)| *column >= from)
+            .collect();
+        expected.sort_unstable();
+        let mut drawn: Vec<(usize, usize)> = positions_of_color(&banded, 300, [0, 255, 0])
+            .into_iter()
+            .filter(|(_, column)| *column >= from)
+            .collect();
+        drawn.sort_unstable();
+
+        assert!(
+            drawn.len() > 50,
+            "the newest band barely drew a line: {} px",
+            drawn.len()
+        );
+        let missing: Vec<_> = drawn
+            .iter()
+            .filter(|pixel| !expected.contains(pixel))
+            .collect();
+        let extra: Vec<_> = expected
+            .iter()
+            .filter(|pixel| !drawn.contains(pixel))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the band is missing the plain graph's pixels: {missing:?}"
+        );
+        assert!(
+            extra.is_empty(),
+            "the band drew where the plain graph did not: {extra:?}"
+        );
+    }
+
+    /// The grid is a background: the line covers it, and nothing of the line
+    /// moves out from under it.
+    #[test]
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    fn the_grid_is_drawn_behind_the_line() {
+        let mut base = compressed_config();
+        base.first_target_mut().line_color = "#00ff00".to_string();
+        base.sample_cursor = false;
+        // A thick line, so it has a core of fully covered pixels. A thinner one
+        // antialiases every pixel it has, and a translucent edge blends with
+        // whatever is behind it — the grid included, exactly as the background
+        // colour does — which says nothing about the draw order.
+        base.line_stroke_px = MAX_LINE_STROKE_PX;
+        // The cast is translucent by design, so it blends the same way. Off, so
+        // this compares the line itself.
+        base.line_glow = false;
+        let now = Instant::now();
+        let points = one_old_sample_among_fast_ones(now, 150);
+
+        let line_core = |grid: bool| -> Vec<(usize, usize)> {
+            let mut config = base.clone();
+            config.background_grid = grid;
+            eprintln!(
+                "indicator={:?} smooth_rendering={} reveal_delay={:?}",
+                config.timeout_indicator, config.smooth_rendering, SMOOTH_REVEAL_DELAY
+            );
+            let mut plain = config.clone();
+            plain.history_compression = false;
+            let plain_pixels = render_graph(300, 100, &plain, &points, now, true).expect("plain");
+            eprintln!(
+                "plain red: {}",
+                positions_of_color(&plain_pixels, 300, [255, 0, 0]).len()
+            );
+            let pixels = render_graph(300, 100, &config, &points, now, true).expect("frame");
+            let mut positions: Vec<(usize, usize)> = pixels
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, pixel)| pixel == &[0, 255, 0, 255])
+                .map(|(index, _)| (index / 300, index % 300))
+                .collect();
+            positions.sort_unstable();
+            positions
+        };
+        assert!(
+            !line_core(false).is_empty(),
+            "the line was not drawn at all"
+        );
+        assert_eq!(
+            line_core(true),
+            line_core(false),
+            "the grid covers or shifts the line"
+        );
+    }
+
+    /// The grid is built in the graph's own frame, so it rotates and mirrors
+    /// with everything else.
+    #[test]
+    fn the_grid_follows_orientation_and_mirror() {
+        for (orientation, mirrored) in [(0u16, false), (0, true), (90, false), (90, true)] {
+            let mut config = OverlayConfig::new();
+            config.orientation = orientation;
+            config.mirrored = mirrored;
+            config.window_seconds = 30;
+            config.scale = 4;
+            config.background_grid = true;
+            config.sample_cursor = false;
+            let now = Instant::now();
+            let points = aged_samples(now, &[(0, 100), (1, 100)]);
+
+            let rotated = matches!(orientation, 90 | 270);
+            let (width, height) = if rotated {
+                (100u32, 300u32)
+            } else {
+                (300u32, 100u32)
+            };
+            let (long_px, short_px) = if rotated {
+                (height as f32, width as f32)
+            } else {
+                (width as f32, height as f32)
+            };
+            let pixels = render_graph(width, height, &config, &points, now, false).expect("frame");
+            let lit = positions_of_color(&pixels, width as usize, [51, 65, 85]);
+            assert!(!lit.is_empty(), "{orientation}/{mirrored} drew no grid");
+
+            // The first column stands at the leading edge, so its midpoint is
+            // where the transform says it is.
+            let axis = long_px - sample_cursor_reserve_px(&config) as f32;
+            let (top, bottom) = graph_bounds(&config, short_px);
+            let from = transform_point((axis, top), long_px, short_px, orientation, mirrored);
+            let to = transform_point((axis, bottom), long_px, short_px, orientation, mirrored);
+            let middle = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+            assert!(
+                lit.iter().any(|(row, column)| {
+                    (*column as f32 - middle.0).abs() <= 2.0
+                        && (*row as f32 - middle.1).abs() <= 2.0
+                }),
+                "{orientation}/{mirrored}: no grid column at {middle:?}"
+            );
+        }
+    }
+
+    /// A compressed overlay on the 300 px canvas the render tests use: 30 s at
+    /// 4x is exactly the 120 px logical axis compression asks for, so the gate
+    /// is passed without changing the drawn size.
+    fn compressed_config() -> OverlayConfig {
+        let mut config = OverlayConfig::new();
+        config.window_seconds = 30;
+        config.scale = 4;
+        config.max_y_ms = 1_000;
+        config.history_compression = true;
+        config
+    }
+
+    /// The x mapping a frame is drawn through, resolved the way the renderer
+    /// resolves it: from the same reserves, not from hardcoded numbers.
+    fn compression_of(
+        config: &OverlayConfig,
+        width: u32,
+        height: u32,
+    ) -> crate::compression::Compression {
+        let long_px = if matches!(config.orientation, 90 | 270) {
+            height as f32
+        } else {
+            width as f32
+        };
+        crate::compression::geometry(config, long_px - sample_cursor_reserve_px(config) as f32)
+            .expect("compression")
+    }
+
+    /// The plot's top and bottom edges, from the same reserves the renderer
+    /// reads.
+    fn graph_bounds(config: &OverlayConfig, short_px: f32) -> (f32, f32) {
+        let pad = stroke_pad(config.line_stroke_px);
+        let reserve = line_glow_reserve_px(config) as f32;
+        let cursor_room = sample_cursor_room_px(config) as f32;
+        (pad + cursor_room, short_px - pad - reserve.max(cursor_room))
+    }
+
+    /// The y the graph draws a latency at, from the same reserves the renderer
+    /// reads.
+    fn graph_y(config: &OverlayConfig, short_px: f32, value: u32) -> f32 {
+        let (top, bottom) = graph_bounds(config, short_px);
+        let t = (value as f32).min(config.max_y_ms as f32) / config.max_y_ms as f32;
+        bottom - t * (bottom - top)
+    }
+
+    /// A run of fast samples with one slow one far outside the sampling window,
+    /// oldest first.
+    ///
+    /// One sample a second, which is inside the renderer's own gap threshold:
+    /// the old sample has to be joined to its neighbour by a segment, because a
+    /// sample alone in its segment is a point and strokes nothing.
+    fn one_old_sample_among_fast_ones(now: Instant, old_age: u64) -> Vec<SamplePoint> {
+        let mut entries = vec![(old_age, 900u32)];
+        entries.extend((0..old_age).rev().map(|age| (age, 100u32)));
+        aged_samples(now, &entries)
+    }
+
+    /// One sample far outside the sampling window, drawn only because the
+    /// compressed history reaches it.
+    #[test]
+    fn compression_draws_a_sample_the_plain_window_crops() {
+        let mut config = compressed_config();
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.sample_cursor = false;
+        let now = Instant::now();
+        let points = one_old_sample_among_fast_ones(now, 150);
+
+        // The old sample is at the ceiling and the recent run is flat along the
+        // bottom, so the top of the canvas is painted only by the compressed
+        // history's descent from it. Measured at the x the mapping gives it,
+        // which is what the bands decide rather than a column range a test
+        // would have to keep in step by hand.
+        let old = compression_of(&config, 300, 100).x_of(150.0 - SMOOTH_REVEAL_DELAY.as_secs_f32());
+        let corner = |pixels: &[u8]| -> usize {
+            positions_of_color(pixels, 300, [0, 255, 0])
+                .iter()
+                .filter(|(row, column)| *row < 25 && (*column as f32 - old).abs() <= 3.0)
+                .count()
+        };
+
+        config.history_compression = false;
+        let plain = render_graph(300, 100, &config, &points, now, true).expect("plain frame");
+        assert_eq!(
+            corner(&plain),
+            0,
+            "the sampling window crops the old sample"
+        );
+
+        config.history_compression = true;
+        let compressed =
+            render_graph(300, 100, &config, &points, now, true).expect("compressed frame");
+        assert!(
+            corner(&compressed) > 0,
+            "the compressed history draws the sample the window cropped, at {old}"
+        );
+    }
+
+    /// The newest instant is pinned to the leading edge either way: compression
+    /// narrows the window it is drawn in, but it does not move the tip.
+    #[test]
+    fn the_newest_instant_keeps_the_leading_edge() {
+        let mut config = compressed_config();
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.sample_cursor = false;
+        let now = Instant::now();
+        let points = aged_samples(
+            now,
+            &(0..=20)
+                .rev()
+                .map(|age| (age as u64, 500))
+                .collect::<Vec<_>>(),
+        );
+
+        let edge = |compressed: bool| -> usize {
+            let mut config = config.clone();
+            config.history_compression = compressed;
+            let pixels = render_graph(300, 100, &config, &points, now, true).expect("frame");
+            positions_of_color(&pixels, 300, [0, 255, 0])
+                .iter()
+                .map(|(_, column)| *column)
+                .max()
+                .expect("a line was drawn")
+        };
+
+        let plain = edge(false);
+        let compressed = edge(true);
+        assert!(
+            plain.abs_diff(compressed) <= 1,
+            "the drawn tip moved: column {plain} then {compressed}"
+        );
+    }
+
+    /// A timeout inside the compressed history is marked where the new map puts
+    /// it, and the plain window crops it away.
+    #[test]
+    fn a_timeout_marker_in_the_compressed_history_is_drawn() {
+        let mut config = compressed_config();
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
+        config.sample_cursor = false;
+        let now = Instant::now();
+        let mut points: Vec<SamplePoint> = (0..30)
+            .rev()
+            .map(|age| SamplePoint {
+                value: Some(100),
+                timestamp: now - Duration::from_secs(age),
+                is_prefill: false,
+            })
+            .collect();
+        points.insert(
+            0,
+            SamplePoint {
+                value: None,
+                timestamp: now - Duration::from_secs(150),
+                is_prefill: false,
+            },
+        );
+
+        let columns = |pixels: &[u8]| -> Vec<usize> {
+            let mut columns: Vec<usize> = positions_of_color(pixels, 300, [255, 0, 0])
+                .into_iter()
+                .map(|(_, column)| column)
+                .collect();
+            columns.sort_unstable();
+            columns.dedup();
+            columns
+        };
+
+        config.history_compression = false;
+        let plain = render_graph(300, 100, &config, &points, now, true).expect("plain frame");
+        assert!(columns(&plain).is_empty(), "the window crops the marker");
+
+        config.history_compression = true;
+        let compressed =
+            render_graph(300, 100, &config, &points, now, true).expect("compressed frame");
+        let marked = columns(&compressed);
+        assert!(
+            !marked.is_empty(),
+            "the compressed history marks the timeout"
+        );
+        let expected =
+            compression_of(&config, 300, 100).x_of(150.0 - SMOOTH_REVEAL_DELAY.as_secs_f32());
+        assert!(
+            marked
+                .iter()
+                .any(|column| (*column as f32 - expected).abs() <= 2.0),
+            "no marker column near {expected}: {marked:?}"
+        );
+    }
+
+    /// A run of failures spread across the reserve marks the whole run: the
+    /// per-column guard merges only markers that land in the same pixel.
+    #[test]
+    fn a_run_of_timeouts_across_the_reserve_marks_its_whole_run() {
+        let mut config = compressed_config();
+        config.first_target_mut().timeout_color = "#ff0000".to_string();
+        config.sample_cursor = false;
+        let now = Instant::now();
+        // Oldest first, as the renderer's own buffer is: one failure every 30 s
+        // from inside the ladder out to the far end of the reserve.
+        let mut points: Vec<SamplePoint> = (15..=195)
+            .rev()
+            .step_by(30)
+            .map(|age| SamplePoint {
+                value: None,
+                timestamp: now - Duration::from_secs(age),
+                is_prefill: false,
+            })
+            .collect();
+        points.push(SamplePoint {
+            value: Some(100),
+            timestamp: now,
+            is_prefill: false,
+        });
+
+        let pixels = render_graph(300, 100, &config, &points, now, true).expect("frame");
+        let mut columns: Vec<usize> = positions_of_color(&pixels, 300, [255, 0, 0])
+            .into_iter()
+            .map(|(_, column)| column)
+            .collect();
+        columns.sort_unstable();
+        columns.dedup();
+
+        // One cluster per failure: seven of them, 30 s apart, which the reserve
+        // draws about nineteen pixels apart.
+        let mut clusters = 0usize;
+        let mut previous: Option<usize> = None;
+        for column in &columns {
+            if previous.is_none_or(|last| column.saturating_sub(last) > 2) {
+                clusters += 1;
+            }
+            previous = Some(*column);
+        }
+        assert_eq!(clusters, 7, "expected one mark per failure: {columns:?}");
+
+        let geometry = compression_of(&config, 300, 100);
+        let delay = SMOOTH_REVEAL_DELAY.as_secs_f32();
+        let oldest = geometry.x_of(195.0 - delay);
+        let newest = geometry.x_of(15.0 - delay);
+        assert!(
+            (*columns.first().expect("a mark") as f32 - oldest).abs() <= 2.0,
+            "the run starts away from the map: {columns:?} against {oldest}"
+        );
+        assert!(
+            (*columns.last().expect("a mark") as f32 - newest).abs() <= 2.0,
+            "the run ends away from the map: {columns:?} against {newest}"
+        );
+    }
+
+    /// The cursor's walk reads the same map, so under compression it still
+    /// finds the line and rests on it instead of bouncing to the top.
+    #[test]
+    fn the_cursor_still_rests_on_the_line_under_compression() {
+        let config = compressed_config();
+        let now = Instant::now();
+        let points = aged_samples(
+            now,
+            &(4..=20)
+                .rev()
+                .map(|age| (age as u64, 500u32))
+                .collect::<Vec<_>>(),
+        );
+        let pixels = render_graph(300, 100, &config, &points, now, true).expect("frame");
+        let white = positions_of_color(&pixels, 300, [255, 255, 255]);
+        assert!(!white.is_empty(), "the cursor left the line entirely");
+        let highest = white.iter().map(|(row, _)| *row).min().expect("white");
+        assert!(
+            highest > 25,
+            "the cursor bounced to the top of the canvas at row {highest}"
+        );
+    }
+
+    /// A series with fewer samples than the axis covers keeps the place index
+    /// mode has always given it: the left of the uncompressed zone, rather
+    /// than stretched across the whole axis.
+    #[test]
+    fn a_short_series_stays_at_the_left_in_index_mode() {
+        let mut config = compressed_config();
+        config.first_target_mut().line_color = "#00ff00".to_string();
+        config.sample_cursor = false;
+        let now = Instant::now();
+        let points = samples(&[Some(200); 5]);
+        let pixels = render_graph(300, 100, &config, &points, now, false).expect("frame");
+        let leftmost = positions_of_color(&pixels, 300, [0, 255, 0])
+            .iter()
+            .map(|(_, column)| *column)
+            .min()
+            .expect("a line was drawn");
+
+        let geometry = compression_of(&config, 300, 100);
+        let expected = geometry.x_of(config.window_seconds as f32 - 0.5);
+        assert!(
+            (leftmost as f32 - expected).abs() <= 3.0,
+            "the short series starts at {leftmost}, expected about {expected}"
+        );
+    }
+
+    /// Compression is applied in graph space, so a rotated or mirrored overlay
+    /// draws the old sample at the same point of the graph.
+    #[test]
+    fn compressed_history_follows_orientation_and_mirror() {
+        for (orientation, mirrored) in [(0u16, false), (0, true), (90, false), (90, true)] {
+            let mut config = compressed_config();
+            config.orientation = orientation;
+            config.mirrored = mirrored;
+            config.first_target_mut().line_color = "#00ff00".to_string();
+            config.sample_cursor = false;
+            let now = Instant::now();
+            let points = one_old_sample_among_fast_ones(now, 150);
+            let (width, height) = if matches!(orientation, 90 | 270) {
+                (100u32, 300u32)
+            } else {
+                (300u32, 100u32)
+            };
+            let (long_px, short_px) = (width as f32, height as f32);
+            let (long_px, short_px) = if matches!(orientation, 90 | 270) {
+                (short_px, long_px)
+            } else {
+                (long_px, short_px)
+            };
+
+            let pixels =
+                render_graph(width, height, &config, &points, now, true).expect("compressed frame");
+            let geometry = compression_of(&config, width, height);
+            let drawn = transform_point(
+                (
+                    geometry.x_of(150.0 - SMOOTH_REVEAL_DELAY.as_secs_f32()),
+                    graph_y(&config, short_px, 900),
+                ),
+                long_px,
+                short_px,
+                orientation,
+                mirrored,
+            );
+            let lit = positions_of_color(&pixels, width as usize, [0, 255, 0]);
+            assert!(
+                lit.iter().any(|(row, column)| {
+                    (*row as f32 - drawn.1).abs() <= 2.0 && (*column as f32 - drawn.0).abs() <= 2.0
+                }),
+                "{orientation}/{mirrored}: nothing drawn at {drawn:?}"
             );
         }
     }

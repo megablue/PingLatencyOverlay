@@ -14,6 +14,7 @@ use eframe::{App, CreationContext, NativeOptions};
 // arrive as pipe messages, and this window talks to the renderer over the
 // named pipe rather than touching either of those types directly, which is the
 // whole point — nothing in this binary can draw a graph.
+use ping_latency_overlay_core::compression;
 use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, DisplayMode, OverlayConfig, ProbeConfig, StickyTarget,
     StickyZOrder, TargetConfig, TimeoutIndicator,
@@ -6170,6 +6171,206 @@ fn edit_overlay(
             });
     });
 
+    section(ui, "History Compression", |ui| {
+        Grid::new("history-compression-grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("History compression").on_hover_text(
+                    "Show older history beside the sampling window: the canvas is cut \
+                      into bands, the newest of them at full resolution and each older \
+                      one a fixed multiple denser, so the same width reaches much \
+                      further back. The canvas itself never grows.",
+                );
+                if ui
+                    .checkbox(&mut overlay.history_compression, "Enabled")
+                    .changed()
+                {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Compression").on_hover_text(
+                    "How much denser the reserve is than the newest band: at 16x, one \
+                      pixel of the reserved zone holds sixteen times the time one pixel \
+                      holds at full resolution. The bands between step from 2x up to \
+                      this ratio.",
+                );
+                let mut ratio = overlay.history_compression_ratio as i64;
+                if ui
+                    .add_enabled(
+                        overlay.history_compression,
+                        egui::Slider::new(
+                            &mut ratio,
+                            config::MIN_HISTORY_COMPRESSION_RATIO as i64
+                                ..=config::MAX_HISTORY_COMPRESSION_RATIO as i64,
+                        )
+                        .suffix("x")
+                        .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    overlay.history_compression_ratio = ratio.clamp(
+                        config::MIN_HISTORY_COMPRESSION_RATIO as i64,
+                        config::MAX_HISTORY_COMPRESSION_RATIO as i64,
+                    ) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Uncompressed zone").on_hover_text(
+                    "The width of the newest band: the larger of this share of the \
+                      canvas and the floor in logical pixels. It is drawn at the raw \
+                      density, one pixel per sample at 1x, so it holds that share of \
+                      the window in time and the rest of the canvas holds the bands.",
+                );
+                let mut no_share = overlay.history_compression_no_zone_share as i64;
+                let mut no_min = overlay.history_compression_no_zone_min_px as i64;
+                if ui
+                    .horizontal(|ui| {
+                        let share_changed = ui
+                            .add_enabled(
+                                overlay.history_compression,
+                                egui::Slider::new(&mut no_share, 0..=100)
+                                    .suffix(" %")
+                                    .step_by(1.0),
+                            )
+                            .changed();
+                        let min_changed = ui
+                            .add_enabled(
+                                overlay.history_compression,
+                                egui::DragValue::new(&mut no_min)
+                                    .range(0..=config::MAX_HISTORY_ZONE_MIN_PX as i64)
+                                    .suffix(" px"),
+                            )
+                            .changed();
+                        share_changed || min_changed
+                    })
+                    .inner
+                {
+                    overlay.history_compression_no_zone_share = no_share.clamp(0, 100) as u32;
+                    overlay.history_compression_no_zone_min_px =
+                        no_min.clamp(0, config::MAX_HISTORY_ZONE_MIN_PX as i64) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Reserved zone").on_hover_text(
+                    "The deepest band, held at the full compression ratio, where the \
+                      oldest history lives. Same rule as above: the larger of the share \
+                      and the floor. When the canvas has no room for a ladder this band \
+                      takes the whole middle as well.",
+                );
+                let mut max_share = overlay.history_compression_max_zone_share as i64;
+                let mut max_min = overlay.history_compression_max_zone_min_px as i64;
+                if ui
+                    .horizontal(|ui| {
+                        let share_changed = ui
+                            .add_enabled(
+                                overlay.history_compression,
+                                egui::Slider::new(&mut max_share, 0..=100)
+                                    .suffix(" %")
+                                    .step_by(1.0),
+                            )
+                            .changed();
+                        let min_changed = ui
+                            .add_enabled(
+                                overlay.history_compression,
+                                egui::DragValue::new(&mut max_min)
+                                    .range(0..=config::MAX_HISTORY_ZONE_MIN_PX as i64)
+                                    .suffix(" px"),
+                            )
+                            .changed();
+                        share_changed || min_changed
+                    })
+                    .inner
+                {
+                    overlay.history_compression_max_zone_share = max_share.clamp(0, 100) as u32;
+                    overlay.history_compression_max_zone_min_px =
+                        max_min.clamp(0, config::MAX_HISTORY_ZONE_MIN_PX as i64) as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Minimum X axis").on_hover_text(
+                    "The shortest X axis compression is used on, in logical pixels \
+                      before display scaling. A shorter graph has no room for bands and \
+                      is drawn uncompressed.",
+                );
+                let mut min_axis = overlay.history_compression_min_axis_px as i64;
+                if ui
+                    .add_enabled(
+                        overlay.history_compression,
+                        egui::DragValue::new(&mut min_axis)
+                            .range(0..=config::MAX_HISTORY_COMPRESSION_MIN_AXIS_PX as i64)
+                            .suffix(" px"),
+                    )
+                    .changed()
+                {
+                    overlay.history_compression_min_axis_px = min_axis
+                        .clamp(0, config::MAX_HISTORY_COMPRESSION_MIN_AXIS_PX as i64)
+                        as u32;
+                    *changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Shows about").on_hover_text(
+                    "How much history the whole canvas covers with these settings: the \
+                     newest band plus every compressed band behind it.",
+                );
+                // The same clamp the layout applies to the configured axis, so
+                // the readout cannot promise history a window too small to hold
+                // it will not show.
+                let logical_axis = (overlay.window_seconds.max(1) as u64
+                    * overlay.scale.max(1) as u64)
+                    .min(8192) as f32;
+                let geometry = compression::geometry(overlay, logical_axis);
+                match geometry {
+                    Some(geometry) => {
+                        ui.label(history_span_label(geometry.span() as f64));
+                    }
+                    None if overlay.history_compression => {
+                        ui.label(format!(
+                            "not compressed: the X axis is {logical_axis:.0} px and \
+                             compression needs {} px",
+                            overlay.history_compression_min_axis_px
+                        ));
+                    }
+                    None => {
+                        ui.label("off");
+                    }
+                }
+                ui.end_row();
+
+                ui.label("Zones").on_hover_text(
+                    "How the canvas is cut up: the newest band at the raw density, then \
+                     one band per compression step, then the reserve at the maximum \
+                     ratio. The count follows the width: as many bands as fit at ten \
+                     logical pixels each, and never more than one per whole ratio. The \
+                     background grid steps with them.",
+                );
+                match geometry {
+                    Some(geometry) if geometry.zone_count() > 1 => {
+                        ui.label(format!(
+                            "{} bands, 2x to {}x",
+                            geometry.zone_count(),
+                            geometry.ratio()
+                        ));
+                    }
+                    Some(geometry) => {
+                        ui.label(format!("reserve only, {}x", geometry.ratio()));
+                    }
+                    None if overlay.history_compression => {
+                        ui.label("none: the axis is under the minimum");
+                    }
+                    None => {
+                        ui.label("off");
+                    }
+                }
+                ui.end_row();
+            });
+    });
+
     section(ui, "Colors", |ui| {
         Grid::new("colors-grid")
             .num_columns(2)
@@ -6191,6 +6392,27 @@ fn edit_overlay(
                     overlay.bg_opacity = opacity.clamp(0, 100) as u32;
                     *changed = true;
                 }
+                ui.end_row();
+
+                ui.label("Background grid").on_hover_text(
+                    "Draw a grid behind the graph: 30 by 20 pixel cells where the \
+                     axis is uncompressed, narrowing with history compression so the \
+                     cells show how densely each part of the graph is packed.",
+                );
+                if ui
+                    .checkbox(&mut overlay.background_grid, "Enabled")
+                    .changed()
+                {
+                    *changed = true;
+                }
+                ui.end_row();
+
+                color_field(
+                    ui,
+                    "Background grid color",
+                    &mut overlay.background_grid_color,
+                    changed,
+                );
                 ui.end_row();
 
                 ui.label("Stroke width")
@@ -6448,6 +6670,17 @@ fn edit_overlay(
                 ui.end_row();
             });
     });
+}
+
+/// A history span as a short human string: seconds, minutes or hours.
+fn history_span_label(seconds: f64) -> String {
+    if seconds < 120.0 {
+        format!("{seconds:.0} seconds")
+    } else if seconds < 7_200.0 {
+        format!("{:.1} minutes", seconds / 60.0)
+    } else {
+        format!("{:.1} hours", seconds / 3_600.0)
+    }
 }
 
 fn section(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
@@ -6779,18 +7012,18 @@ pub fn run() {
 mod tests {
     use super::{
         about_page_lines, app_version, append_status_message, auto_preview_line,
-        auto_switch_section, auto_switch_step, can_switch_profile, choose_theme, config,
-        config_notice_status, config_notices_status, config_push_due, default_fallback,
+        auto_switch_section, auto_switch_step, can_switch_profile, choose_theme, compression,
+        config, config_notice_status, config_notices_status, config_push_due, default_fallback,
         deselect_strip_rect, draw_pane_divider, empty_editor, enabled_target_keys,
-        fill_sticky_target, host_row_label, list_pane_column, list_pane_row_height,
-        list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
-        overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
-        page_has_list_pane, pending_edits, pick_cursor, pick_step, profile_name_width,
-        profile_row_contents, profile_row_label, rail_width, requested_url, retired_targets,
-        row_inner, rule_error, runtime_config_changed, selected_overlay_for_border,
-        selected_target_in, set_background_tracking, set_selection_border_animation,
-        set_sticky_value, sticky_value, sync_auto_preview_text, sync_monitor_list,
-        sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
+        fill_sticky_target, history_span_label, host_row_label, list_pane_column,
+        list_pane_row_height, list_pane_row_width_for, monitor_choice_label, monitor_choices,
+        overlay_count_label, overlay_name_width, overlay_row_contents, overlay_row_label,
+        page_has_detail_footer, page_has_list_pane, pending_edits, pick_cursor, pick_step,
+        profile_name_width, profile_row_contents, profile_row_label, rail_width, requested_url,
+        retired_targets, row_inner, rule_error, runtime_config_changed,
+        selected_overlay_for_border, selected_target_in, set_background_tracking,
+        set_selection_border_animation, set_sticky_value, sticky_value, sync_auto_preview_text,
+        sync_monitor_list, sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
         window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, PingApp, ProfileSnapshot,
         ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
@@ -9321,11 +9554,15 @@ mod tests {
     /// One pass at a taller window, for the sections below the fold: the detail
     /// pane's scroll area does not paint what it cannot show, and a test asking
     /// whether a control exists should not depend on the window's height.
+    ///
+    /// The extra height only has to clear the longest page — Colors follows
+    /// History Compression, which grew an axis-width row — so it is raised
+    /// whenever a section below the fold grows rather than measured.
     fn drive_tall(app: &mut PingApp, ctx: &egui::Context) -> egui::FullOutput {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
-                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT + 600.0),
+                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT + 700.0),
             )),
             ..Default::default()
         };
@@ -9846,6 +10083,137 @@ mod tests {
         assert!(
             !text_rects(&output, "Always above other windows").is_empty(),
             "the sticky z-order choice did not appear"
+        );
+    }
+
+    /// The background grid's two controls sit under Colors, straight after the
+    /// background's own rows, for a selected overlay.
+    ///
+    /// Colors sits below the fold — it follows History Compression — so the pass
+    /// runs tall and the rows are asserted where the pane paints them. The
+    /// ordering is the assertion: two controls that exist but sit somewhere else
+    /// in the editor would be as wrong as two that are missing.
+    #[test]
+    fn the_background_grid_controls_sit_after_the_background_rows() {
+        let root = driving_root("plo-drive-grid");
+        let store = config::Store::new(root.clone());
+        let mut config = Config::default();
+        config.overlays.push(OverlayConfig::new());
+        store
+            .save_profile("default", &config)
+            .expect("seed the profile");
+        store
+            .set_active_profile("default")
+            .expect("seed the active profile");
+
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+        let list_pane_right = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH;
+        click_text_where(&mut app, &ctx, "New overlay", |rect| {
+            rect.center().x < list_pane_right
+        });
+
+        let output = drive_tall(&mut app, &ctx);
+        let row = |label: &str| -> egui::Rect {
+            let rects = text_rects(&output, label);
+            assert_eq!(rects.len(), 1, "{label} is painted once: {rects:?}");
+            rects[0]
+        };
+        let background = row("Background color");
+        let opacity = row("Background opacity");
+        let grid = row("Background grid");
+        let grid_color = row("Background grid color");
+        assert!(
+            background.top() < opacity.top(),
+            "the background rows are out of order"
+        );
+        assert!(
+            opacity.top() < grid.top(),
+            "the background grid is not after the background"
+        );
+        assert!(
+            grid.top() < grid_color.top(),
+            "the grid color is above its own option"
+        );
+        // Both rows are in the colors grid's own label column, so "after the
+        // background" means this list rather than the next section down.
+        for (label, rect) in [
+            ("Background grid", grid),
+            ("Background grid color", grid_color),
+        ] {
+            assert!(
+                (rect.left() - background.left()).abs() < 1.0,
+                "{label} is not in the colors column"
+            );
+        }
+    }
+
+    /// The History Compression section is drawn for a selected overlay, and its
+    /// readout resolves the axis through the same geometry the renderer draws
+    /// through: the span it prints is the compression module's own answer for
+    /// the configured window and scale.
+    ///
+    /// The section sits below the fold at the real window height, so the pass
+    /// runs tall and the controls are asserted where the pane paints them.
+    /// Clicking them is not available here — a click delivered in a taller pass
+    /// is dropped, and the harness only ever clicks at the real window size —
+    /// so the readout is what pins the section's wiring.
+    #[test]
+    fn the_history_compression_section_reads_the_geometry_back() {
+        let root = driving_root("plo-drive-compression");
+        let store = config::Store::new(root.clone());
+        let mut config = Config::default();
+        let mut overlay = OverlayConfig::new();
+        overlay.history_compression = true;
+        config.overlays.push(overlay);
+        store
+            .save_profile("default", &config)
+            .expect("seed the profile");
+        store
+            .set_active_profile("default")
+            .expect("seed the active profile");
+
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+        let list_pane_right = RAIL_WIDTH + PANE_GAP + SIDEBAR_WIDTH;
+        click_text_where(&mut app, &ctx, "New overlay", |rect| {
+            rect.center().x < list_pane_right
+        });
+
+        let output = drive_tall(&mut app, &ctx);
+        for label in [
+            "History compression",
+            "Compression",
+            "Uncompressed zone",
+            "Reserved zone",
+            "Minimum X axis",
+            "Shows about",
+            "Zones",
+        ] {
+            assert!(
+                !text_rects(&output, label).is_empty(),
+                "the History Compression section is missing {label}"
+            );
+        }
+
+        let overlay = &app.config.overlays[0];
+        let axis = (overlay.window_seconds.max(1) as u64 * overlay.scale.max(1) as u64) as f32;
+        let geometry = compression::geometry(overlay, axis).expect("compression");
+        let expected = history_span_label(geometry.span() as f64);
+        assert!(
+            !text_rects(&output, &expected).is_empty(),
+            "the readout did not print {expected}"
+        );
+        // The bands the row prints: the count and the deepest ratio, from the
+        // same geometry the readout resolves.
+        let zones = format!(
+            "{} bands, 2x to {}x",
+            geometry.zone_count(),
+            geometry.ratio()
+        );
+        assert!(
+            !text_rects(&output, &zones).is_empty(),
+            "the zone readout did not print {zones}"
         );
     }
 }
