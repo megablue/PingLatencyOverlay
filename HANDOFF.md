@@ -9,58 +9,36 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the bands revision of history compression — 2026-10-08 (the background
-grid and history compression are both built; the ramp-and-growth design was
-rejected and replaced by discrete bands inside the canvas the config names, gated
-and photographed, handed over as a restarted release build to look at before
-anything is committed).
+As of the discrete-bands revision of history compression — 2026-10-08. Both the
+compression bands and the background grid are built and **shipped**: committed as
+`55dfdb2`, bundled and pushed to `origin/split/renderer-process`. The
+ramp-and-growth design was rejected and replaced by discrete bands inside the
+canvas the config names.
 
 ## State
 
 - **History compression draws discrete bands inside the canvas the config names,
-  and it is waiting on a look.** The user rejected the grown axis: the box is
+  and it is shipped.** The user rejected the grown axis: the box is
   `windowSeconds × scale` logical px with the feature on or off, and the
   compressed history is drawn *inside* it. `crates/core/src/compression.rs` is
-  the one statement of the geometry. The newest band — the larger of
-  `noZoneShare` and `noZoneMinPx` — is drawn at the raw density, `scale` px/s,
-  so one pixel per sample at 1×; then a ladder of equally wide bands whose ratios
-  step evenly from 2× to `historyCompressionRatio`; then the reserve at that
-  ratio. The ladder holds `min(ratio − 1, floor(middle_px / 10))` bands, so the
-  count follows the canvas width and never steps finer than 1×; with no room for
-  one the reserve takes the middle and there is a single step, raw to the
-  maximum. Density is constant inside a band and steps at every join, and the
-  background grid follows it — 30 px cells in the newest band, `30 / ratio_k` in
-  band k. `render.rs` maps x through `x_of`, crops to the span, spreads the
-  cosmetic prefill over it and bounds marker overdraw in the deep bands; the
-  editor's section prints `Shows about` from the same geometry and a new `Zones`
-  row replaces the old `Axis width`. The user's own profile (120 s × scale 2,
+  the one statement of the geometry. The user's own profile (120 s × scale 2,
   ratio 12, share 0 with the 30 px floors) resolves to 12 bands over about 825 s
-  — under 14 minutes — on its 240 logical px canvas. **Nothing is committed
-  yet.** Gate green: fmt, clippy `-D warnings`, `cargo test --all-features`
-  (232 in the core lib, 95 in the shell, 6 + 2 + 3 + 1 elsewhere) and
-  `cargo build --release`. Frames for the eye at `src-tauri/target/plo-grid/`:
-  `plain-480.png` (grid on, no compression), `ratio12-480.png`,
-  `ratio64-480.png` (43 bands, about 66 min), `nogrid-480.png` and
-  `profile-300.png` (the user's profile at 125% DPI). A scratch test rendered
-  them and was removed afterwards; the older `ratio-16-*` and `plain-grid.png`
-  frames of the rejected growth design were deleted. Next: the user's look, then
-  the commit, then `npm run bundle` — the version counts commits, so the bundle
-  comes after. Read `docs/features/overlays/history-compression.md` before
-  touching any of it.
-- **A background grid is built on top of the compression work, and both are
-  waiting on a look.** Per overlay, off by default: `backgroundGrid` and
-  `backgroundGridColor` (default `#334155`), drawn as a checkbox and a colour
-  under **Colors** in the editor, straight after the background rows. Its cells
-  are 30 × 20 px wherever the X axis is uncompressed, and the *columns* are
-  placed through the same x mapping the lines are drawn through — so with
-  compression on the cells step down band by band and pack tight in the reserve,
-  and the grid is what shows the density at a glance. One path, one 1 px stroke
-  (`GRID_STROKE_PX`, not `lineStrokePx`), a column within 1 px of the previous
-  one skipped, drawn first in the graph's own frame so it rotates and mirrors
-  with the lines. Read `docs/features/overlays/rendering.md` for the drawing and
-  `history-compression.md` for what the steps mean.
-- **The tip ships the bounce's revised shake and its continuous shake.**
-  `ce1ab95` shipped the bounce; this commit changes the shake from
+  on its 240 logical px canvas. Committed as `55dfdb2` and pushed; the gate was
+  green at that commit (fmt, clippy `-D warnings`, `cargo test --all-features`
+  — 232 in the core lib, 95 in the shell, 6 + 2 + 3 + 1 elsewhere — and
+  `cargo build --release`), and the frames for the eye are still in
+  `src-tauri/target/plo-grid/` (`plain-480.png`, `ratio12-480.png`,
+  `ratio64-480.png`, `nogrid-480.png` and `profile-300.png`). Read
+  `docs/features/overlays/history-compression.md` for the rule, the traps and
+  the pinning tests before touching any of it.
+- **A background grid rides on the same geometry.** Per overlay, off by default:
+  `backgroundGrid` and `backgroundGridColor` (default `#334155`), under
+  **Colors** in the editor. Its columns are placed through the same x mapping
+  the lines are drawn through, so with compression on the cells step down band
+  by band and pack tight in the reserve. Read
+  `docs/features/overlays/rendering.md` for the drawing.
+- **The sample-cursor bounce ships with its revised shake.**
+  `ce1ab95` shipped the bounce; `e8efedb` changes the shake from
   12 Hz / 2 px / 0.6 s to 4.5 Hz / 0.6 × the cursor's half-height / 0.9 s, and
   makes the shake's clock the *newest* failure (`timeout_run_latest`) instead
   of the run's first, so a run that keeps failing restarts the shake with every
@@ -84,6 +62,10 @@ anything is committed).
 - **UI label/unit pass, shipped in `7f391b2`.** Known wart left open: a
   DragValue suffix is static, so a value of 1 reads "1 seconds" (most visible
   on Border fade out); pluralising the second fields is an easy follow-up.
+- **`55dfdb2`'s message body is one line of literal backtick-n escapes**
+  instead of newlines: whatever wrote the message file escaped its newlines. It
+  is already pushed, so the history was left alone — just do not repeat it (write
+  the message with real newlines and `git commit -F`).
 - The smooth-rendering investigation (the newest segment appearing to
   skip instead of scrolling with the rest of the line) is closed: the line
   path had no regression, and the reveal hold plus the shifted time mapping
@@ -102,7 +84,10 @@ anything is committed).
   user's own shell needs none of it — a new file takes its creator's label, not
   the parent folder's (the repo root is Low-labelled and the installed 0.2.60
   exes built there carry no label). SmartScreen on a fresh unsigned build is
-  expected either way.
+  expected either way. Still true on 2026-10-08: the confined token is Low, and
+  a tree a Medium-labelled build has touched cannot be built confined at all —
+  `failed to open ...\target\debug\.cargo-build-lock: Access is denied` — so
+  the gate has to run unconfined.
 - **`scripts/capture-app.ps1` cannot be driven from the DSH `pwsh` tool.**
   Two walls, in order: the host's execution policy refuses the unsigned file
   (and `Unblock-File` does not lift it), and the script-block route that gets

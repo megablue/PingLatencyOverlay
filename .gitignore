@@ -1,5 +1,7 @@
-# Rust build artifacts
-src-tauri/target/
+# Rust build artifacts. A bare `target/` matches at any depth: the workspace
+# root's target and each member crate's, because a command run from inside a
+# crate (a test writing frames, say) creates `crates/<name>/target` as well.
+target/
 
 # Local/generated files
 *.log
