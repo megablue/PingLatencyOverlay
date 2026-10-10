@@ -9,14 +9,19 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the discrete-bands revision of history compression — 2026-10-08. Both the
-compression bands and the background grid are built and **shipped**: committed as
+As of the support links — 2026-10-10. The compression bands and the background
+grid are built and **shipped**: committed as
 `55dfdb2`, bundled and pushed to `origin/split/renderer-process`. The
 ramp-and-growth design was rejected and replaced by discrete bands inside the
 canvas the config names.
 
 ## State
 
+- **The support links are in.** The README's `## Support the project`, the
+  About page's second clickable line (`Buy me a coffee: paypal.me/mega3dp`,
+  `ABOUT_SUPPORT`) and `.github/FUNDING.yml`'s `custom` entry all point at
+  `https://www.paypal.me/mega3dp`. FUNDING.yml only counts once it is on the
+  default branch.
 - **History compression draws discrete bands inside the canvas the config names,
   and it is shipped.** The user rejected the grown axis: the box is
   `windowSeconds × scale` logical px with the feature on or off, and the

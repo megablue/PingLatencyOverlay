@@ -48,7 +48,8 @@ pickers or the driving tests.
   `pick_step`, `fill_sticky_target`, `own_capture_window`, `pick_cursor`,
   `draw_crosshair_icon`), `PICK_BUTTON_WIDTH`, `winwatch::shapes`.
 - Links and glyphs: `requested_url` / `open_requested_urls` /
-  `open_url_in_browser`; `GLOBAL_ICON_ROWS`; `about_page_column`,
+  `open_url_in_browser`; `about_page_lines` (`ABOUT_REPOSITORY`,
+  `ABOUT_SUPPORT`); `GLOBAL_ICON_ROWS`; `about_page_column`,
   `empty_editor`; layout helpers `row_inner`, `right_anchored`,
   `list_pane_row_width_for`.
 - Preference writers: `set_background_tracking`,
@@ -144,6 +145,7 @@ pickers or the driving tests.
 `the_global_glyph_is_centred_and_stays_inside_its_box`,
 `the_theme_glyphs_stay_inside_their_boxes`, `the_theme_tiles_fit_their_pane`,
 `choosing_a_theme_changes_it_and_survives_the_next_pass`,
+`only_the_repository_and_support_are_links`,
 `a_link_click_becomes_a_url_to_open`,
 `a_pick_commits_on_the_release_after_its_press`,
 `a_picked_window_fills_process_and_class_but_not_the_title`,

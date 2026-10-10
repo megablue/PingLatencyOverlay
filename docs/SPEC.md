@@ -571,12 +571,13 @@ from the program, so a theme can be written, shared and edited without a build.
   The About page
   has no list either, so its detail pane spans the same full width, and is
   read-only and centred: the app icon, then one column of lines — the app name
-  large, the tagline under it, the version, then the repository, the copyright
+  large, the tagline under it, the version, then the repository, the support
+  link (a "Buy me a coffee" PayPal link), the copyright
   and the licence. Nothing on it can be edited, and it carries no Save/Discard
   footer because it stages nothing. No line on it is smaller than the rest of
-  the window's body text. The repository line is the only clickable one: it
-  opens the address in the user's default browser, and the full address is in the
-  hover tooltip. The copyright
+  the window's body text. The repository and support lines are the clickable
+  ones: each opens its address in the user's default browser, and the full
+  address is in the hover tooltip. The copyright
   carries no year, so it cannot go stale between releases. The licence is named
   in words and not linked, because the licence text is not bundled with the app.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,

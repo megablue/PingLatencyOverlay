@@ -177,6 +177,13 @@ Further detail lives in [`AGENTS.md`](AGENTS.md) for contributors and
 
 </details>
 
+## Support the project
+
+PingLatencyOverlay is free, with no telemetry, accounts or ads. If it has
+earned a spot on your screen, you can
+[buy me a coffee](https://www.paypal.me/mega3dp) through PayPal — entirely
+optional.
+
 ## License
 
 PingLatencyOverlay is free software released under the GNU General Public

@@ -122,9 +122,12 @@ const THEME_MOON_BITE_OFFSET: (f32, f32) = (0.104, -0.104);
 const THEME_SYSTEM_RADIUS: f32 = 0.44;
 /// Segments the System glyph's filled semicircle is drawn with.
 const THEME_SYSTEM_ARC_STEPS: usize = 16;
-/// The About page's repository. This is the one line that opens anything: it is
-/// the only link, and clicking it hands the address to Windows.
+/// The About page's repository. One of the page's two links: clicking it hands
+/// the address to Windows.
 const ABOUT_REPOSITORY: &str = "https://github.com/megablue/PingLatencyOverlay";
+/// The About page's support link, shown as "Buy me a coffee". The other link,
+/// and it opens through the same mechanism as the repository.
+const ABOUT_SUPPORT: &str = "https://www.paypal.me/mega3dp";
 /// Edge length of the app icon shown above the About page's text.
 const ABOUT_LOGO_SIZE: f32 = 128.0;
 /// Space above the About page's centred column, so it does not sit hard against
@@ -185,9 +188,9 @@ struct AboutLine {
 /// `LegalCopyright`, and it carries no year on purpose, so nothing here can go
 /// stale between releases.
 ///
-/// Only the repository is clickable. The licence is named in words and not
-/// linked, because the text is not bundled with the app and a link to someone
-/// else's copy of it invites the reader to trust that copy.
+/// The repository and the support link are clickable. The licence is named in
+/// words and not linked, because the text is not bundled with the app and a link
+/// to someone else's copy of it invites the reader to trust that copy.
 fn about_page_lines() -> Vec<AboutLine> {
     let body = ui_text_size();
     let line = |text: &str, size: f32, kind: AboutKind, group_start: bool| AboutLine {
@@ -210,6 +213,12 @@ fn about_page_lines() -> Vec<AboutLine> {
             body,
             AboutKind::Link(ABOUT_REPOSITORY),
             true,
+        ),
+        line(
+            "Buy me a coffee: paypal.me/mega3dp",
+            body,
+            AboutKind::Link(ABOUT_SUPPORT),
+            false,
         ),
         line(env!("APP_COPYRIGHT"), body, AboutKind::Text, true),
         line(
@@ -7026,7 +7035,7 @@ mod tests {
         sync_monitor_list, sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
         window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, PingApp, ProfileSnapshot,
-        ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY,
+        ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, ABOUT_SUPPORT,
         DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
         GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
         MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
@@ -8762,7 +8771,8 @@ mod tests {
         }
     }
 
-    /// The repository is the only thing on the About page that opens anything.
+    /// The repository and the support link are the only things on the About
+    /// page that open anything.
     ///
     /// The display text drops the `https://` prefix, so a typo in a URL would
     /// not be visible on the page at all; only the click would fail, and then in
@@ -8770,7 +8780,7 @@ mod tests {
     /// catches that. The licence is named in words and deliberately not linked,
     /// so this also fails if a line quietly becomes or stops being clickable.
     #[test]
-    fn only_the_repository_is_a_link() {
+    fn only_the_repository_and_support_are_links() {
         let lines = about_page_lines();
         let linked: Vec<&str> = lines
             .iter()
@@ -8781,7 +8791,7 @@ mod tests {
             .collect();
         assert_eq!(
             linked,
-            vec![ABOUT_REPOSITORY],
+            vec![ABOUT_REPOSITORY, ABOUT_SUPPORT],
             "the About page's links changed, so check the text says what each one opens"
         );
         for url in linked {
@@ -8802,12 +8812,14 @@ mod tests {
     /// nothing at all.
     #[test]
     fn a_link_click_becomes_a_url_to_open() {
-        let open = egui::OpenUrl::same_tab(ABOUT_REPOSITORY);
-        assert_eq!(
-            requested_url(&egui::OutputCommand::OpenUrl(open)),
-            Some(ABOUT_REPOSITORY),
-            "a clicked link must reach the opener as a URL"
-        );
+        for url in [ABOUT_REPOSITORY, ABOUT_SUPPORT] {
+            let open = egui::OpenUrl::same_tab(url);
+            assert_eq!(
+                requested_url(&egui::OutputCommand::OpenUrl(open)),
+                Some(url),
+                "a clicked link must reach the opener as a URL"
+            );
+        }
         // The other command egui can emit is a clipboard copy, and it must be
         // left in place: draining the list must not swallow the app's other
         // output. `OutputCommand` has exactly three variants, so covering
