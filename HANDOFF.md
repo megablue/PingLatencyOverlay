@@ -9,29 +9,36 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the sample cursor's ceiling room — 2026-10-11. The cursor no longer
-reserves room above the axis: the box is shorter by half a triangle, the grid
-reaches the top edge, and the bounce rests on the axis top, half out, with a
-one-sided dip for its shake. The gate is green and the look was confirmed
-before the commit. The per-host adapter binding shipped as `1bc1705`; the
-compression bands and the background grid as `55dfdb2`, both bundled and
-pushed to `origin/split/renderer-process`. The ramp-and-growth design was
-rejected and replaced by discrete bands inside the canvas the config names.
+As of the sample cursor's gap against the graph — 2026-10-12. The cursor's
+base now keeps its gap from the graph's leading edge (the axis's end), not the
+box's: the rim's outer edge sits 2px inside the grid's last column, so the gap
+is visible; the leading reserve became the stroke's pad (5 → 2px) and the box
+returned to 314×136 while the time axis kept its length. The bounce still
+parks whole against the box's top edge — its topmost pixel flush — while a
+value clamped at the ceiling still hangs half out, apex on the line. The gate
+is green; the look is pending, so nothing is committed yet. The per-host
+adapter binding shipped as `1bc1705`; the compression bands and the background
+grid as `55dfdb2`, both bundled and pushed to `origin/split/renderer-process`.
+The ramp-and-growth design was rejected and replaced by discrete bands inside
+the canvas the config names.
 
 ## State
 
-- **The sample cursor reserves no room above the axis, and the bounce rests on
-  the axis top.** The box grew at the ceiling end for half a triangle and the
-  renderer inset the axis by the same amount, which left a dead band above the
-  grid (13 px at the user's 125% DPI) that nothing ever drew in, and parked the
-  bounce on the window edge — fully above the graph — with a symmetric shake
-  that swung it further out. Now only the zero-line end keeps the room (shared
-  with the glow's cast as before); the ceiling end keeps just the stroke's pad.
-  The bounce's rest is the axis top itself — the centre on the ceiling line,
-  half in and half out, cut by the box's edge — and `cursor_shake_offset` is a
-  decaying one-sided dip into the graph, so no phase can rise above that half.
-  A cursor clamped at the ceiling hangs half out the same way; the zero-line
-  cursor stays whole. The user's overlay went 314×147 → 314×136. Read
+- **The sample cursor keeps a 2px gap from the graph's leading edge, and the
+  bounce parks whole at the top.** The base is anchored to the axis's end, not
+  the box's (`base_x = axis_long - SAMPLE_CURSOR_EDGE_GAP - rim / 2`), so the
+  rim's outer edge sits 2px inside the grid's last column and the gap reads
+  against the grid instead of an invisible box edge — the line's newest few
+  pixels run on past the cursor's flat side. The leading reserve is no longer
+  the cursor's: it is `leading_reserve_px`, `stroke_pad` of the line's width
+  (2px for the default stroke), the same pad the other edges keep, so the box
+  hugs the graph — the user's overlay is 314×136 at 125% DPI and the time axis
+  keeps its length. The ceiling end still keeps no room (just the stroke's
+  pad): a *value* clamped there still centres on the ceiling line, apex on it,
+  half out — but the *bounce* rests whole, its topmost pixel flush with the
+  box's top edge, and `cursor_shake_offset` stays one-sided (dips into the
+  graph), because an upswing would push the cursor past the edge and slice it
+  again. The zero-line cursor stays whole. Read
   `docs/features/overlays/sample-cursor.md`.
 - **A host can pick the network adapter its probes leave through.** Per host:
   `TargetConfig.adapter` (an adapter GUID; absent = Automatic), with a

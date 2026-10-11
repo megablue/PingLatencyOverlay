@@ -180,15 +180,17 @@
     turning the glow down gives the empty space back.
   - Sample cursor (on by default, including for a profile written before the
     setting existed; an explicit off turns it off): a white triangle with a dark
-    rim marks each line's leading end. Its base sits flush against the leading
-    edge and its apex points back along the line, so how far back it reaches is
-    the cursor's size; the apex sits on the line itself, interpolated between
+    rim marks each line's leading end. Its base keeps a small gap from the
+    graph's leading edge — the rim's outer edge two pixels clear of the axis's
+    end, so the line's newest pixels run on past the cursor's flat side — and
+    its apex points back along the line, so how far back it reaches is the
+    cursor's size; the apex sits on the line itself, interpolated between
     samples — including a spike's flank or the jog where a line resumes after a
     timeout — and it eases to a new value instead of jumping. When a live
     timeout reaches the point it is drawn from — the break arriving on the same
     three-second hold the line itself is drawn with — the cursor leaves the line
-    and is flung to the top of the latency axis, where it rests half out of the
-    graph's top edge, its upper half cut by the overlay's edge, and bounces —
+    and is flung to the top of the latency axis, where it rests whole against
+    the overlay's top edge — its topmost pixel flush with it — and bounces —
     dipping into the graph — for about a second before settling there, with
     each further timeout in the run restarting the shake so a host that keeps
     failing keeps shaking; it eases back onto the line when a value arrives. A
@@ -203,11 +205,12 @@
     rather than waiting for smooth rendering's held frames, and returning to
     white as soon as a value arrives. The colour is per overlay
     (`cursorTimeoutBlinkColor`, default `#ef4444`). The overlay box reserves a
-    constant gutter at the leading edge for the base and room below the zero
-    line for the cursor and the glow, so the axis keeps its length and height
-    and a cursor on the zero line stays whole; at the ceiling there is no room —
-    a cursor clamped there hangs half out of the axis top, cut by the box's
-    edge.
+    constant band past the axis's end — the same stroke pad the other edges
+    keep, so the newest tip and the grid's last column are never sliced — and
+    room below the zero line for the cursor and the glow, so the axis keeps its
+    length and height and a cursor on the zero line stays whole. At the ceiling
+    there is no room: a value clamped there hangs half out of the axis top, cut
+    by the box's edge, while a bounce parks whole against the top edge.
 - **Display Mode** is one of three exclusive placements, chosen in a **Display
   Mode** section under Position and defaulting to **Global Overlay**:
   - **Global Overlay** places the overlay on a display. Position is one of 9

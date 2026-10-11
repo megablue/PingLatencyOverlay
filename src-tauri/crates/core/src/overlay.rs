@@ -14,9 +14,9 @@ use crate::config::{
 use crate::monitors::{MonitorInfo, Rect};
 use crate::probes::SampleStore;
 use crate::render::{
-    cosmetic_prefill_samples, line_glow_reserve_px, render_series_into_with_border,
-    sample_cursor_reserve_px, sample_cursor_room_px, sample_gap_threshold, timeout_run_anchor,
-    CursorAnimation, SamplePoint, Series,
+    cosmetic_prefill_samples, leading_reserve_px, line_glow_reserve_px,
+    render_series_into_with_border, sample_cursor_room_px, sample_gap_threshold,
+    timeout_run_anchor, CursorAnimation, SamplePoint, Series,
 };
 use crate::rules::CompiledMatcher;
 use crate::sticky;
@@ -1861,13 +1861,16 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
     // same amount. The reserve is not scaled by DPI because the glow radius it
     // mirrors is a physical pixel size.
     let reserve = line_glow_reserve_px(config) as i32;
-    // The cursor owns a band past the newest sample on the long side and room
-    // below the zero line for half a triangle's height. The window grows for
-    // both and the renderer insets by the same amounts, so the axis keeps its
-    // configured size and a cursor on the zero line stays whole. The ceiling
-    // end gets no room: a cursor clamped there hangs half out of the axis top,
-    // cut by the box's edge, by design. Physical pixels, like the glow radius.
-    let cursor_reserve = sample_cursor_reserve_px(config) as i32;
+    // The leading band past the newest sample is the room the tip's stroke
+    // needs — the same pad the top and bottom edges keep — and the window
+    // grows by it so the axis keeps its configured length and nothing is
+    // sliced at the box's edge; the cursor's gap lives inside the graph. The
+    // zero line also keeps room for half a triangle's height, so a cursor
+    // there stays whole. The renderer insets by the same amounts. The ceiling
+    // end gets no room: a value clamped there hangs half out of the axis top,
+    // cut by the box's edge, and a bounce parks whole against that edge —
+    // neither needs room. Physical pixels, like the glow radius.
+    let leading_reserve = leading_reserve_px(config) as i32;
     let cursor_room = sample_cursor_room_px(config) as i32;
     // Below the zero line the cast's reserve and the cursor's room occupy the
     // same band, so the window keeps whichever reaches further, not their sum.
@@ -1877,12 +1880,12 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
             (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
                 + bottom_room,
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
-                + cursor_reserve,
+                + leading_reserve,
         )
     } else {
         (
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
-                + cursor_reserve,
+                + leading_reserve,
             (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
                 + bottom_room,
         )
@@ -2103,7 +2106,8 @@ mod tests {
     /// the axis the height `graphHeightPx` names; a rotated overlay carries it
     /// on its width. The reserve follows the cast's reach, so the default 10%
     /// intensity takes a fraction of a 4px radius and full strength takes the
-    /// radius back. Zero without the glow, so existing sizes do not move.
+    /// radius back. The long side carries the leading stroke's pad throughout —
+    /// 2 px for the default stroke — so it reads 120 + 2 at every stop.
     #[test]
     fn the_underglow_reserves_room_on_the_short_side() {
         let work = Rect {
@@ -2116,13 +2120,13 @@ mod tests {
         overlay.line_glow = false;
         overlay.sample_cursor = false;
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120, 60));
+        assert_eq!(size, (120 + 2, 60));
 
         overlay.line_glow = true;
         overlay.line_glow_radius_px = 4;
         // 10% intensity: reach = 4·√0.1 ≈ 1.26, so the room is ceil(1.26 + 0.5).
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120, 62));
+        assert_eq!(size, (120 + 2, 62));
         assert_eq!(
             line_glow_reserve_px(&overlay),
             2,
@@ -2132,7 +2136,7 @@ mod tests {
         // At full strength the reach is the radius: radius + 1 as always.
         overlay.line_glow_intensity = 100;
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120, 65));
+        assert_eq!(size, (120 + 2, 65));
         assert_eq!(
             line_glow_reserve_px(&overlay),
             5,
@@ -2141,11 +2145,11 @@ mod tests {
 
         overlay.orientation = 90;
         let (rotated, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(rotated, (65, 120));
+        assert_eq!(rotated, (65, 120 + 2));
 
         // The reserve is a physical size and is not scaled with the display.
         let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
-        assert_eq!(scaled, (125, 240));
+        assert_eq!(scaled, (125, 2 * 120 + 2));
     }
 
     /// History compression draws inside the configured canvas rather than
@@ -2163,7 +2167,11 @@ mod tests {
         overlay.line_glow = false;
         overlay.sample_cursor = false;
         let (plain, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(plain, (120, 60), "off is the configured size");
+        assert_eq!(
+            plain,
+            (120 + 2, 60),
+            "off is the configured size plus the leading stroke's pad"
+        );
 
         // On, at the default share, at a quarter share and at an extreme one:
         // the bands divide the axis, so the box never moves.
@@ -2180,14 +2188,15 @@ mod tests {
         // Rotated it is the same box the other way round.
         overlay.orientation = 90;
         let (rotated, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(rotated, (60, 120));
+        assert_eq!(rotated, (60, 120 + 2));
     }
 
     /// Below the zero line the cast's reserve and the cursor's room are the
     /// same band: the window keeps the larger of the two. The ceiling end gets
-    /// no room at all — a cursor clamped there hangs half out of the axis top
-    /// — so a max-size glow with the cursor on is `graphHeightPx +
-    /// max(reserve, room)`, not the sum of anything.
+    /// no room at all — a value clamped there hangs half out of the axis top,
+    /// and a bounce parks whole against the edge — so a max-size glow with the
+    /// cursor on is `graphHeightPx + max(reserve, room)`, not the sum of
+    /// anything.
     #[test]
     fn the_glow_and_cursor_share_the_room_below_the_zero_line() {
         let work = Rect {
@@ -2215,15 +2224,15 @@ mod tests {
         assert_eq!(size, (120 + 2, 60 + 9));
     }
 
-    /// The cursor reserves a constant 2px gutter on the leading side of the
-    /// long axis — the base sits flush at the edge, and the apex grows back
-    /// along the line as the cursor grows — plus room below the zero line so
-    /// the triangle is never sliced there and the axis keeps the size
-    /// `windowSeconds`/`graphHeightPx` name. The ceiling end gets no room: a
-    /// cursor clamped there hangs half out of the axis top, cut by the box's
-    /// edge. Both reserves are physical sizes, not scaled with the display.
+    /// The window keeps a constant band past the axis's end for the leading
+    /// stroke — the same pad the other edges keep, whatever the cursor does —
+    /// plus room below the zero line so the triangle is never sliced there and
+    /// the axis keeps the size `windowSeconds`/`graphHeightPx` name. The
+    /// ceiling end gets no room: a value clamped there hangs half out of the
+    /// axis top, cut by the box's edge, and a bounce parks whole against it.
+    /// Both bands are physical sizes, not scaled with the display.
     #[test]
-    fn the_sample_cursor_reserves_the_gutter_and_the_room_below_the_zero_line() {
+    fn the_leading_stroke_pad_and_the_cursor_room_size_the_window() {
         let work = Rect {
             left: 0,
             top: 0,
@@ -2234,13 +2243,13 @@ mod tests {
         overlay.line_glow = false;
         overlay.sample_cursor = false;
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120, 60));
+        assert_eq!(size, (120 + 2, 60), "the leading stroke's pad");
 
         overlay.sample_cursor = true;
         assert_eq!(
-            sample_cursor_reserve_px(&overlay),
+            leading_reserve_px(&overlay),
             2,
-            "a constant gutter: the edge margin plus half the rim"
+            "the stroke's pad: half the default stroke plus antialiasing, floored at 2"
         );
         assert_eq!(
             sample_cursor_room_px(&overlay),

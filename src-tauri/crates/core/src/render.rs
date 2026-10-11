@@ -262,9 +262,12 @@ const SAMPLE_CURSOR_RIM_WIDTH: f32 = 2.0;
 const SAMPLE_CURSOR_FILL: [u8; 3] = [255, 255, 255];
 /// The cursor triangle's rim; the default background colour.
 const SAMPLE_CURSOR_RIM: [u8; 3] = [15, 23, 42];
-/// The gap the triangle's rim leaves at the box edge, in pixels: the outer
-/// edge of the rim is flush against the leading edge of the window.
-const SAMPLE_CURSOR_EDGE_MARGIN: f32 = 1.0;
+/// The gap the triangle's rim keeps from the graph's leading edge, in pixels:
+/// the outer edge of the rim sits this far from the axis's end.
+const SAMPLE_CURSOR_EDGE_GAP: f32 = 2.0;
+/// The triangle's base inset from the graph's leading edge, in pixels: the gap
+/// plus half the rim, since the stroke is centred on the base line.
+const SAMPLE_CURSOR_EDGE_MARGIN: f32 = SAMPLE_CURSOR_EDGE_GAP + SAMPLE_CURSOR_RIM_WIDTH / 2.0;
 /// The cursor's easing time constant, in seconds.
 const CURSOR_EASE_SECS: f32 = 0.15;
 /// How close the cursor must be to its target to count as settled, in pixels.
@@ -303,21 +306,22 @@ fn sample_cursor_half_height(config: &OverlayConfig) -> f32 {
     sample_cursor_size(config) as f32 * 0.7
 }
 
-/// The band the sample cursor reserves on the leading (newest-sample) edge of
-/// the window, in physical pixels.
+/// The band the box keeps past the axis's end on the leading (newest-sample)
+/// edge, in physical pixels: the room the leading stroke needs.
 ///
-/// The triangle's base is flush against that edge, so the reserve is just the
-/// rim's half width plus a pixel of slack — constant, whatever the cursor's
-/// size. The apex reaches `size - 1` pixels back into the chart and follows
-/// the drawn line, which is what makes a larger cursor point at an earlier
-/// point. Read by both `layout_in_rect` and the renderer, the way the
-/// underglow's reserve is, so the box and the drawing cannot disagree.
-pub fn sample_cursor_reserve_px(config: &OverlayConfig) -> u32 {
-    if config.sample_cursor {
-        (SAMPLE_CURSOR_EDGE_MARGIN + SAMPLE_CURSOR_RIM_WIDTH / 2.0).ceil() as u32
-    } else {
-        0
-    }
+/// A stroke is centred on its path, so the line's newest tip — and the grid's
+/// last column, when the grid is on — reaches half a stroke past the axis's
+/// end, plus the usual half pixel of antialiasing. This is the same pad the
+/// top and bottom edges keep; the box grows by it so the axis keeps its
+/// configured length and nothing is sliced flat at the box's edge. The
+/// cursor's own gap sits inside the graph, measured from the axis's end. Read
+/// by both `layout_in_rect` and the renderer, the way the underglow's reserve
+/// is, so the box and the drawing cannot disagree.
+pub fn leading_reserve_px(config: &OverlayConfig) -> u32 {
+    let stroke = config
+        .line_stroke_px
+        .clamp(MIN_LINE_STROKE_PX, MAX_LINE_STROKE_PX);
+    stroke_pad(stroke).ceil() as u32
 }
 
 /// The room the cursor needs below the zero line, in physical pixels: half
@@ -327,7 +331,8 @@ pub fn sample_cursor_reserve_px(config: &OverlayConfig) -> u32 {
 /// would otherwise have half a triangle cut off. Only that end gets the room,
 /// because there it shares the band with the glow's cast. The ceiling end
 /// keeps just the stroke's pad: a cursor clamped there hangs half out of the
-/// axis top, cut by the box's edge — the same rest a bounce parks at.
+/// axis top, cut by the box's edge. A bounce parks whole without room — its
+/// rest is the box's top edge itself — so nothing above grows for the cursor.
 pub fn sample_cursor_room_px(config: &OverlayConfig) -> u32 {
     if config.sample_cursor {
         (sample_cursor_half_height(config) + SAMPLE_CURSOR_RIM_WIDTH / 2.0 + 1.0).ceil() as u32
@@ -341,13 +346,13 @@ pub fn sample_cursor_room_px(config: &OverlayConfig) -> u32 {
 /// the first dip throws it; the envelope fades that to nothing.
 ///
 /// A decaying one-sided wave — zero, down to the amplitude, back to zero —
-/// rather than a sine around the rest: the rest is the axis top, with the
-/// triangle already half out of the graph, so an upswing would carry the
-/// cursor further out than half and beyond the box's edge. The phase is a
-/// function of the elapsed time alone, so the same instant draws the same
-/// frame whatever the frame rate, and a test can name the frame it expects.
-/// Both ends are zero — the wave starts there and the fade reaches it at the
-/// window's end — so starting or ending a shake cannot step the cursor.
+/// rather than a sine around the rest: the rest is the box's top edge, with
+/// the whole triangle drawn below it, so an upswing would push the cursor
+/// past that edge and slice it again. The phase is a function of the elapsed
+/// time alone, so the same instant draws the same frame whatever the frame
+/// rate, and a test can name the frame it expects. Both ends are zero — the
+/// wave starts there and the fade reaches it at the window's end — so
+/// starting or ending a shake cannot step the cursor.
 fn cursor_shake_offset(elapsed: Duration, amplitude: f32) -> Option<f32> {
     let t = elapsed.as_secs_f32();
     let window = CURSOR_BOUNCE_SHAKE_SECS.as_secs_f32();
@@ -410,11 +415,12 @@ fn render_graph_into_internal(
     let rotated = matches!(config.orientation, 90 | 270);
     let long_px = if rotated { height as f32 } else { width as f32 };
     let short_px = if rotated { width as f32 } else { height as f32 };
-    // The cursor's triangle sits in a band past the newest sample's x, so the
-    // axis stops short of the window's leading edge by the amount the window
-    // grew for it — one statement of the reserve, read here and in the layout.
-    let cursor_reserve = sample_cursor_reserve_px(config) as f32;
-    let axis_long = long_px - cursor_reserve;
+    // The box grew on the leading side by the room the newest tip's stroke
+    // needs, so the axis stops short of the window's edge by that amount — one
+    // statement of the reserve, read here and in the layout. The cursor's gap
+    // sits inside the graph, not in this band.
+    let leading_reserve = leading_reserve_px(config) as f32;
+    let axis_long = long_px - leading_reserve;
     let visible_samples = config.window_seconds.max(1) as usize;
     let window_duration = Duration::from_secs(visible_samples as u64);
     let step = axis_long / visible_samples as f32;
@@ -451,8 +457,9 @@ fn render_graph_into_internal(
     // The cursor needs the same room on the zero line, or a sample resting
     // there is cut in half — and the glow's band and the cursor's room are the
     // same space, so that end keeps the larger of the two, not their sum. The
-    // ceiling end gets only the stroke's pad: a cursor clamped there hangs
-    // half out of the axis top, cut by the box's edge, by design.
+    // ceiling end gets only the stroke's pad: a value clamped there hangs half
+    // out of the axis top, cut by the box's edge, and a bounce parks whole
+    // against that edge — neither needs room.
     let reserve = line_glow_reserve_px(config) as f32;
     let cursor_room = sample_cursor_room_px(config) as f32;
     let bottom_room = reserve.max(cursor_room);
@@ -699,17 +706,18 @@ fn render_graph_into_internal(
     }
     draw_lines(&mut pixmap, LinePass::Core, &mut *series);
 
-    // The cursor marks the drawn line at its own apex: the base sits flush
-    // against the leading edge and the apex reaches `size` pixels back along
-    // the line, so a larger cursor points at an earlier point. The startup
-    // prefill's head counts as drawn. When a live timeout run reaches the drawn
-    // head the cursor leaves the line for the top of the latency axis, where it
-    // hangs half out of the graph's edge, bounces, and waits for a value. Drawn
-    // over the cores and under the border, and independent per host, so no two
-    // series' cursors can affect one another.
+    // The cursor marks the drawn line at its own apex: the base keeps the
+    // edge gap clear of the graph's leading edge and the apex reaches `size`
+    // pixels back along the line, so a larger cursor points at an earlier
+    // point. The startup prefill's head
+    // counts as drawn. When a live timeout run reaches the drawn head the
+    // cursor leaves the line for the top of the latency axis, where the whole
+    // triangle rests against the box's edge, bounces, and waits for a value.
+    // Drawn over the cores and under the border, and independent per host, so
+    // no two series' cursors can affect one another.
     if config.sample_cursor {
         let size = sample_cursor_size(config) as f32;
-        let target_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN - size;
+        let target_x = axis_long - SAMPLE_CURSOR_EDGE_MARGIN - size;
         let blink_color = parse_hex_color(&config.cursor_timeout_blink_color, [239, 68, 68]);
         // The instant this frame presents. A bounce is judged at it rather than
         // at the wall clock, so the cursor leaves the line when the break
@@ -719,6 +727,11 @@ fn render_graph_into_internal(
         // The cursor's own height sets how far the shake dips it, so a bigger
         // triangle bounces further rather than twitching in place.
         let shake_amplitude = sample_cursor_half_height(config) * CURSOR_BOUNCE_SHAKE_FRACTION;
+        // The bounce's rest: the whole triangle drawn with its topmost pixel
+        // flush with the box's top edge. The axis top itself would put the
+        // centre on the ceiling line and cut the top half off — the ceiling
+        // end has no room above it, so the rest is the edge.
+        let bounce_rest = sample_cursor_half_height(config) + SAMPLE_CURSOR_RIM_WIDTH / 2.0;
         for entry in &mut *series {
             let samples = visible(
                 entry.samples,
@@ -736,18 +749,19 @@ fn render_graph_into_internal(
                 continue;
             };
             // A live run at the drawn head sends the cursor to the top of the
-            // latency axis — the axis top itself, so the triangle rests half in
-            // and half out of the graph — and the one-sided shake dips it into
-            // the graph and back. The shake's clock is how long ago the
-            // *newest* failure was recorded, so every timeout in a run restarts
-            // it: a run that keeps failing keeps shaking instead of shaking
-            // once at its start and then parking while failures keep arriving.
-            // The clock is zero on the frame a failure reaches the head, and
-            // the same number in index and smooth mode.
+            // latency axis — where it rests whole, its topmost pixel flush
+            // with the box's edge, rather than half out of it — and the
+            // one-sided shake dips it into the graph and back. The shake's
+            // clock is how long ago the *newest* failure was recorded, so
+            // every timeout in a run restarts it: a run that keeps failing
+            // keeps shaking instead of shaking once at its start and then
+            // parking while failures keep arriving. The clock is zero on the
+            // frame a failure reaches the head, and the same number in index
+            // and smooth mode.
             let (target, shake) = timeout_run_latest(drawn, entry.max_sample_gap, head)
                 .map(|latest| {
                     (
-                        top,
+                        bounce_rest,
                         cursor_shake_offset(
                             head.saturating_duration_since(latest),
                             shake_amplitude,
@@ -778,6 +792,7 @@ fn render_graph_into_internal(
             draw_sample_cursor(
                 &mut pixmap,
                 y,
+                axis_long,
                 long_px,
                 short_px,
                 config.orientation,
@@ -990,8 +1005,8 @@ struct CursorLook {
     blink: Option<([u8; 3], f32)>,
 }
 
-/// Draw the cursor triangle: base flush against the leading edge, apex on the
-/// drawn line, pointing back at the data.
+/// Draw the cursor triangle: base a gap in from the graph's leading edge, apex
+/// on the drawn line, pointing back at the data.
 ///
 /// The vertices are built in graph coordinates and transformed like any
 /// sample, so the cursor rotates and mirrors with the overlay. `y` is the apex
@@ -1001,9 +1016,11 @@ struct CursorLook {
 /// while a timeout run lasts, the look's blink carries the colour and the
 /// pulse's brightness, and the fill is that colour scaled by it — dim at the
 /// start of the run, full at the cycle's peak. The rim stays dark for contrast.
+#[allow(clippy::too_many_arguments)]
 fn draw_sample_cursor(
     pixmap: &mut Pixmap,
     y: f32,
+    axis_long: f32,
     long_px: f32,
     short_px: f32,
     orientation: u16,
@@ -1011,7 +1028,7 @@ fn draw_sample_cursor(
     look: CursorLook,
 ) {
     let half = look.size * 0.7;
-    let base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN;
+    let base_x = axis_long - SAMPLE_CURSOR_EDGE_MARGIN;
     let apex_x = base_x - look.size;
     let vertices = [
         transform_point((apex_x, y), long_px, short_px, orientation, mirrored),
@@ -2047,9 +2064,9 @@ mod tests {
         let now = Instant::now();
         // Three samples at 100ms, an eight-second hole, three at 300ms. The
         // reveal holds the newest three seconds back and shifts the window, so
-        // in a 300px / 30s plot age 3 sits at the right edge and each second is
-        // 10px: the sample before the hole (age 16) is at column 170 and the
-        // one after it (age 6) at 270.
+        // in a 30s plot age 3 sits at the axis's end and each second is `step`
+        // px: the run before the hole ends at age 14 and the resume after it
+        // sits at age 6.
         let samples = aged_samples(
             now,
             &[
@@ -2066,20 +2083,33 @@ mod tests {
         let green = positions_of_color(&pixels, 300, [0, 255, 0]);
         assert!(!green.is_empty(), "the host drew nothing");
 
+        // The hole's own columns, from the same mapping the renderer draws
+        // through, with a margin clear of the strokes at either end.
+        let axis = 300.0 - leading_reserve_px(&config) as f32;
+        let step = axis / 30.0;
+        let run_end = axis - 11.0 * step;
+        let resume = axis - 3.0 * step;
         let drawn_in_gap = green
             .iter()
-            .filter(|(_, column)| (193..=267).contains(column))
+            .filter(|(_, column)| {
+                ((run_end + 3.0) as usize..=(resume - 3.0) as usize).contains(column)
+            })
             .count();
         assert_eq!(
-            drawn_in_gap, 0,
-            "a line was drawn across the eight-second hole (columns 190 to 270)"
+            drawn_in_gap,
+            0,
+            "a line was drawn across the eight-second hole (columns {} to {})",
+            (run_end + 3.0) as usize,
+            (resume - 3.0) as usize
         );
 
         // And it resumes at the last known value rather than jumping: the stub
         // at the first sample after the hole spans the old and the new level.
         let stub: Vec<usize> = green
             .iter()
-            .filter(|(_, column)| (268..=272).contains(column))
+            .filter(|(_, column)| {
+                ((resume - 2.0) as usize..=(resume + 2.0) as usize).contains(column)
+            })
             .map(|(row, _)| *row)
             .collect();
         let span = match (stub.iter().min(), stub.iter().max()) {
@@ -2160,8 +2190,8 @@ mod tests {
         config.sample_cursor = false;
         let now = Instant::now();
         // The reveal holds the newest three seconds back and shifts the window,
-        // so age 3 sits at the right edge and a second is 10px: ages 12s down
-        // to 3s sit at columns 210 to 300.
+        // so age 3 sits at the axis's end and a second is `step` px: ages 12s
+        // down to 3s run from the axis's end back ten steps.
         let entries: Vec<(u64, u32)> = (0..10u32)
             .map(|index| (u64::from(12 - index), 100 + index * 20))
             .collect();
@@ -2169,8 +2199,14 @@ mod tests {
 
         let pixels = render_hosts(&config, &[("#00ff00", "#ff0000", &samples)], now, true);
         let green = positions_of_color(&pixels, 300, [0, 255, 0]);
-        // Every column between them has to carry a pixel.
-        let missing: Vec<usize> = (212..=298)
+        // Every column between them has to carry a pixel. The first sample's
+        // column and the last two are skipped: the caps at the run's ends are
+        // the line's ends, not its span.
+        let axis = 300.0 - leading_reserve_px(&config) as f32;
+        let step = axis / 30.0;
+        let from = (axis - 9.0 * step + 3.0) as usize;
+        let to = (axis - 2.0) as usize;
+        let missing: Vec<usize> = (from..=to)
             .filter(|column| !green.iter().any(|(_, drawn)| drawn == column))
             .collect();
         assert!(
@@ -3415,13 +3451,13 @@ mod tests {
         );
     }
 
-    /// The cursor is anchored to the box, not to the sample: its base lies on
-    /// the leading edge and its apex reaches `size` back from it, in every
+    /// The cursor is anchored to the box, not to the sample: its base keeps
+    /// the edge gap and its apex reaches `size` back from it, in every
     /// orientation and mirror — the triangle is built in graph coordinates and
     /// transformed like the line, so it follows the rotation rather than
     /// staying upright.
     #[test]
-    fn the_sample_cursor_sits_flush_at_the_leading_edge() {
+    fn the_sample_cursor_keeps_its_gap_at_the_leading_edge() {
         for (orientation, mirrored) in [
             (0u16, false),
             (0, true),
@@ -3465,7 +3501,7 @@ mod tests {
             let bottom = short_px - pad - (line_glow_reserve_px(&config) as f32).max(room);
             let line_y = bottom - 0.2 * (bottom - top);
             let size = sample_cursor_size(&config) as f32;
-            let base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN;
+            let base_x = long_px - leading_reserve_px(&config) as f32 - SAMPLE_CURSOR_EDGE_MARGIN;
             let apex_x = base_x - size;
 
             let nearest = |target: (f32, f32)| {
@@ -3502,9 +3538,9 @@ mod tests {
         }
     }
 
-    /// A bigger cursor grows back along the line: the base stays on the edge
-    /// and the apex sits further in, so the size decides how far back it
-    /// points.
+    /// A bigger cursor grows back along the line: the base keeps its gap from
+    /// the edge and the apex sits further in, so the size decides how far back
+    /// it points.
     #[test]
     fn the_sample_cursor_apex_moves_with_its_size() {
         let now = Instant::now();
@@ -3528,13 +3564,16 @@ mod tests {
         let large = min_column(20, &mut config);
         // The rim covers a few pixels of the triangle's tip, so the leftmost
         // white column names the apex within the rim's reach; what must hold
-        // exactly is that the apex moves back by the difference in size.
+        // exactly is that the apex moves back by the difference in size. The
+        // apex sits `size` back from the base's inset, both read from the
+        // constants the renderer draws with.
+        let edge = 300 - leading_reserve_px(&config) as i32 - SAMPLE_CURSOR_EDGE_MARGIN as i32;
         assert!(
-            (small as i32 - (299 - 8)).abs() <= 4,
+            (small as i32 - (edge - 8)).abs() <= 4,
             "size 8 put the apex at {small}"
         );
         assert!(
-            (large as i32 - (299 - 20)).abs() <= 4,
+            (large as i32 - (edge - 20)).abs() <= 4,
             "size 20 put the apex at {large}"
         );
         assert!(
@@ -3585,8 +3624,8 @@ mod tests {
     }
 
     /// A live timeout at the drawn head flings the cursor off the top of the
-    /// graph: its centre rests on the axis top, half in and half out, with the
-    /// top of the triangle cut by the box's edge instead of holding the last
+    /// graph: it leaves the line and rests whole against the box's top edge —
+    /// the rim's topmost pixel flush with it — instead of holding the last
     /// value the line drew.
     #[test]
     fn the_cursor_bounces_off_the_top_when_the_timeout_reaches_it() {
@@ -3607,29 +3646,29 @@ mod tests {
             valued_top > 10,
             "a valued cursor must sit on its line, not at the edge: {valued_top}"
         );
-        // The rest is the axis top: the centre sits on it, so the white ends
-        // about half a triangle below the box's top edge, and the rows above
-        // the edge are cut.
+        // The rest is the box's top edge: the whole triangle is drawn below
+        // it, so the white spans what the cursor spans anywhere else.
         let half = sample_cursor_half_height(&config).round() as usize;
         assert!(
             bounced_top <= 4,
-            "the bounced cursor was not cut by the box's edge: {bounced_top}"
+            "the bounced cursor did not rest at the box's top edge: {bounced_top}"
         );
         assert!(
-            bounced_bottom <= half + 4,
-            "the bounce stopped past the axis top: {bounced_bottom} against half {half}"
+            bounced_bottom <= 2 * half + 2,
+            "the bounce stopped past the box's top edge: {bounced_bottom} against half {half}"
         );
         let whole = valued_bottom - valued_top + 1;
         let visible = bounced_bottom - bounced_top + 1;
         assert!(
-            visible >= whole / 2 && visible < whole,
-            "the bounced cursor must hang about half out: {visible} rows against {whole}"
+            visible + 1 >= whole,
+            "the bounced cursor must stay whole: {visible} rows against {whole}"
         );
     }
 
     /// The bounce shakes before it settles: the cursor dips into the graph
-    /// over the shake's window — never above its rest, which is already half
-    /// out of the axis top — then holds still for as long as the run lasts.
+    /// over the shake's window — never above its rest, which already sits
+    /// flush against the box's top edge — then holds still for as long as the
+    /// run lasts.
     #[test]
     fn the_bounced_cursor_shakes_then_settles_at_the_top() {
         let mut config = OverlayConfig::new();
@@ -3652,7 +3691,7 @@ mod tests {
             },
         ];
         // The bottom of the triangle is the corner that moves with the shake;
-        // the top row is clipped white at every phase, so it cannot show one.
+        // the top row sits at the box's edge and no phase may lift it.
         let bottom_at = |offset: Duration| {
             let pixels =
                 render_graph(300, 100, &config, &points, now + offset, false).expect("pixmap");
@@ -3673,7 +3712,7 @@ mod tests {
             "the shake did not return to its rest: {rest} then {back}"
         );
         // The bound: the one-sided wave only ever moves the cursor further
-        // into the graph, so no phase draws it above its half-out rest.
+        // into the graph, so no phase draws it above its rest at the edge.
         for step in 0..=30u64 {
             let phase = bottom_at(Duration::from_millis(step * 30));
             assert!(
@@ -3688,8 +3727,12 @@ mod tests {
             settled, later,
             "the shake outlived its window: {settled} then {later}"
         );
+        // The settled bottom is the whole triangle's: the rest centre is half
+        // a triangle (plus the rim's half) below the top edge, so the white
+        // ends about two half-heights down.
+        let half = sample_cursor_half_height(&config).round() as usize;
         assert!(
-            settled <= 12,
+            settled <= 2 * half + 2,
             "the settled cursor did not stay at the top: {settled}"
         );
     }
@@ -3872,7 +3915,7 @@ mod tests {
     /// The shake's ends are at rest and its wave is one-sided: it cannot step
     /// the cursor when it starts or when it stops, it is gone once its window
     /// has passed, and every phase pushes the cursor further into the graph —
-    /// never above the rest, which is already half out of the axis top.
+    /// never above the rest, which already sits at the box's top edge.
     #[test]
     fn the_shake_starts_and_ends_at_rest() {
         assert_eq!(
@@ -3898,7 +3941,7 @@ mod tests {
             "the crest must reach the amplitude it was given: {crest}"
         );
         // One-sided: no phase may rise above the rest, or the bounce would
-        // carry the cursor further out than the half it is allowed.
+        // carry the cursor past the box's edge.
         for step in 0..=CURSOR_BOUNCE_SHAKE_SECS.as_millis() as u64 {
             if let Some(offset) = cursor_shake_offset(Duration::from_millis(step * 10), 8.0) {
                 assert!(offset >= 0.0, "the shake rose above its rest: {offset}");
@@ -3935,6 +3978,7 @@ mod tests {
     /// The zero-line end keeps its room, so a cursor resting on the zero line
     /// is not sliced; the ceiling end gets only the stroke's pad, so a cursor
     /// clamped there hangs half out of the axis top, cut by the box's edge.
+    /// A bounce is the exception: it rests whole against the top edge.
     #[test]
     fn a_cursor_on_the_zero_line_stays_whole_and_one_at_the_ceiling_hangs_half_out() {
         let mut config = OverlayConfig::new();
@@ -4043,7 +4087,7 @@ mod tests {
 
         config.background_grid = true;
         let frame = render_graph(300, 100, &config, &points, now, false).expect("frame");
-        let axis = 300.0 - sample_cursor_reserve_px(&config) as f32;
+        let axis = 300.0 - leading_reserve_px(&config) as f32;
         let (_, bottom) = graph_bounds(&config, 100.0);
         // Read the columns between two rows and the rows between two columns, so
         // a horizontal line cannot stand in for a vertical one.
@@ -4101,7 +4145,7 @@ mod tests {
 
         // The geometry's own numbers rather than the shares repeated here.
         let geometry = compression_of(&config, 300, 100);
-        let axis = 300.0 - sample_cursor_reserve_px(&config) as f32;
+        let axis = 300.0 - leading_reserve_px(&config) as f32;
         let join = axis - geometry.no_zone();
 
         // Inside the no-compression band every gap is the grid's own 30 px.
@@ -4188,7 +4232,7 @@ mod tests {
         let banded = render_graph(300, 100, &config, &points, now, false).expect("banded frame");
 
         let geometry = compression_of(&config, 300, 100);
-        let axis = 300.0 - sample_cursor_reserve_px(&config) as f32;
+        let axis = 300.0 - leading_reserve_px(&config) as f32;
         // Two sample steps of margin skip the band's own left edge, where the
         // segment reaching into the compressed history differs between the two
         // frames and nowhere else does.
@@ -4314,7 +4358,7 @@ mod tests {
 
             // The first column stands at the leading edge, so its midpoint is
             // where the transform says it is.
-            let axis = long_px - sample_cursor_reserve_px(&config) as f32;
+            let axis = long_px - leading_reserve_px(&config) as f32;
             let (top, bottom) = graph_bounds(&config, short_px);
             let from = transform_point((axis, top), long_px, short_px, orientation, mirrored);
             let to = transform_point((axis, bottom), long_px, short_px, orientation, mirrored);
@@ -4353,7 +4397,7 @@ mod tests {
         } else {
             width as f32
         };
-        crate::compression::geometry(config, long_px - sample_cursor_reserve_px(config) as f32)
+        crate::compression::geometry(config, long_px - leading_reserve_px(config) as f32)
             .expect("compression")
     }
 

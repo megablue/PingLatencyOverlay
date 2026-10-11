@@ -6,18 +6,20 @@ Colors rows.
 
 ## What it does
 - One white triangle with a dark rim per host line, anchored to the leading
-  edge of the graph. The base sits flush at the edge; the apex points back
-  along the line, one size behind the edge.
+  edge of the graph. Its base sits just inside the axis's end — the rim's
+  outer edge keeps a 2px gap from it, so the line's newest pixels run on past
+  the cursor's flat side — and the apex points back along the line, one size
+  behind the base.
 - The apex sits on the **drawn** line at that x — interpolated between
   samples (a spike's flank, the resume jog after a timeout) — not on the
   nearest sample's value.
 - It eases (~150 ms) to a new value instead of jumping, and asks for repaints
   while it moves, so it animates in index mode too.
 - When a live timeout reaches the point it is drawn from, it leaves the line
-  for the top of the graph: the triangle's centre rests on the axis top, half
-  of it above that line — its upper half cut by the box's edge — it bounces
-  (a decaying dip into the graph) for ~0.9 s, and it waits there until a value
-  arrives. Each further timeout in the run restarts the shake, so a host that
+  for the top of the graph: the whole triangle rests against the box's top
+  edge, its topmost pixel flush with it, it bounces (a decaying dip into the
+  graph) for ~0.9 s, and it waits there until a value arrives. Each further
+  timeout in the run restarts the shake, so a host that
   keeps failing keeps shaking rather than shaking once and parking. A *stale*
   timeout — a host that stopped probing — holds the last drawn value instead,
   and during the startup prefill it rides the prefill head.
@@ -34,9 +36,10 @@ Colors rows.
   `CursorAnimation { y, at, active }` + `advance(now, target, shake)` /
   `is_active`, `Series.cursor: Option<&'a mut CursorAnimation>`, the cursor
   pass in `render_graph_into_internal`, `SAMPLE_CURSOR_FILL` /
-  `SAMPLE_CURSOR_RIM` / `SAMPLE_CURSOR_RIM_WIDTH` / `SAMPLE_CURSOR_EDGE_MARGIN`,
+  `SAMPLE_CURSOR_RIM` / `SAMPLE_CURSOR_RIM_WIDTH` / `SAMPLE_CURSOR_EDGE_GAP` /
+  `SAMPLE_CURSOR_EDGE_MARGIN`,
   `CURSOR_EASE_SECS` / `CURSOR_EASE_EPSILON`, `sample_cursor_size` /
-  `sample_cursor_half_height` / `sample_cursor_reserve_px` /
+  `sample_cursor_half_height` / `leading_reserve_px` /
   `sample_cursor_room_px`; the bounce's `cursor_shake_offset`,
   `CURSOR_BOUNCE_SHAKE_SECS` / `CURSOR_BOUNCE_SHAKE_HZ` /
   `CURSOR_BOUNCE_SHAKE_FRACTION`; the run's `timeout_run_anchor` and
@@ -56,7 +59,7 @@ Colors rows.
 
 - Graph-space geometry, all three vertices through `transform_point`, so it
   rotates and mirrors with the line: apex `(base_x - size, y)`, base corners
-  `(base_x, y ± size * 0.7)`, where `base_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN`.
+  `(base_x, y ± size * 0.7)`, where `base_x = axis_long - SAMPLE_CURSOR_EDGE_MARGIN`.
 - `line_y_at_x` walks the series with `draw_series`' own state machine —
   connectors, resume stubs, gaps — so the apex cannot drift from the drawn
   line; the last covering segment wins and the fallback is the newest drawn
@@ -113,11 +116,12 @@ Colors rows.
   half-height — a bigger triangle bounces further — at 0.6 of it, a dip nobody
   misses that does not sink a tall cursor into the zero line on an ordinary
   graph.
-- The rest position is the axis top itself, in graph coordinates, so the
-  triangle's centre sits on the ceiling line: half in the graph, half out, and
-  the top half is cut by the box's edge. There is no room above the axis for it
-  — the box is the graph plus the stroke's pad — so nothing, bounce included,
-  can push the cursor further out than that half.
+- The rest position is the box's top edge, in graph coordinates: the whole
+  triangle is drawn below it, its topmost pixel — the rim around the base's top
+  corner — flush with the edge. There is no room above the axis for a rest on
+  the ceiling line, so the bounce takes the edge instead: a *value* clamped at
+  the ceiling still centres on that line and hangs half out, cut by the edge,
+  while the bounce alone parks whole.
 - The shake rides on top of the ease and sets `active`, which is why
   `cursor_due` and `cursor_repaint_interval` needed no new term: the ease
   settles in ~150 ms while the shake runs for 600 ms, and both gates already
@@ -126,13 +130,17 @@ Colors rows.
 ### The reserves, and the draw order
 
 - Two reserves, read by both `overlay::layout_in_rect` and the renderer:
-  `sample_cursor_reserve_px` is a constant 2 px gutter at the leading edge
-  (edge margin + half the rim), and `sample_cursor_room_px` (`ceil(size * 0.7
-  + rim / 2 + 1)`) pads the zero-line end of the latency axis, where it shares
-  its band with the glow's reserve: `layout_in_rect` keeps `max(glow reserve,
-  cursor room)` there rather than adding both, so a cursor on 0 ms stays whole.
-  The ceiling end gets only `stroke_pad`; a cursor clamped there — or a bounce
-  resting there — hangs half out of the axis top, cut by the box's edge.
+  `leading_reserve_px` is a constant band past the axis's end — `stroke_pad` of
+  the line's width, the same pad the top and bottom edges keep, 2 px for the
+  default stroke — so the newest tip and the grid's last column are never
+  sliced at the box's edge, and the cursor's own gap lives inside the graph;
+  `sample_cursor_room_px` (`ceil(size * 0.7 + rim / 2 + 1)`) pads the
+  zero-line end of the latency axis, where it shares its band with the glow's
+  reserve: `layout_in_rect` keeps `max(glow reserve, cursor room)` there rather
+  than adding both, so a cursor on 0 ms stays whole. The ceiling end gets only
+  `stroke_pad`; a value clamped there hangs half out of the axis top, cut by
+  the box's edge, and a bounce parks whole against that edge — neither needs
+  room.
 - Draw order: after the cores, before the border, per host. At the minimum
   size 4 the triangle is mostly rim — cosmetic, not a bug.
 
@@ -148,7 +156,7 @@ The bounce has no key of its own: it is part of the cursor and follows
 `sampleCursor`.
 
 ## Tests that pin it
-`the_sample_cursor_sits_flush_at_the_leading_edge`,
+`the_sample_cursor_keeps_its_gap_at_the_leading_edge`,
 `the_sample_cursor_apex_moves_with_its_size`,
 `the_cursor_bounces_off_the_top_when_the_timeout_reaches_it`,
 `the_bounced_cursor_shakes_then_settles_at_the_top`,
@@ -160,7 +168,7 @@ The bounce has no key of its own: it is part of the cursor and follows
 `a_cursor_on_the_zero_line_stays_whole_and_one_at_the_ceiling_hangs_half_out`,
 `the_cursor_animation_eases_toward_its_target`,
 `the_cursor_animation_keeps_its_clock_while_the_shake_lasts`,
-`the_sample_cursor_reserves_the_gutter_and_the_room_below_the_zero_line`,
+`the_leading_stroke_pad_and_the_cursor_room_size_the_window`,
 `the_timeout_blink_pulses_dim_then_bright`,
 `the_timeout_blink_starts_before_smooth_rendering_reveals_the_failure`,
 `a_value_sample_ends_the_timeout_blink`,
