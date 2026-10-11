@@ -273,30 +273,20 @@ const CURSOR_EASE_EPSILON: f32 = 0.25;
 const CURSOR_TIMEOUT_BLINK_PERIOD: Duration = Duration::from_secs(2);
 /// The dimmest the blink's fill gets, as a fraction of its colour.
 const CURSOR_TIMEOUT_BLINK_FLOOR: f32 = 0.35;
-/// Where a bounce parks the cursor, in graph coordinates: the canvas edge, so
-/// the triangle hangs half out of the overlay instead of resting whole on the
-/// ceiling line the way a clamped value does.
-///
-/// Graph coordinates rather than screen ones, so the bounce runs off the
-/// graph's own high-latency end and rotates and mirrors with everything else
-/// — in a mirrored overlay that end is the bottom of the window.
-const CURSOR_BOUNCE_Y: f32 = 0.0;
 /// How long a bounce shakes for, measured from the newest failure the drawn
 /// head has reached. Long enough to catch at a glance, short enough to still
 /// read as one bounce rather than a permanent wobble; a run that keeps failing
 /// restarts it with each failure, so the cursor keeps shaking.
 const CURSOR_BOUNCE_SHAKE_SECS: Duration = Duration::from_millis(900);
-/// The shake's frequency, in cycles per second. Deliberately far under a
-/// 30 fps frame clock: at 12 Hz the sampled frames land on unrelated phases and
-/// the oscillation reads as a twitch — or as nothing at all — rather than a
-/// shake.
+/// The shake's frequency, in cycles per second: one full dip into the graph
+/// and back per cycle. Deliberately far under a 30 fps frame clock: at 12 Hz
+/// the sampled frames land on unrelated phases and the oscillation reads as a
+/// twitch — or as nothing at all — rather than a shake.
 const CURSOR_BOUNCE_SHAKE_HZ: f32 = 4.5;
 /// The shake's amplitude, as a fraction of the cursor's half-height, so a
-/// bigger triangle shakes further instead of twitching in place. Three fifths
-/// swings it by one and a fifth times its own height, and still leaves white on
-/// the canvas at the far end of the swing: at 1.0 only the dark rim is left up
-/// there, which against the background reads as the cursor blinking out rather
-/// than bouncing.
+/// bigger triangle dips further instead of twitching in place. Three fifths
+/// of a half-height is a dip nobody misses, and small enough that it does not
+/// sink a tall cursor into the zero line on an ordinary graph.
 const CURSOR_BOUNCE_SHAKE_FRACTION: f32 = 0.6;
 /// The height of the Stub timeout indicator, in pixels: a short line resting
 /// on the canvas bottom instead of the full-height Stick.
@@ -330,12 +320,14 @@ pub fn sample_cursor_reserve_px(config: &OverlayConfig) -> u32 {
     }
 }
 
-/// The room the cursor needs at each end of the latency axis, in physical
-/// pixels: half the triangle's height plus its rim.
+/// The room the cursor needs below the zero line, in physical pixels: half
+/// the triangle's height plus its rim.
 ///
-/// The cursor is centred on the line, so a sample resting on the zero line or
-/// clamped to the ceiling would otherwise have half a triangle cut off. Both
-/// ends get the room, because either is one spike away.
+/// The cursor is centred on the line, so a sample resting on the zero line
+/// would otherwise have half a triangle cut off. Only that end gets the room,
+/// because there it shares the band with the glow's cast. The ceiling end
+/// keeps just the stroke's pad: a cursor clamped there hangs half out of the
+/// axis top, cut by the box's edge — the same rest a bounce parks at.
 pub fn sample_cursor_room_px(config: &OverlayConfig) -> u32 {
     if config.sample_cursor {
         (sample_cursor_half_height(config) + SAMPLE_CURSOR_RIM_WIDTH / 2.0 + 1.0).ceil() as u32
@@ -346,13 +338,16 @@ pub fn sample_cursor_room_px(config: &OverlayConfig) -> u32 {
 
 /// The offset a bounce's shake adds to the cursor this frame, in canvas
 /// pixels, or `None` once the shake has run its course. `amplitude` is how far
-/// the first swing throws it; the envelope fades that to nothing.
+/// the first dip throws it; the envelope fades that to nothing.
 ///
-/// A decaying sine rather than a random jitter: the phase is a function of the
-/// elapsed time alone, so the same instant draws the same frame whatever the
-/// frame rate, and a test can name the frame it expects. Both ends are zero —
-/// the sine starts there and the fade reaches it at the window's end — so
-/// starting or ending a shake cannot step the cursor.
+/// A decaying one-sided wave — zero, down to the amplitude, back to zero —
+/// rather than a sine around the rest: the rest is the axis top, with the
+/// triangle already half out of the graph, so an upswing would carry the
+/// cursor further out than half and beyond the box's edge. The phase is a
+/// function of the elapsed time alone, so the same instant draws the same
+/// frame whatever the frame rate, and a test can name the frame it expects.
+/// Both ends are zero — the wave starts there and the fade reaches it at the
+/// window's end — so starting or ending a shake cannot step the cursor.
 fn cursor_shake_offset(elapsed: Duration, amplitude: f32) -> Option<f32> {
     let t = elapsed.as_secs_f32();
     let window = CURSOR_BOUNCE_SHAKE_SECS.as_secs_f32();
@@ -360,7 +355,8 @@ fn cursor_shake_offset(elapsed: Duration, amplitude: f32) -> Option<f32> {
         return None;
     }
     let fade = 1.0 - t / window;
-    Some(amplitude * fade * (t * CURSOR_BOUNCE_SHAKE_HZ * std::f32::consts::TAU).sin())
+    let wave = 0.5 - 0.5 * (t * CURSOR_BOUNCE_SHAKE_HZ * std::f32::consts::TAU).cos();
+    Some(amplitude * fade * wave)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -452,14 +448,15 @@ fn render_graph_into_internal(
     let pad = stroke_pad(stroke_width);
     // The cast falls past the zero line, so the window reserves a band for it:
     // the axis keeps its configured height and the glow gets the room below.
-    // The cursor needs room at both ends of the latency axis as well, or a
-    // sample resting on the zero line or clamped to the ceiling is cut in half
-    // — and below the zero line the glow's band and the cursor's room are the
-    // same space, so that end keeps the larger of the two, not their sum.
+    // The cursor needs the same room on the zero line, or a sample resting
+    // there is cut in half — and the glow's band and the cursor's room are the
+    // same space, so that end keeps the larger of the two, not their sum. The
+    // ceiling end gets only the stroke's pad: a cursor clamped there hangs
+    // half out of the axis top, cut by the box's edge, by design.
     let reserve = line_glow_reserve_px(config) as f32;
     let cursor_room = sample_cursor_room_px(config) as f32;
     let bottom_room = reserve.max(cursor_room);
-    let top = pad + cursor_room;
+    let top = pad;
     let bottom = short_px - pad - bottom_room;
     let map_y = |value: u32| {
         let t = (value as f32).min(y_max) / y_max;
@@ -706,10 +703,10 @@ fn render_graph_into_internal(
     // against the leading edge and the apex reaches `size` pixels back along
     // the line, so a larger cursor points at an earlier point. The startup
     // prefill's head counts as drawn. When a live timeout run reaches the drawn
-    // head the cursor leaves the line for the top of the canvas, where it hangs
-    // half out of the overlay, shakes, and waits for a value. Drawn over the
-    // cores and under the border, and independent per host, so no two series'
-    // cursors can affect one another.
+    // head the cursor leaves the line for the top of the latency axis, where it
+    // hangs half out of the graph's edge, bounces, and waits for a value. Drawn
+    // over the cores and under the border, and independent per host, so no two
+    // series' cursors can affect one another.
     if config.sample_cursor {
         let size = sample_cursor_size(config) as f32;
         let target_x = long_px - SAMPLE_CURSOR_EDGE_MARGIN - size;
@@ -719,8 +716,8 @@ fn render_graph_into_internal(
         // reaches it instead of when the probe failed; in index mode the two
         // are the same instant.
         let head = reveal.unwrap_or(now);
-        // The cursor's own height sets how far the shake throws it, so a bigger
-        // triangle wobbles further rather than twitching in place.
+        // The cursor's own height sets how far the shake dips it, so a bigger
+        // triangle bounces further rather than twitching in place.
         let shake_amplitude = sample_cursor_half_height(config) * CURSOR_BOUNCE_SHAKE_FRACTION;
         for entry in &mut *series {
             let samples = visible(
@@ -739,16 +736,18 @@ fn render_graph_into_internal(
                 continue;
             };
             // A live run at the drawn head sends the cursor to the top of the
-            // canvas. The shake's clock is how long ago the *newest* failure
-            // was recorded, so every timeout in a run restarts it: a run that
-            // keeps failing keeps shaking instead of shaking once at its start
-            // and then parking while failures keep arriving. The clock is zero
-            // on the frame a failure reaches the head, and the same number in
-            // index and smooth mode.
+            // latency axis — the axis top itself, so the triangle rests half in
+            // and half out of the graph — and the one-sided shake dips it into
+            // the graph and back. The shake's clock is how long ago the
+            // *newest* failure was recorded, so every timeout in a run restarts
+            // it: a run that keeps failing keeps shaking instead of shaking
+            // once at its start and then parking while failures keep arriving.
+            // The clock is zero on the frame a failure reaches the head, and
+            // the same number in index and smooth mode.
             let (target, shake) = timeout_run_latest(drawn, entry.max_sample_gap, head)
                 .map(|latest| {
                     (
-                        CURSOR_BOUNCE_Y,
+                        top,
                         cursor_shake_offset(
                             head.saturating_duration_since(latest),
                             shake_amplitude,
@@ -3015,7 +3014,7 @@ mod tests {
             };
             let pad = 2.0;
             let room = sample_cursor_room_px(&config) as f32;
-            let top = pad + room;
+            let top = pad;
             let bottom = short_px - pad - (line_glow_reserve_px(&config) as f32).max(room);
             let line_y = bottom - 0.5 * (bottom - top);
             let center = transform_point(
@@ -3462,7 +3461,7 @@ mod tests {
             };
             let pad = stroke_pad(config.line_stroke_px);
             let room = sample_cursor_room_px(&config) as f32;
-            let top = pad + room;
+            let top = pad;
             let bottom = short_px - pad - (line_glow_reserve_px(&config) as f32).max(room);
             let line_y = bottom - 0.2 * (bottom - top);
             let size = sample_cursor_size(&config) as f32;
@@ -3586,7 +3585,8 @@ mod tests {
     }
 
     /// A live timeout at the drawn head flings the cursor off the top of the
-    /// canvas: it is drawn half out of the window instead of holding the last
+    /// graph: its centre rests on the axis top, half in and half out, with the
+    /// top of the triangle cut by the box's edge instead of holding the last
     /// value the line drew.
     #[test]
     fn the_cursor_bounces_off_the_top_when_the_timeout_reaches_it() {
@@ -3607,21 +3607,29 @@ mod tests {
             valued_top > 10,
             "a valued cursor must sit on its line, not at the edge: {valued_top}"
         );
+        // The rest is the axis top: the centre sits on it, so the white ends
+        // about half a triangle below the box's top edge, and the rows above
+        // the edge are cut.
+        let half = sample_cursor_half_height(&config).round() as usize;
         assert!(
             bounced_top <= 4,
-            "the bounce stopped short of the canvas edge: {bounced_top}"
+            "the bounced cursor was not cut by the box's edge: {bounced_top}"
         );
-        // The triangle is centred on the edge, so about half of it is drawn.
-        let whole = valued_bottom - valued_top + 1;
-        let clipped = bounced_bottom - bounced_top + 1;
         assert!(
-            clipped * 2 <= whole + 4,
-            "the bounced cursor was not clipped: {clipped} rows against {whole}"
+            bounced_bottom <= half + 4,
+            "the bounce stopped past the axis top: {bounced_bottom} against half {half}"
+        );
+        let whole = valued_bottom - valued_top + 1;
+        let visible = bounced_bottom - bounced_top + 1;
+        assert!(
+            visible >= whole / 2 && visible < whole,
+            "the bounced cursor must hang about half out: {visible} rows against {whole}"
         );
     }
 
-    /// The bounce shakes before it settles: the cursor moves over the shake's
-    /// window, then holds still at the top for as long as the run lasts.
+    /// The bounce shakes before it settles: the cursor dips into the graph
+    /// over the shake's window — never above its rest, which is already half
+    /// out of the axis top — then holds still for as long as the run lasts.
     #[test]
     fn the_bounced_cursor_shakes_then_settles_at_the_top() {
         let mut config = OverlayConfig::new();
@@ -3650,15 +3658,30 @@ mod tests {
                 render_graph(300, 100, &config, &points, now + offset, false).expect("pixmap");
             cursor_rows(&pixels).1
         };
-        // The first crest of the 4.5 Hz shake is at 56 ms, its first trough at
-        // 167 ms; the envelope has barely faded by either.
-        let start = bottom_at(Duration::ZERO);
-        let crest = bottom_at(Duration::from_millis(56));
-        let trough = bottom_at(Duration::from_millis(167));
+        // The one-sided wave dips to its crest a quarter cycle in — 111 ms at
+        // 4.5 Hz — and is back at rest after a full cycle at 222 ms; the
+        // envelope has barely faded by either.
+        let rest = bottom_at(Duration::ZERO);
+        let crest = bottom_at(Duration::from_millis(111));
+        let back = bottom_at(Duration::from_millis(222));
         assert!(
-            crest >= start && trough <= start && crest - trough >= 3,
-            "the cursor did not shake around its parked position: {start}, {crest}, {trough}"
+            crest >= rest + 3,
+            "the shake did not dip into the graph: {rest} then {crest}"
         );
+        assert!(
+            back <= rest + 1,
+            "the shake did not return to its rest: {rest} then {back}"
+        );
+        // The bound: the one-sided wave only ever moves the cursor further
+        // into the graph, so no phase draws it above its half-out rest.
+        for step in 0..=30u64 {
+            let phase = bottom_at(Duration::from_millis(step * 30));
+            assert!(
+                phase + 1 >= rest,
+                "the shake rose above its rest at {} ms: {phase} against {rest}",
+                step * 30
+            );
+        }
         let settled = bottom_at(Duration::from_millis(950));
         let later = bottom_at(Duration::from_millis(1_300));
         assert_eq!(
@@ -3701,13 +3724,14 @@ mod tests {
                 is_prefill: false,
             },
         ];
-        // A frame just after the newest failure is near the first crest.
+        // A frame at the first crest of the one-sided shake — a quarter cycle
+        // in, 111 ms at 4.5 Hz — is well into its dip.
         let pixels = render_graph(
             300,
             100,
             &config,
             &points,
-            now + Duration::from_millis(56),
+            now + Duration::from_millis(111),
             false,
         )
         .expect("pixmap");
@@ -3731,7 +3755,7 @@ mod tests {
             100,
             &config,
             &single,
-            now + Duration::from_millis(56),
+            now + Duration::from_millis(111),
             false,
         )
         .expect("pixmap");
@@ -3845,8 +3869,10 @@ mod tests {
         );
     }
 
-    /// The shake's ends are at rest: it cannot step the cursor when it starts
-    /// or when it stops, and it is gone once its window has passed.
+    /// The shake's ends are at rest and its wave is one-sided: it cannot step
+    /// the cursor when it starts or when it stops, it is gone once its window
+    /// has passed, and every phase pushes the cursor further into the graph —
+    /// never above the rest, which is already half out of the axis top.
     #[test]
     fn the_shake_starts_and_ends_at_rest() {
         assert_eq!(
@@ -3866,11 +3892,18 @@ mod tests {
         // A quarter of a cycle in is the first crest, and it must be thrown as
         // far as the amplitude asks: a shake that ignores its amplitude is a
         // twitch, which is what this whole rule exists to avoid.
-        let crest = cursor_shake_offset(Duration::from_millis(56), 8.0).expect("crest");
+        let crest = cursor_shake_offset(Duration::from_millis(111), 8.0).expect("crest");
         assert!(
-            crest > 7.0,
+            crest > 6.0,
             "the crest must reach the amplitude it was given: {crest}"
         );
+        // One-sided: no phase may rise above the rest, or the bounce would
+        // carry the cursor further out than the half it is allowed.
+        for step in 0..=CURSOR_BOUNCE_SHAKE_SECS.as_millis() as u64 {
+            if let Some(offset) = cursor_shake_offset(Duration::from_millis(step * 10), 8.0) {
+                assert!(offset >= 0.0, "the shake rose above its rest: {offset}");
+            }
+        }
     }
 
     /// The shake keeps the cursor's clock running after the ease has settled,
@@ -3899,10 +3932,11 @@ mod tests {
         );
     }
 
-    /// A cursor on the zero line or clamped at the ceiling is not sliced: the
-    /// room reserved at both ends of the axis belongs to the triangle.
+    /// The zero-line end keeps its room, so a cursor resting on the zero line
+    /// is not sliced; the ceiling end gets only the stroke's pad, so a cursor
+    /// clamped there hangs half out of the axis top, cut by the box's edge.
     #[test]
-    fn a_cursor_on_the_zero_line_or_the_ceiling_stays_whole() {
+    fn a_cursor_on_the_zero_line_stays_whole_and_one_at_the_ceiling_hangs_half_out() {
         let mut config = OverlayConfig::new();
         config.line_glow = false;
         config.first_target_mut().line_color = "#00ff00".to_string();
@@ -3922,21 +3956,43 @@ mod tests {
         let mid = render_graph(300, 100, &config, &samples(&[Some(500); 20]), now, false)
             .expect("pixmap");
         let whole_span = span_of(&mid);
-        for (value, edge_row) in [(0u32, 99usize), (1_000, 0usize)] {
-            let pixels = render_graph(300, 100, &config, &samples(&[Some(value); 20]), now, false)
-                .expect("pixmap");
-            let white = positions_of_color(&pixels, 300, [255, 255, 255]);
-            let span = span_of(&pixels);
-            assert!(
-                span + 1 >= whole_span,
-                "the triangle was sliced at value {value}: it spans {span} rows \
-                 against {whole_span} at mid-axis"
-            );
-            assert!(
-                !white.iter().any(|(row, _)| *row == edge_row),
-                "the cursor reached the pixmap edge at value {value}"
-            );
-        }
+
+        let zero =
+            render_graph(300, 100, &config, &samples(&[Some(0); 20]), now, false).expect("pixmap");
+        let zero_span = span_of(&zero);
+        assert!(
+            zero_span + 1 >= whole_span,
+            "the triangle was sliced on the zero line: it spans {zero_span} rows \
+             against {whole_span} at mid-axis"
+        );
+        let white = positions_of_color(&zero, 300, [255, 255, 255]);
+        assert!(
+            !white.iter().any(|(row, _)| *row == 99),
+            "the zero-line cursor reached the pixmap edge"
+        );
+
+        // Clamped at the ceiling the cursor rests on the axis top: its centre
+        // is on that line, so its top rows are cut by the box's edge and about
+        // half of it is drawn.
+        let ceiling = render_graph(300, 100, &config, &samples(&[Some(1_000); 20]), now, false)
+            .expect("pixmap");
+        let white = positions_of_color(&ceiling, 300, [255, 255, 255]);
+        let top_row = white.iter().map(|(row, _)| *row).min().expect("rows");
+        let bottom_row = white.iter().map(|(row, _)| *row).max().expect("rows");
+        assert_eq!(
+            top_row, 0,
+            "the ceiling cursor must be cut by the box's edge"
+        );
+        let half = sample_cursor_half_height(&config).round() as usize;
+        assert!(
+            bottom_row <= half + 4,
+            "the ceiling cursor must rest on the axis top: {bottom_row} against half {half}"
+        );
+        let ceiling_span = bottom_row - top_row + 1;
+        assert!(
+            ceiling_span < whole_span,
+            "the ceiling cursor was not cut: {ceiling_span} rows against {whole_span}"
+        );
     }
 
     /// The grid's cells are 30 px wide and 20 px tall where the axis is
@@ -4307,7 +4363,7 @@ mod tests {
         let pad = stroke_pad(config.line_stroke_px);
         let reserve = line_glow_reserve_px(config) as f32;
         let cursor_room = sample_cursor_room_px(config) as f32;
-        (pad + cursor_room, short_px - pad - reserve.max(cursor_room))
+        (pad, short_px - pad - reserve.max(cursor_room))
     }
 
     /// The y the graph draws a latency at, from the same reserves the renderer

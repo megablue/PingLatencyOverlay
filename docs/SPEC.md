@@ -187,8 +187,9 @@
     timeout — and it eases to a new value instead of jumping. When a live
     timeout reaches the point it is drawn from — the break arriving on the same
     three-second hold the line itself is drawn with — the cursor leaves the line
-    and is flung to the top of the latency axis, where it hangs half out of the
-    overlay's edge and shakes for about a second before settling there, with
+    and is flung to the top of the latency axis, where it rests half out of the
+    graph's top edge, its upper half cut by the overlay's edge, and bounces —
+    dipping into the graph — for about a second before settling there, with
     each further timeout in the run restarting the shake so a host that keeps
     failing keeps shaking; it eases back onto the line when a value arrives. A
     host that has stopped being probed is not a live timeout, and the cursor
@@ -202,9 +203,11 @@
     rather than waiting for smooth rendering's held frames, and returning to
     white as soon as a value arrives. The colour is per overlay
     (`cursorTimeoutBlinkColor`, default `#ef4444`). The overlay box reserves a
-    constant gutter at the leading edge for the base and room at both ends of
-    the Y axis, so the axis keeps its length and height and a cursor on the zero
-    line or clamped at the ceiling stays whole.
+    constant gutter at the leading edge for the base and room below the zero
+    line for the cursor and the glow, so the axis keeps its length and height
+    and a cursor on the zero line stays whole; at the ceiling there is no room —
+    a cursor clamped there hangs half out of the axis top, cut by the box's
+    edge.
 - **Display Mode** is one of three exclusive placements, chosen in a **Display
   Mode** section under Position and defaulting to **Global Overlay**:
   - **Global Overlay** places the overlay on a display. Position is one of 9

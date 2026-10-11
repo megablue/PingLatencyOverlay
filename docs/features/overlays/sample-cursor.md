@@ -14,12 +14,13 @@ Colors rows.
 - It eases (~150 ms) to a new value instead of jumping, and asks for repaints
   while it moves, so it animates in index mode too.
 - When a live timeout reaches the point it is drawn from, it leaves the line
-  for the top of the graph: half the triangle hangs out of the overlay's edge,
-  it shakes for ~0.9 s, and it waits there until a value arrives. Each further
-  timeout in the run restarts the shake, so a host that keeps failing keeps
-  shaking rather than shaking once and parking. A *stale* timeout — a host that
-  stopped probing — holds the last drawn value instead, and during the startup
-  prefill it rides the prefill head.
+  for the top of the graph: the triangle's centre rests on the axis top, half
+  of it above that line — its upper half cut by the box's edge — it bounces
+  (a decaying dip into the graph) for ~0.9 s, and it waits there until a value
+  arrives. Each further timeout in the run restarts the shake, so a host that
+  keeps failing keeps shaking rather than shaking once and parking. A *stale*
+  timeout — a host that stopped probing — holds the last drawn value instead,
+  and during the startup prefill it rides the prefill head.
 - Default on, including a profile written before the setting existed (absent
   key = on), unlike the underglow.
 - With the timeout blink on, the cursor pulses in its own colour while the
@@ -36,8 +37,8 @@ Colors rows.
   `SAMPLE_CURSOR_RIM` / `SAMPLE_CURSOR_RIM_WIDTH` / `SAMPLE_CURSOR_EDGE_MARGIN`,
   `CURSOR_EASE_SECS` / `CURSOR_EASE_EPSILON`, `sample_cursor_size` /
   `sample_cursor_half_height` / `sample_cursor_reserve_px` /
-  `sample_cursor_room_px`; the bounce's `cursor_shake_offset`, `CURSOR_BOUNCE_Y`
-  / `CURSOR_BOUNCE_SHAKE_SECS` / `CURSOR_BOUNCE_SHAKE_HZ` /
+  `sample_cursor_room_px`; the bounce's `cursor_shake_offset`,
+  `CURSOR_BOUNCE_SHAKE_SECS` / `CURSOR_BOUNCE_SHAKE_HZ` /
   `CURSOR_BOUNCE_SHAKE_FRACTION`; the run's `timeout_run_anchor` and
   `timeout_run_latest`,
   `CURSOR_TIMEOUT_BLINK_PERIOD` / `CURSOR_TIMEOUT_BLINK_FLOOR`.
@@ -98,23 +99,25 @@ Colors rows.
   that keeps failing keeps shaking. It is the same number in index and smooth
   mode. The blink keeps `timeout_run_anchor`'s oldest timestamp, so its pulse
   does not reset mid-run. `cursor_shake_offset` is a decaying
-  sine — `0.6 · half-height · (1 − t / 0.9 s) · sin(2π · 4.5 Hz · t)` — zero at
-  both ends, so starting or stopping it cannot step the cursor. A run already in
+  one-sided wave — `0.6 · half-height · (1 − t / 0.9 s) · (1 − cos(2π · 4.5 Hz
+  · t)) / 2` — zero at both ends, so starting or stopping it cannot step the
+  cursor, and never negative, so the cursor can only dip into the graph and
+  never rise above its rest. A run already in
   progress when the cursor appears (a hidden overlay shown mid-run, the cursor
   switched on) shakes only for what is left of the newest failure's window;
   once that has passed it is drawn parked.
 - **The shake's numbers are unexciting on purpose.** Shipped first at 12 Hz and
   2 px, it was invisible in the running app: a 30 fps overlay samples a 12 Hz
-  sine on unrelated phases, so it reads as a twitch, and 2 px against a 12 px
+  wave on unrelated phases, so it reads as a twitch, and 2 px against a 12 px
   triangle is a wobble nobody sees. The amplitude now follows the cursor's
-  half-height — a bigger triangle shakes further — at 0.6 of it, which keeps a
-  sliver of white on the canvas at the far end of the swing; at the full
-  half-height only the dark rim is left up there, which against the background
-  reads as the cursor blinking out rather than bouncing.
-- The rest position is `CURSOR_BOUNCE_Y = 0`, the canvas edge in graph
-  coordinates, so half the triangle is clipped by the window. It is
-  deliberately outside the room `sample_cursor_room_px` keeps at the ceiling:
-  that room is for a *value* clamped at the ceiling, and the bounce is not one.
+  half-height — a bigger triangle bounces further — at 0.6 of it, a dip nobody
+  misses that does not sink a tall cursor into the zero line on an ordinary
+  graph.
+- The rest position is the axis top itself, in graph coordinates, so the
+  triangle's centre sits on the ceiling line: half in the graph, half out, and
+  the top half is cut by the box's edge. There is no room above the axis for it
+  — the box is the graph plus the stroke's pad — so nothing, bounce included,
+  can push the cursor further out than that half.
 - The shake rides on top of the ease and sets `active`, which is why
   `cursor_due` and `cursor_repaint_interval` needed no new term: the ease
   settles in ~150 ms while the shake runs for 600 ms, and both gates already
@@ -125,10 +128,11 @@ Colors rows.
 - Two reserves, read by both `overlay::layout_in_rect` and the renderer:
   `sample_cursor_reserve_px` is a constant 2 px gutter at the leading edge
   (edge margin + half the rim), and `sample_cursor_room_px` (`ceil(size * 0.7
-  + rim / 2 + 1)`) pads the ceiling end of the latency axis. The zero-line
-  end shares its band with the glow's reserve, so `layout_in_rect` keeps
-  `max(glow reserve, cursor room)` there rather than adding both; a cursor on
-  0 ms or clamped at the ceiling stays whole either way.
+  + rim / 2 + 1)`) pads the zero-line end of the latency axis, where it shares
+  its band with the glow's reserve: `layout_in_rect` keeps `max(glow reserve,
+  cursor room)` there rather than adding both, so a cursor on 0 ms stays whole.
+  The ceiling end gets only `stroke_pad`; a cursor clamped there — or a bounce
+  resting there — hangs half out of the axis top, cut by the box's edge.
 - Draw order: after the cores, before the border, per host. At the minimum
   size 4 the triangle is mostly rim — cosmetic, not a bug.
 
@@ -153,10 +157,10 @@ The bounce has no key of its own: it is part of the cursor and follows
 `the_bounce_waits_for_the_reveal_hold_in_smooth_mode`,
 `a_stale_timeout_does_not_pin_the_cursor_to_the_top`,
 `the_shake_starts_and_ends_at_rest`,
-`a_cursor_on_the_zero_line_or_the_ceiling_stays_whole`,
+`a_cursor_on_the_zero_line_stays_whole_and_one_at_the_ceiling_hangs_half_out`,
 `the_cursor_animation_eases_toward_its_target`,
 `the_cursor_animation_keeps_its_clock_while_the_shake_lasts`,
-`the_sample_cursor_reserves_room_on_both_axes`,
+`the_sample_cursor_reserves_the_gutter_and_the_room_below_the_zero_line`,
 `the_timeout_blink_pulses_dim_then_bright`,
 `the_timeout_blink_starts_before_smooth_rendering_reveals_the_failure`,
 `a_value_sample_ends_the_timeout_blink`,

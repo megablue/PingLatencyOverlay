@@ -1861,11 +1861,12 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
     // same amount. The reserve is not scaled by DPI because the glow radius it
     // mirrors is a physical pixel size.
     let reserve = line_glow_reserve_px(config) as i32;
-    // The cursor owns a band past the newest sample on the long side and half
-    // a triangle's height at each end of the axis. The window grows for both
-    // and the renderer insets by the same amounts, so the axis keeps its
-    // configured size and a cursor on the zero line or the ceiling stays
-    // whole. Physical pixels, like the glow radius.
+    // The cursor owns a band past the newest sample on the long side and room
+    // below the zero line for half a triangle's height. The window grows for
+    // both and the renderer insets by the same amounts, so the axis keeps its
+    // configured size and a cursor on the zero line stays whole. The ceiling
+    // end gets no room: a cursor clamped there hangs half out of the axis top,
+    // cut by the box's edge, by design. Physical pixels, like the glow radius.
     let cursor_reserve = sample_cursor_reserve_px(config) as i32;
     let cursor_room = sample_cursor_room_px(config) as i32;
     // Below the zero line the cast's reserve and the cursor's room occupy the
@@ -1874,8 +1875,7 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
     let (long_px, short_px) = if matches!(config.orientation, 90 | 270) {
         (
             (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
-                + bottom_room
-                + cursor_room,
+                + bottom_room,
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
                 + cursor_reserve,
         )
@@ -1884,8 +1884,7 @@ fn layout_in_rect(config: &OverlayConfig, work: Rect, dpi_scale: f32) -> ((i32, 
             (long_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
                 + cursor_reserve,
             (short_logical * dpi_scale as f64).clamp(1.0, MAX_RENDER_DIMENSION) as i32
-                + bottom_room
-                + cursor_room,
+                + bottom_room,
         )
     };
     let size = (long_px.max(1), short_px.max(1));
@@ -2185,9 +2184,10 @@ mod tests {
     }
 
     /// Below the zero line the cast's reserve and the cursor's room are the
-    /// same band: the window keeps the larger of the two and adds only the
-    /// ceiling end's room on top. A max-size glow with the cursor on is
-    /// `graphHeightPx + max(reserve, room) + room`, not the sum of all three.
+    /// same band: the window keeps the larger of the two. The ceiling end gets
+    /// no room at all — a cursor clamped there hangs half out of the axis top
+    /// — so a max-size glow with the cursor on is `graphHeightPx +
+    /// max(reserve, room)`, not the sum of anything.
     #[test]
     fn the_glow_and_cursor_share_the_room_below_the_zero_line() {
         let work = Rect {
@@ -2204,7 +2204,7 @@ mod tests {
         assert_eq!(line_glow_reserve_px(&overlay), 51);
         assert_eq!(sample_cursor_room_px(&overlay), 9);
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120 + 2, 60 + 51 + 9));
+        assert_eq!(size, (120 + 2, 60 + 51));
 
         // A short reach is swallowed by the cursor's room: the window is the
         // same as with the glow off.
@@ -2212,17 +2212,18 @@ mod tests {
         overlay.line_glow_intensity = 10;
         assert_eq!(line_glow_reserve_px(&overlay), 2);
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120 + 2, 60 + 9 + 9));
+        assert_eq!(size, (120 + 2, 60 + 9));
     }
 
     /// The cursor reserves a constant 2px gutter on the leading side of the
     /// long axis — the base sits flush at the edge, and the apex grows back
-    /// along the line as the cursor grows — plus room at both ends of the axis
-    /// so the triangle is never sliced and the axis keeps the size
-    /// `windowSeconds`/`graphHeightPx` name. Both reserves are physical sizes,
-    /// not scaled with the display.
+    /// along the line as the cursor grows — plus room below the zero line so
+    /// the triangle is never sliced there and the axis keeps the size
+    /// `windowSeconds`/`graphHeightPx` name. The ceiling end gets no room: a
+    /// cursor clamped there hangs half out of the axis top, cut by the box's
+    /// edge. Both reserves are physical sizes, not scaled with the display.
     #[test]
-    fn the_sample_cursor_reserves_room_on_both_axes() {
+    fn the_sample_cursor_reserves_the_gutter_and_the_room_below_the_zero_line() {
         let work = Rect {
             left: 0,
             top: 0,
@@ -2247,18 +2248,18 @@ mod tests {
             "half the triangle (0.7 * 10) plus half the rim and a pixel"
         );
         let (size, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(size, (120 + 2, 60 + 2 * 9));
+        assert_eq!(size, (120 + 2, 60 + 9));
 
         overlay.orientation = 90;
         let (rotated, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(rotated, (60 + 2 * 9, 120 + 2));
+        assert_eq!(rotated, (60 + 9, 120 + 2));
 
         overlay.orientation = 0;
         overlay.sample_cursor_size_px = 20;
         let (large, _) = layout_in_rect(&overlay, work, 1.0);
-        assert_eq!(large, (120 + 2, 60 + 2 * 16));
+        assert_eq!(large, (120 + 2, 60 + 16));
 
         let (scaled, _) = layout_in_rect(&overlay, work, 2.0);
-        assert_eq!(scaled, (2 * 120 + 2, 2 * 60 + 2 * 16));
+        assert_eq!(scaled, (2 * 120 + 2, 2 * 60 + 16));
     }
 }

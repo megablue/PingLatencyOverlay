@@ -9,15 +9,30 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the per-host network adapter binding — 2026-10-10. The picker, the bound
-probes and the docs are built, the gate is green, and the work was confirmed
-on a live look before its commit. The compression bands and the background
-grid are built and **shipped**: committed as `55dfdb2`, bundled and pushed to
-`origin/split/renderer-process`. The ramp-and-growth design was rejected and
-replaced by discrete bands inside the canvas the config names.
+As of the sample cursor's ceiling room — 2026-10-11. The cursor no longer
+reserves room above the axis: the box is shorter by half a triangle, the grid
+reaches the top edge, and the bounce rests on the axis top, half out, with a
+one-sided dip for its shake. The gate is green and the look was confirmed
+before the commit. The per-host adapter binding shipped as `1bc1705`; the
+compression bands and the background grid as `55dfdb2`, both bundled and
+pushed to `origin/split/renderer-process`. The ramp-and-growth design was
+rejected and replaced by discrete bands inside the canvas the config names.
 
 ## State
 
+- **The sample cursor reserves no room above the axis, and the bounce rests on
+  the axis top.** The box grew at the ceiling end for half a triangle and the
+  renderer inset the axis by the same amount, which left a dead band above the
+  grid (13 px at the user's 125% DPI) that nothing ever drew in, and parked the
+  bounce on the window edge — fully above the graph — with a symmetric shake
+  that swung it further out. Now only the zero-line end keeps the room (shared
+  with the glow's cast as before); the ceiling end keeps just the stroke's pad.
+  The bounce's rest is the axis top itself — the centre on the ceiling line,
+  half in and half out, cut by the box's edge — and `cursor_shake_offset` is a
+  decaying one-sided dip into the graph, so no phase can rise above that half.
+  A cursor clamped at the ceiling hangs half out the same way; the zero-line
+  cursor stays whole. The user's overlay went 314×147 → 314×136. Read
+  `docs/features/overlays/sample-cursor.md`.
 - **A host can pick the network adapter its probes leave through.** Per host:
   `TargetConfig.adapter` (an adapter GUID; absent = Automatic), with a
   "Network adapter" ComboBox in the host editor. Bound probes leave from the
@@ -26,10 +41,10 @@ replaced by discrete bands inside the canvas the config names.
   attached fails the sample rather than falling back to another interface.
   `crates/core/src/adapters.rs` is new (`GetAdaptersAddresses` through its own
   `extern "system"` block); `ping-rs` is gone, replaced by the module-local
-  `IcmpSendEcho2Ex` call in `probe.rs`. The gate is green: fmt, clippy
-  `-D warnings`, `cargo test --all-features` (251 core, 97 shell, 6 + 2 + 3 + 1
-  elsewhere) and `cargo build --release`. Confirmed on a live look before the
-  commit.
+  `IcmpSendEcho2Ex` call in `probe.rs`. Shipped as `1bc1705`; the gate was
+  green (fmt, clippy `-D warnings`, `cargo test --all-features` — 251 core,
+  97 shell, 6 + 2 + 3 + 1 elsewhere — and `cargo build --release`) and it was
+  confirmed on a live look before the commit.
 - **The support links are in.** The README's `## Support the project`, the
   About page's second clickable line (`Buy me a coffee: paypal.me/mega3dp`,
   `ABOUT_SUPPORT`) and `.github/FUNDING.yml`'s `custom` entry all point at
@@ -55,18 +70,17 @@ replaced by discrete bands inside the canvas the config names.
   the lines are drawn through, so with compression on the cells step down band
   by band and pack tight in the reserve. Read
   `docs/features/overlays/rendering.md` for the drawing.
-- **The sample-cursor bounce ships with its revised shake.**
-  `ce1ab95` shipped the bounce; `e8efedb` changes the shake from
-  12 Hz / 2 px / 0.6 s to 4.5 Hz / 0.6 × the cursor's half-height / 0.9 s, and
-  makes the shake's clock the *newest* failure (`timeout_run_latest`) instead
-  of the run's first, so a run that keeps failing restarts the shake with every
-  timeout instead of shaking once and parking. No new config key; the reserves,
-  layout and draw order are untouched. `cargo test --all-features` is green
-  (203 in the core lib; `a_second_timeout_in_a_row_restarts_the_shake` is the
-  regression test) and clippy is clean with `-D warnings`. Confirmed working in
-  a live session. Read `git log -1` for the tip and `git rev-list --count HEAD`
-  for the commit count the version derives from — do not trust a number written
-  here.
+- **The sample-cursor bounce ships with its revised shake.** `ce1ab95` shipped
+  the bounce; `e8efedb` moved the shake to 4.5 Hz / 0.6 × the cursor's
+  half-height / 0.9 s and made its clock the *newest* failure
+  (`timeout_run_latest`) instead of the run's first, so a run that keeps
+  failing restarts the shake with every timeout instead of shaking once and
+  parking. The tip commit then removed the ceiling room and moved the rest onto
+  the axis top (the first bullet above); no new config key.
+  `a_second_timeout_in_a_row_restarts_the_shake` and
+  `the_bounced_cursor_shakes_then_settles_at_the_top` are the regression tests.
+  Read `git log -1` for the tip and `git rev-list --count HEAD` for the commit
+  count the version derives from — do not trust a number written here.
 - The commit before it (`b40f042`) was the feature-map refresh:
   `docs/features/runtime.md` was split into `runtime.md` / `pipe.md` /
   `supervision.md` / `live-edits.md`, and nine oversized sections across eight
