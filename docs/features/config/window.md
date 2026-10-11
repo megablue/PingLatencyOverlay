@@ -39,11 +39,12 @@ pickers or the driving tests.
   `overlay_count_label`.
 - Live pushes: `sync_runtime_config`, `push_config`, `last_pushed`;
   `sync_border_preview` / `release_border_preview`; `sync_theme`,
-  `choose_theme`, `draw_theme_icon`; `sync_window_title`; `sync_monitors`;
-  `sync_auto_preview_text`.
+  `choose_theme`, `draw_theme_icon`; `sync_window_title`; `sync_monitors`,
+  `sync_adapters`; `sync_auto_preview_text`.
 - Overlay editors: `edit_overlay` (General / selected-host editor / Position /
-  Display Mode / Graph / Colors / Startup Behaviors), `edit_target`,
-  `edit_target_colors`.
+  Display Mode / Graph / Colors / Startup Behaviors), `edit_target`
+  (protocol, host, port, timeout, network adapter), `edit_target_colors`,
+  `adapter_choices` / `adapter_choice_label`.
 - Sticky picker: `StickyPicker` (`displace` / `restore_displaced`, `poll`,
   `pick_step`, `fill_sticky_target`, `own_capture_window`, `pick_cursor`,
   `draw_crosshair_icon`), `PICK_BUTTON_WIDTH`, `winwatch::shapes`.
@@ -145,6 +146,8 @@ pickers or the driving tests.
 `the_global_glyph_is_centred_and_stays_inside_its_box`,
 `the_theme_glyphs_stay_inside_their_boxes`, `the_theme_tiles_fit_their_pane`,
 `choosing_a_theme_changes_it_and_survives_the_next_pass`,
+`the_adapter_list_is_read_once_and_then_on_the_clock`,
+`the_adapter_picker_lists_automatic_every_adapter_and_a_missing_one`,
 `only_the_repository_and_support_are_links`,
 `a_link_click_becomes_a_url_to_open`,
 `a_pick_commits_on_the_release_after_its_press`,

@@ -43,7 +43,6 @@ path = "src/bin/renderer.rs"
 #                       configuration window talks to over. `net` and
 #                       `io-util` are for the pipe; `time` for the probe
 #                       cadence and the server's reconnect backoff.
-#   ping-rs             ICMP echo, via Win32 IcmpSendEcho2 (no Administrator)
 #   dirs                locating the config directory
 #   log                 overlay window diagnostics
 #   tiny-skia           software rendering of the graph; no GPU, no shaders
@@ -60,7 +59,6 @@ tokio = { version = "1", features = [
     "net",
     "io-util",
 ] }
-ping-rs = "0.1"
 dirs = "5"
 log = "0.4"
 regex = "1"

@@ -14,6 +14,7 @@ use eframe::{App, CreationContext, NativeOptions};
 // arrive as pipe messages, and this window talks to the renderer over the
 // named pipe rather than touching either of those types directly, which is the
 // whole point — nothing in this binary can draw a graph.
+use ping_latency_overlay_core::adapters::{self, NetworkAdapter};
 use ping_latency_overlay_core::compression;
 use ping_latency_overlay_core::config::{
     self, Anchor, BorderEffect, Config, DisplayMode, OverlayConfig, ProbeConfig, StickyTarget,
@@ -520,6 +521,14 @@ palette_accessors! {
 /// list.
 const MONITOR_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often the network-adapter list is re-read.
+///
+/// The same two seconds and the same reasoning as the displays: adapters
+/// appear and disappear without telling the app, and `GetAdaptersAddresses`
+/// should stay off the frame path while the picker still notices a VPN that
+/// just came up.
+const ADAPTER_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 const POSITION_PICKER_SIZE: f32 = 220.0;
 const POSITION_PICKER_DISPLAY_SIZE: f32 = 180.0;
 const POSITION_PICKER_PADDING: f32 = 4.0;
@@ -650,6 +659,82 @@ fn monitor_choice_label(monitors: &[MonitorInfo], selected: Option<&str>) -> Str
         .or_else(|| choices.first())
         .map(|choice| choice.label.clone())
         .unwrap_or_else(|| "Primary monitor (follow automatically)".to_string())
+}
+
+/// One row of the adapter picker: an adapter's GUID, or `None` for the
+/// system's own choice of interface.
+struct AdapterChoice {
+    id: Option<String>,
+    label: String,
+    hint: String,
+}
+
+impl AdapterChoice {
+    fn is(&self, id: Option<&str>) -> bool {
+        match (&self.id, id) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => mine.eq_ignore_ascii_case(theirs),
+            _ => false,
+        }
+    }
+}
+
+/// Every entry the adapter picker offers, in the order it offers them.
+///
+/// "Automatic" — the system's own choice of interface — is a real choice
+/// rather than the absence of one, so it is always offered. A saved adapter
+/// that is not attached is included, and first, so a host pointed at a gone
+/// adapter shows why it is not probing; dropping it would make the picker
+/// silently disagree with what the profile says, and the combobox would fall
+/// back to its first row and read as though the user had chosen Automatic.
+fn adapter_choices(adapters: &[NetworkAdapter], selected: Option<&str>) -> Vec<AdapterChoice> {
+    let mut choices: Vec<AdapterChoice> = Vec::new();
+    let selected_id = selected.map(str::trim).filter(|id| !id.is_empty());
+    if let Some(id) = selected_id {
+        if !adapters
+            .iter()
+            .any(|adapter| adapter.id.eq_ignore_ascii_case(id))
+        {
+            choices.push(AdapterChoice {
+                id: Some(id.to_string()),
+                label: "Saved adapter — not connected".to_string(),
+                hint: "This host cannot probe while that adapter is not attached: it \
+                       is never probed over another interface. Pick Automatic, or \
+                       wait for the adapter to come back."
+                    .to_string(),
+            });
+        }
+    }
+    choices.push(AdapterChoice {
+        id: None,
+        label: "Automatic (system default)".to_string(),
+        hint: "The probe leaves through whatever interface Windows routes it \
+               through, the way it did before adapters could be picked."
+            .to_string(),
+    });
+    for adapter in adapters {
+        choices.push(AdapterChoice {
+            id: Some(adapter.id.clone()),
+            label: adapter.label(),
+            hint: format!("This host's probes leave through {}.", adapter.label()),
+        });
+    }
+    choices
+}
+
+/// The text the closed combobox shows, which is the selected entry's label.
+///
+/// Falls back to the first entry when the selected value is in none of them,
+/// so the control can never show a blank or a value the user cannot find when
+/// they open it.
+fn adapter_choice_label(adapters: &[NetworkAdapter], selected: Option<&str>) -> String {
+    let choices = adapter_choices(adapters, selected);
+    choices
+        .iter()
+        .find(|choice| choice.is(selected))
+        .or_else(|| choices.first())
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| "Automatic (system default)".to_string())
 }
 
 impl PositionPicker {
@@ -1515,6 +1600,14 @@ pub struct PingApp {
     /// user has not configured anything for yet.
     monitors: Vec<MonitorInfo>,
     monitors_read_at: Option<Instant>,
+    /// The network adapters attached right now, and when they were last read.
+    ///
+    /// The same cache and the same clock as the display list, and for the
+    /// same reason: adapters appear and disappear without telling us — a VPN
+    /// comes up, a cable moves — and the host editor's picker has to be able
+    /// to offer an adapter the user has not pointed a host at yet.
+    adapters: Vec<NetworkAdapter>,
+    adapters_read_at: Option<Instant>,
     /// The theme in force, and the Windows mode it was resolved against.
     ///
     /// Both are needed because `System` is the default: the window has to
@@ -1903,6 +1996,9 @@ impl PingApp {
             // `None` so the first `sync_monitors` reads, rather than showing an
             // empty monitor list until the clock comes round.
             monitors_read_at: None,
+            adapters: Vec::new(),
+            // The same for the first `sync_adapters`.
+            adapters_read_at: None,
             theme,
             system_mode,
             shutdown_state: ShutdownState::Running,
@@ -2561,6 +2657,24 @@ impl PingApp {
             &mut self.monitors_read_at,
             now,
             monitors::enumerate,
+        );
+    }
+
+    /// Keep the list of network adapters fresh.
+    ///
+    /// Like the display list, an adapter change is not something the app hears
+    /// about, and the host editor is the only place the list is drawn, so this
+    /// is on a clock rather than on a save. The same two seconds as the
+    /// displays: short enough that a VPN that just came up is in the picker
+    /// while the window is still open, long enough that the enumeration is not
+    /// on the frame path.
+    fn sync_adapters(&mut self) {
+        let now = Instant::now();
+        sync_adapter_list(
+            &mut self.adapters,
+            &mut self.adapters_read_at,
+            now,
+            adapters::enumerate,
         );
     }
 
@@ -3872,6 +3986,7 @@ impl PingApp {
                     &mut self.position_picker,
                     &mut self.sticky_picker,
                     &self.monitors,
+                    &self.adapters,
                     &self.theme,
                 );
                 if changed {
@@ -4969,6 +5084,28 @@ fn sync_monitor_list(
     true
 }
 
+/// The body of `sync_adapters`, with the enumeration passed in.
+///
+/// Same shape and the same reason as `sync_monitor_list`: a test that only
+/// checked the due/not-due predicate would pass with the read deleted.
+/// Returns whether a read happened.
+fn sync_adapter_list(
+    adapters: &mut Vec<NetworkAdapter>,
+    read_at: &mut Option<Instant>,
+    now: Instant,
+    read: impl FnOnce() -> Vec<NetworkAdapter>,
+) -> bool {
+    let due = read_at.is_none_or(|at| now.duration_since(at) >= ADAPTER_REFRESH_INTERVAL);
+    if !due {
+        return false;
+    }
+    *adapters = read();
+    // Set after the read, so a slow enumeration is not counted as having
+    // happened before it did.
+    *read_at = Some(now);
+    true
+}
+
 /// How often the auto switching checks re-read the desktop, in seconds.
 ///
 /// One, matching the tray's own evaluation cadence, so neither the preview nor
@@ -5613,6 +5750,7 @@ impl PingApp {
         self.sync_border_preview();
         self.sync_profiles();
         self.sync_monitors();
+        self.sync_adapters();
         self.sync_auto_preview();
         self.sync_auto_switch();
         self.sync_theme(ctx);
@@ -5681,7 +5819,12 @@ impl Drop for PingApp {
 /// because the same four controls would otherwise have to appear twice — once
 /// for the selected target in the detail pane and once per row of the target
 /// list, where only a compact form makes sense.
-fn edit_target(ui: &mut Ui, target: &mut TargetConfig, changed: &mut bool) {
+fn edit_target(
+    ui: &mut Ui,
+    target: &mut TargetConfig,
+    changed: &mut bool,
+    adapters: &[NetworkAdapter],
+) {
     Grid::new("target-grid")
         .num_columns(2)
         .spacing([12.0, 8.0])
@@ -5749,6 +5892,29 @@ fn edit_target(ui: &mut Ui, target: &mut TargetConfig, changed: &mut bool) {
                 .changed()
             {
                 target.timeout_ms = timeout.clamp(1, 600_000) as u32;
+                *changed = true;
+            }
+            ui.end_row();
+
+            ui.label("Network adapter");
+            let mut chosen = target.adapter.clone();
+            ComboBox::from_id_salt("target-adapter")
+                .selected_text(adapter_choice_label(adapters, chosen.as_deref()))
+                .show_ui(ui, |ui| {
+                    for choice in adapter_choices(adapters, chosen.as_deref()) {
+                        let picked = choice.is(chosen.as_deref());
+                        if ui
+                            .selectable_label(picked, choice.label)
+                            .on_hover_text(choice.hint)
+                            .clicked()
+                            && !picked
+                        {
+                            chosen = choice.id;
+                        }
+                    }
+                });
+            if chosen != target.adapter {
+                target.adapter = chosen;
                 *changed = true;
             }
             ui.end_row();
@@ -5863,6 +6029,7 @@ fn edit_overlay(
     position_picker: &mut PositionPicker,
     sticky_picker: &mut StickyPicker,
     attached: &[MonitorInfo],
+    adapters: &[NetworkAdapter],
     theme: &Theme,
 ) {
     section(ui, "General", |ui| {
@@ -5894,7 +6061,7 @@ fn edit_overlay(
             .position(|candidate| candidate.id == target.id)
             .expect("the lookup just found it");
         section(ui, "Selected host", |ui| {
-            edit_target(ui, &mut overlay.targets[index], changed);
+            edit_target(ui, &mut overlay.targets[index], changed, adapters);
             ui.add_space(6.0);
             edit_target_colors(ui, &mut overlay.targets[index], changed);
         });
@@ -7020,33 +7187,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        about_page_lines, app_version, append_status_message, auto_preview_line,
-        auto_switch_section, auto_switch_step, can_switch_profile, choose_theme, compression,
-        config, config_notice_status, config_notices_status, config_push_due, default_fallback,
-        deselect_strip_rect, draw_pane_divider, empty_editor, enabled_target_keys,
-        fill_sticky_target, history_span_label, host_row_label, list_pane_column,
-        list_pane_row_height, list_pane_row_width_for, monitor_choice_label, monitor_choices,
-        overlay_count_label, overlay_name_width, overlay_row_contents, overlay_row_label,
-        page_has_detail_footer, page_has_list_pane, pending_edits, pick_cursor, pick_step,
-        profile_name_width, profile_row_contents, profile_row_label, rail_width, requested_url,
-        retired_targets, row_inner, rule_error, runtime_config_changed,
-        selected_overlay_for_border, selected_target_in, set_background_tracking,
-        set_selection_border_animation, set_sticky_value, sticky_value, sync_auto_preview_text,
+        about_page_lines, adapter_choice_label, adapter_choices, app_version,
+        append_status_message, auto_preview_line, auto_switch_section, auto_switch_step,
+        can_switch_profile, choose_theme, compression, config, config_notice_status,
+        config_notices_status, config_push_due, default_fallback, deselect_strip_rect,
+        draw_pane_divider, empty_editor, enabled_target_keys, fill_sticky_target,
+        history_span_label, host_row_label, list_pane_column, list_pane_row_height,
+        list_pane_row_width_for, monitor_choice_label, monitor_choices, overlay_count_label,
+        overlay_name_width, overlay_row_contents, overlay_row_label, page_has_detail_footer,
+        page_has_list_pane, pending_edits, pick_cursor, pick_step, profile_name_width,
+        profile_row_contents, profile_row_label, rail_width, requested_url, retired_targets,
+        row_inner, rule_error, runtime_config_changed, selected_overlay_for_border,
+        selected_target_in, set_background_tracking, set_selection_border_animation,
+        set_sticky_value, sticky_value, sync_adapter_list, sync_auto_preview_text,
         sync_monitor_list, sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
         window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, PingApp, ProfileSnapshot,
         ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, ABOUT_SUPPORT,
-        DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT,
-        GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET,
-        MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN,
-        PICK_ICON_RADIUS, PICK_ICON_STROKE, PICK_ICON_TICK_INNER, PICK_ICON_TICK_OUTER,
-        PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN,
-        SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, THEME_ICON_STROKE,
-        THEME_MOON_BITE_OFFSET, THEME_MOON_BITE_RADIUS, THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS,
-        THEME_SUN_RAYS, THEME_SUN_RAY_OUTER, THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND,
-        WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH,
+        ADAPTER_REFRESH_INTERVAL, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
+        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
+        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
+        PANE_MARGIN, PICK_ICON_RADIUS, PICK_ICON_STROKE, PICK_ICON_TICK_INNER,
+        PICK_ICON_TICK_OUTER, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
+        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
+        TARGET_ROW_HEIGHT, THEME_ICON_STROKE, THEME_MOON_BITE_OFFSET, THEME_MOON_BITE_RADIUS,
+        THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS, THEME_SUN_RAYS, THEME_SUN_RAY_OUTER,
+        THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT,
+        WINDOW_MIN_WIDTH, WINDOW_WIDTH,
     };
     use eframe::egui;
+    use ping_latency_overlay_core::adapters::NetworkAdapter;
     use ping_latency_overlay_core::config::{
         Anchor, Config, ConfigNotice, OverlayConfig, ProbeConfig, ProfileEntry, TargetConfig,
     };
@@ -7502,6 +7672,16 @@ mod tests {
         }
     }
 
+    /// One adapter, as the picker sees it: a GUID, a Windows name and the
+    /// address a probe would bind to.
+    fn adapter(id: &str, name: &str, ipv4: &str) -> NetworkAdapter {
+        NetworkAdapter {
+            id: id.to_string(),
+            name: name.to_string(),
+            ipv4: ipv4.parse().expect("ipv4"),
+        }
+    }
+
     /// The installer and the app must report the same version.
     ///
     /// `build.rs` computes what the About page shows and
@@ -7858,6 +8038,48 @@ mod tests {
         );
     }
 
+    /// The adapter list gets the same first-read-then-clock treatment, and for
+    /// the same reason: an empty picker on the first frame claims there is
+    /// nothing to choose.
+    #[test]
+    fn the_adapter_list_is_read_once_and_then_on_the_clock() {
+        let start = Instant::now();
+        let mut list: Vec<NetworkAdapter> = Vec::new();
+        let mut read_at = None;
+
+        let first = sync_adapter_list(&mut list, &mut read_at, start, || {
+            vec![adapter("{wifi}", "Wi-Fi", "192.168.1.42")]
+        });
+        assert!(first, "the first pass did not read the adapter list");
+        assert_eq!(list.len(), 1, "the read list was not published");
+        assert_eq!(
+            read_at,
+            Some(start),
+            "the read time was not recorded, so the next pass would read again"
+        );
+
+        // Just inside the interval: no read, and the previous list is kept.
+        let soon = start + ADAPTER_REFRESH_INTERVAL / 2;
+        let again = sync_adapter_list(&mut list, &mut read_at, soon, Vec::new);
+        assert!(!again, "the adapter list was re-read before its interval");
+        assert_eq!(list.len(), 1, "a skipped read dropped the cached list");
+
+        // Past the interval: read, and a VPN that just came up is published.
+        let later = start + ADAPTER_REFRESH_INTERVAL;
+        let due = sync_adapter_list(&mut list, &mut read_at, later, || {
+            vec![
+                adapter("{wifi}", "Wi-Fi", "192.168.1.42"),
+                adapter("{vpn}", "VPN Tunnel", "10.8.0.2"),
+            ]
+        });
+        assert!(due, "an adapter that came up did not reach the list");
+        assert_eq!(
+            list.len(),
+            2,
+            "the newly attached adapter was not published to the picker"
+        );
+    }
+
     /// A pinned display that is not attached stays in the picker, and stays
     /// selected.
     ///
@@ -7945,6 +8167,56 @@ mod tests {
                 .count(),
             1,
             "the primary monitor is offered more than once"
+        );
+    }
+
+    /// The adapter picker offers Automatic, every attached adapter, and — when
+    /// the saved one is gone — an entry that says so rather than falling back
+    /// to Automatic, which would silently change where the probes leave from.
+    #[test]
+    fn the_adapter_picker_lists_automatic_every_adapter_and_a_missing_one() {
+        let attached = [
+            adapter("{wifi}", "Wi-Fi", "192.168.1.42"),
+            adapter("{eth}", "Ethernet", "10.0.0.7"),
+        ];
+
+        let choices = adapter_choices(&attached, None);
+        assert_eq!(choices.len(), 3);
+        assert_eq!(choices[0].id, None, "Automatic is not the first entry");
+        assert_eq!(choices[1].label, "Wi-Fi (192.168.1.42)");
+        assert_eq!(choices[2].label, "Ethernet (10.0.0.7)");
+        assert_eq!(
+            adapter_choice_label(&attached, None),
+            "Automatic (system default)"
+        );
+        assert_eq!(
+            adapter_choice_label(&attached, Some("{eth}")),
+            "Ethernet (10.0.0.7)"
+        );
+
+        // A saved GUID that is not attached stays in the list, first, and the
+        // closed combobox says so.
+        let choices = adapter_choices(&attached, Some("{gone}"));
+        assert_eq!(choices[0].id.as_deref(), Some("{gone}"));
+        assert!(choices[0].is(Some("{gone}")));
+        assert!(
+            choices[0].label.contains("not connected"),
+            "the missing adapter is not labelled as such: {}",
+            choices[0].label
+        );
+        assert!(
+            adapter_choice_label(&attached, Some("{gone}")).contains("not connected"),
+            "the closed combobox does not show that the saved adapter is gone"
+        );
+
+        // And the shape this must not become: a list without the saved entry,
+        // where the combobox has to fall back to Automatic.
+        let without = adapter_choices(&attached, None);
+        assert!(
+            !without
+                .iter()
+                .any(|choice| choice.id.as_deref() == Some("{gone}")),
+            "the missing adapter was dropped from the list"
         );
     }
 

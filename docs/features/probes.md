@@ -6,27 +6,37 @@ resolver cache, the sample cadence or the buffers.
 ## What it does
 - Every enabled host runs its own Tokio probe task: one measurement per
   second, written into a bounded per-target buffer whether it answered or not.
-- ICMP uses `ping-rs` (`IcmpSendEcho2`, no Administrator); TCP times the
-  connect handshake. Both take the host's `timeoutMs`.
+- ICMP uses `IcmpSendEcho2Ex` through a module-local `extern "system"` block
+  (no Administrator); TCP times the connect handshake. Both take the host's
+  `timeoutMs`, and both can be bound to the host's chosen network adapter.
 - A hostname is resolved once when the task starts and refreshed in the
   background afterwards, so a slow lookup never sits between two samples;
   every tick probes the cached address directly.
 - A failed attempt still writes a sample (`value: None`) — that sample is what
   the timeout marker and the line break are drawn from.
+- A host may name a network adapter to leave through. The adapter's current
+  IPv4 address is read back from its GUID every tick; an adapter that is not
+  attached is a failed sample, never a fallback to the system route.
 
 ## Map
-- `probe.rs` — `measure` (the one-shot form), `lookup_ipv4`, `ping_ipv4`,
-  `connect_ipv4`, `resolve_ipv4`.
+- `probe.rs` — `measure` (the one-shot form), `lookup_ipv4`, `ping_ipv4`
+  (the `IcmpSendEcho2Ex` call and its reply header), `connect_ipv4`,
+  `resolve_ipv4`.
+- `adapters.rs` — `NetworkAdapter`, `enumerate` (the up adapters with an IPv4
+  address), `ipv4_for` (the GUID-to-address lookup a tick makes).
 - `probes.rs` — `ProbeManager` (`apply_config`, `spawn`, `stop`, retirement),
-  `probe_loop`, `measure_cached`, `AddressCache` (`rehost`, `take_refresh`),
-  `address_action` / `AddressAction`, `TaskKey`, `SampleStore`,
-  `MAX_BUFFERED_SAMPLES`.
+  `probe_loop`, `measure_cached`, `probe_source`, `AddressCache` (`rehost`,
+  `take_refresh`), `address_action` / `AddressAction`, `TaskKey`,
+  `SampleStore`, `MAX_BUFFERED_SAMPLES`.
 - `render.rs` — `SAMPLE_INTERVAL` (the cadence both files read) and
   `sample_gap_threshold` (timeout + cadence + slack).
 - Constants: `DNS_REFRESH_INTERVAL` (60 s), `DNS_REFRESH_AFTER_FAILURES` (3),
   `SLOW_LOOKUP` (500 ms).
 
 ## How & why
+
+### The tick
+
 - **One task per (overlay id, target id), never one per overlay.** A probe
   measures for as long as its timeout allows, so a task probing four hosts in
   turn would take four timeouts per tick when they are all down.
@@ -47,6 +57,16 @@ resolver cache, the sample cadence or the buffers.
 - **Resolution never runs inside a connect.** `connect_ipv4` takes the address
   and the port and builds a `SocketAddr`, so nothing can resolve mid-connect.
   `lookup_ipv4` is IPv4-only by design, for both protocols.
+- **An adapter is resolved per tick, and a gone adapter fails the sample.**
+  `probe_source` reads the host's adapter GUID through `adapters::ipv4_for`
+  every tick — a local lookup, cheap at the one-second cadence — so a DHCP
+  lease change heals on the next sample and a settings change needs no task
+  restart, the same as a colour change. A GUID that resolves to nothing is
+  `None` all the way out: the tick writes a failed sample rather than leaving
+  over the system route, which would measure another path under the same
+  graph.
+### Task lifetimes
+
 - **Background tracking keeps a departure's task alive.** A removal rides the
   next `SetConfig` as the `retire` list, which only the Config window computes
   (the renderer cannot tell "switched away from" from "deleted"); kept targets
@@ -62,6 +82,7 @@ resolver cache, the sample cadence or the buffers.
 | `host` | — | name or literal; resolved once, then cached |
 | `port` | — | TCP only |
 | `timeoutMs` | 1000 | per host; the line breaks after timeout + cadence + slack |
+| `adapter` | absent | per host: the adapter's GUID; absent = Automatic |
 | `ui.backgroundTracking` | on | global preference; see config/window.md |
 
 ## Tests that pin it
@@ -78,7 +99,16 @@ resolver cache, the sample cadence or the buffers.
 `a_finished_lookup_lands_in_the_cache`,
 `changing_the_host_drops_the_cached_address`,
 `a_literal_ip_host_caches_its_address`,
-`a_tcp_target_connects_to_its_cached_address`;
+`a_tcp_target_connects_to_its_cached_address`,
+`a_host_without_an_adapter_leaves_the_choice_to_the_system`,
+`a_gone_adapter_is_no_source_at_all`,
+`a_listed_adapters_guid_resolves_to_its_address`;
+the adapter list is pinned by
+`only_up_adapters_with_a_usable_address_are_listed`,
+`the_label_names_the_adapter_and_its_address` and
+`enumeration_is_sorted_and_well_formed` in `adapters.rs`, and the bound
+paths by `a_tcp_connect_bound_to_loopback_reaches_a_loopback_listener` and
+`an_icmp_echo_bound_to_loopback_answers` in `probe.rs`;
 the gap side is pinned by `a_data_gap_is_not_interpolated_*` and
 `a_one_second_cadence_is_not_a_gap` in `render.rs`.
 

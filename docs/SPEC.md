@@ -318,6 +318,25 @@
 - Target: domain name or IP address.
 - Port: required for TCP, unused for ICMP.
 - Timeout: configurable, default 1000 ms.
+- Network adapter: each host may leave through a chosen network adapter instead
+  of the system's own route (the default, shown as **Automatic**). The picker
+  lists the adapters that are up and have an IPv4 address, by name and current
+  address.
+- When a host is bound to an adapter, both protocols leave from that adapter's
+  address: the ICMP echo is sent with it as its source, and the TCP socket is
+  bound to it before connecting. A host can therefore be measured over Wi-Fi
+  while the machine's default route is Ethernet, or over a VPN while everything
+  else is not.
+- If a bound adapter is not attached, or has no IPv4 address, the probe fails
+  and the host shows timeouts. It is never silently probed over another
+  interface — the graph would then be measuring a different path than the one
+  the host names.
+- The adapter is stored by its Windows GUID, and its address is read back at
+  probe time, so a DHCP change heals on the next sample. Name resolution is
+  **not** adapter-bound: DNS still goes through the system resolver, and only
+  the probe packets are bound.
+- A profile moved to another machine keeps its adapter GUIDs; an adapter that
+  does not exist there shows as "not connected" and its hosts cannot probe.
 - A hostname is resolved when its probe starts and refreshed in the background
   afterwards, so a slow name lookup does not interrupt the one-second cadence.
   Both protocols then probe the cached address directly — ICMP pings it, TCP

@@ -9,14 +9,27 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the support links — 2026-10-10. The compression bands and the background
-grid are built and **shipped**: committed as
-`55dfdb2`, bundled and pushed to `origin/split/renderer-process`. The
-ramp-and-growth design was rejected and replaced by discrete bands inside the
-canvas the config names.
+As of the per-host network adapter binding — 2026-10-10. The picker, the bound
+probes and the docs are built, the gate is green, and the work was confirmed
+on a live look before its commit. The compression bands and the background
+grid are built and **shipped**: committed as `55dfdb2`, bundled and pushed to
+`origin/split/renderer-process`. The ramp-and-growth design was rejected and
+replaced by discrete bands inside the canvas the config names.
 
 ## State
 
+- **A host can pick the network adapter its probes leave through.** Per host:
+  `TargetConfig.adapter` (an adapter GUID; absent = Automatic), with a
+  "Network adapter" ComboBox in the host editor. Bound probes leave from the
+  adapter's current IPv4 — `IcmpSendEcho2Ex`'s `SourceAddress` for ICMP, a
+  `TcpSocket::bind` before connect for TCP — and a saved adapter that is not
+  attached fails the sample rather than falling back to another interface.
+  `crates/core/src/adapters.rs` is new (`GetAdaptersAddresses` through its own
+  `extern "system"` block); `ping-rs` is gone, replaced by the module-local
+  `IcmpSendEcho2Ex` call in `probe.rs`. The gate is green: fmt, clippy
+  `-D warnings`, `cargo test --all-features` (251 core, 97 shell, 6 + 2 + 3 + 1
+  elsewhere) and `cargo build --release`. Confirmed on a live look before the
+  commit.
 - **The support links are in.** The README's `## Support the project`, the
   About page's second clickable line (`Buy me a coffee: paypal.me/mega3dp`,
   `ABOUT_SUPPORT`) and `.github/FUNDING.yml`'s `custom` entry all point at

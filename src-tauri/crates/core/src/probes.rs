@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
+use crate::adapters;
 use crate::config::{Config, ProbeConfig, TargetConfig};
 use crate::probe;
 use crate::render::{SamplePoint, SAMPLE_INTERVAL};
@@ -351,16 +352,34 @@ fn address_action(
     }
 }
 
+/// The local address a tick binds to, from the host's adapter setting.
+///
+/// `None` as the setting means the system's own choice of interface, which is
+/// `Some(None)` — the probe runs exactly as it did before adapters existed.
+/// A setting whose GUID resolves to nothing right now is `None` all the way
+/// out, and the tick writes a failed sample: a saved adapter that is gone is
+/// not a licence to leave over the system route and silently measure another
+/// path under the same graph.
+fn probe_source(adapter: Option<&str>) -> Option<Option<Ipv4Addr>> {
+    match adapter {
+        None => Some(None),
+        Some(guid) => adapters::ipv4_for(guid).map(Some),
+    }
+}
+
 /// One probe tick through the address cache.
 ///
 /// Nothing here can delay the sample on a lookup except the first one, before
 /// there is an address to fall back on; every later refresh is a detached task
 /// whose result the next tick picks up. Both protocols probe the cached
-/// address directly — ICMP pings it, TCP connects to it.
+/// address directly — ICMP pings it, TCP connects to it — and both leave from
+/// the adapter the host picks, resolved fresh every tick so a lease change
+/// heals on the next sample.
 async fn measure_cached(
     cache: &mut AddressCache,
     probe: &ProbeConfig,
     timeout_ms: u32,
+    adapter: Option<&str>,
 ) -> Option<u32> {
     let host = probe.host();
     cache.rehost(host);
@@ -398,12 +417,16 @@ async fn measure_cached(
         AddressAction::Use => {}
     }
 
-    let latency = match cache.addr {
-        Some(addr) => match probe {
-            ProbeConfig::Icmp { .. } => probe::ping_ipv4(addr, timeout_ms).await,
-            ProbeConfig::Tcp { port, .. } => probe::connect_ipv4(addr, *port, timeout_ms).await,
+    let source = probe_source(adapter);
+    let latency = match (cache.addr, source) {
+        (Some(addr), Some(source)) => match probe {
+            ProbeConfig::Icmp { .. } => probe::ping_ipv4(addr, timeout_ms, source).await,
+            ProbeConfig::Tcp { port, .. } => {
+                probe::connect_ipv4(addr, *port, timeout_ms, source).await
+            }
         },
-        None => None,
+        // No cached destination, or an adapter with no address to leave from.
+        _ => None,
     };
     if latency.is_none() {
         cache.failures = cache.failures.saturating_add(1);
@@ -424,7 +447,13 @@ async fn probe_loop(
         let target = configs.read().unwrap().get(&key).cloned();
         if running.load(Ordering::Relaxed) {
             if let Some(target) = target.as_ref() {
-                let latency = measure_cached(&mut address, &target.probe, target.timeout_ms).await;
+                let latency = measure_cached(
+                    &mut address,
+                    &target.probe,
+                    target.timeout_ms,
+                    target.adapter.as_deref(),
+                )
+                .await;
                 let mut all_samples = samples.lock().unwrap();
                 let overlay = all_samples.entry(key.overlay_id.clone()).or_default();
                 let buffer = overlay.entry(key.target_id.clone()).or_default();
@@ -881,7 +910,7 @@ mod tests {
             let probe = ProbeConfig::Icmp {
                 host: "127.0.0.1".to_owned(),
             };
-            let _ = measure_cached(&mut cache, &probe, 1).await;
+            let _ = measure_cached(&mut cache, &probe, 1, None).await;
             assert_eq!(cache.addr, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
             assert!(cache.refreshing.is_none());
         });
@@ -902,7 +931,7 @@ mod tests {
                 host: "127.0.0.1".to_owned(),
                 port,
             };
-            let latency = measure_cached(&mut cache, &probe, 1_000).await;
+            let latency = measure_cached(&mut cache, &probe, 1_000, None).await;
             assert!(
                 latency.is_some(),
                 "connecting to a listening socket must measure"
@@ -911,5 +940,29 @@ mod tests {
             assert!(cache.refreshing.is_none());
         });
         runtime.shutdown_background();
+    }
+
+    /// A host with no adapter keeps the system's choice of interface.
+    #[test]
+    fn a_host_without_an_adapter_leaves_the_choice_to_the_system() {
+        assert_eq!(probe_source(None), Some(None));
+    }
+
+    /// A saved adapter that is not attached is no source at all, which the
+    /// tick turns into a failed sample. Falling back to the system route is
+    /// the thing this function exists to not do.
+    #[test]
+    fn a_gone_adapter_is_no_source_at_all() {
+        assert_eq!(probe_source(Some("{0000-not-attached}")), None);
+    }
+
+    /// Every listed adapter's GUID resolves back to the address the list
+    /// shows — checked against the machine's real adapters, measuring
+    /// nothing.
+    #[test]
+    fn a_listed_adapters_guid_resolves_to_its_address() {
+        for adapter in crate::adapters::enumerate() {
+            assert_eq!(probe_source(Some(&adapter.id)), Some(Some(adapter.ipv4)));
+        }
     }
 }

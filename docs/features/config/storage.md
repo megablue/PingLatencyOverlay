@@ -64,6 +64,16 @@ Status: shipped (v0.2.39) · Read when: touching `config.rs`, persistence, migra
   and any key a future version adds survive. Never write that file as a whole
   object.
 
+### Targets
+
+- `TargetConfig.adapter` is the adapter GUID (`Option<String>`, absent =
+  Automatic), with `skip_serializing_if` so a host that never picks one writes
+  nothing new — the same non-breaking shape as the globals. A file written
+  before hosts could pick an adapter loads with every host automatic.
+- `TargetConfig::like` copies the adapter along with the probe shape and
+  timeout, because an added host is meant to be a variation on the one it was
+  added next to.
+
 ### Normalize before validate
 
 - `parse_and_validate` normalizes **before** it validates, and the order is
@@ -129,6 +139,9 @@ see `overlays/*.md`.
 `an_overlay_with_no_hosts_is_refused_rather_than_given_one`,
 `a_zero_timeout_is_repaired_on_every_host`,
 `an_added_host_does_not_inherit_its_neighbours_colour`,
+`a_host_without_an_adapter_loads_as_automatic`,
+`a_bound_host_writes_its_adapter_and_an_automatic_one_does_not`,
+`an_added_host_inherits_the_adapter_of_the_one_it_was_copied_from`,
 `a_missing_rules_file_loads_as_inert_defaults`,
 `a_broken_rules_file_is_an_error_and_is_left_alone`,
 `the_title_version_preference_defaults_to_off_and_round_trips`,

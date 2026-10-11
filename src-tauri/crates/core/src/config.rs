@@ -494,6 +494,13 @@ pub struct TargetConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub probe: ProbeConfig,
+    /// The adapter this host's probes leave through, by the GUID in
+    /// `adapters::NetworkAdapter::id`. `None` is automatic: whatever local
+    /// address Windows would have used anyway. The address is read back from
+    /// the GUID at probe time, so a DHCP change heals on the next sample; an
+    /// adapter that is no longer attached is a host that cannot probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
     /// Ping timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u32,
@@ -516,6 +523,7 @@ impl TargetConfig {
             probe: ProbeConfig::Icmp {
                 host: "1.1.1.1".to_string(),
             },
+            adapter: None,
             timeout_ms: default_timeout_ms(),
             line_color: default_line_color(),
             timeout_color: default_timeout_color(),
@@ -542,6 +550,7 @@ impl TargetConfig {
             id: unique_id(),
             enabled: source.enabled,
             probe: source.probe.clone(),
+            adapter: source.adapter.clone(),
             timeout_ms: source.timeout_ms,
             line_color: next_line_color(source.line_color.as_str()),
             timeout_color: source.timeout_color.clone(),
@@ -918,6 +927,8 @@ impl OverlayConfig {
                     id: unique_id(),
                     enabled: true,
                     probe,
+                    // A file written before hosts picked adapters is automatic.
+                    adapter: None,
                     timeout_ms: legacy_timeout_ms.unwrap_or_else(default_timeout_ms),
                     line_color: legacy_line.unwrap_or_else(default_line_color),
                     timeout_color: legacy_timeout.unwrap_or_else(default_timeout_color),
@@ -3287,6 +3298,49 @@ mod tests {
         assert_ne!(added.line_color, "#4ade80");
         assert!(is_hex_color(&added.line_color), "{}", added.line_color);
         assert_ne!(added.id, overlay.first_target().id);
+    }
+
+    /// A file written before hosts could pick an adapter is a file whose hosts
+    /// are automatic, not a file that fails to load.
+    #[test]
+    fn a_host_without_an_adapter_loads_as_automatic() {
+        let target: TargetConfig =
+            serde_json::from_str(r#"{"id":"one","probe":{"protocol":"icmp","host":"1.1.1.1"}}"#)
+                .expect("target");
+
+        assert_eq!(target.adapter, None);
+    }
+
+    /// Automatic is the absent key, not `"adapter": null`, so every file the
+    /// editor writes reads the way it was written.
+    #[test]
+    fn a_bound_host_writes_its_adapter_and_an_automatic_one_does_not() {
+        let automatic = TargetConfig::new();
+        let written = serde_json::to_string(&automatic).expect("json");
+        assert!(!written.contains("adapter"), "{written}");
+
+        let mut bound = TargetConfig::new();
+        bound.adapter = Some("{adapter-guid}".to_string());
+        let written = serde_json::to_string(&bound).expect("json");
+        assert!(
+            written.contains(r#""adapter":"{adapter-guid}""#),
+            "{written}"
+        );
+
+        let parsed: TargetConfig = serde_json::from_str(&written).expect("target");
+        assert_eq!(parsed.adapter, bound.adapter);
+    }
+
+    /// A host added next to a bound one probes the way it does, adapter
+    /// included — the same reason its timeout and protocol are copied.
+    #[test]
+    fn an_added_host_inherits_the_adapter_of_the_one_it_was_copied_from() {
+        let mut overlay = OverlayConfig::new();
+        overlay.first_target_mut().adapter = Some("{adapter-guid}".to_string());
+
+        let added = overlay.add_target().clone();
+
+        assert_eq!(added.adapter, overlay.first_target().adapter);
     }
 
     /// Ids come from a clock and a counter, so two hosts added in the same

@@ -259,9 +259,11 @@ features; the feature pages keep the maps, mechanisms and traps.
   or Tauri back into the native branch.
 - Windows-only: MSVC toolchain (`x86_64-pc-windows-msvc` or
   `aarch64-pc-windows-msvc`) + MSVC Build Tools. No WebView2 runtime is needed.
-- ICMP uses the `ping-rs` crate (Win32 `IcmpSendEcho2`) and does not require
-  Administrator. `src/probe.rs` resolves ICMP targets to IPv4; TCP supports
-  hostname resolution through Tokio.
+- ICMP uses Win32 `IcmpSendEcho2Ex` — a module-local `extern "system"` block
+  in `crates/core/src/probe.rs`, no Windows SDK binding crate — and does not
+  require Administrator. ICMP targets resolve to IPv4; TCP supports hostname
+  resolution through Tokio. A host's probes can be bound to a chosen network
+  adapter; `crates/core/src/adapters.rs` enumerates them the same way.
 - The README is for users. Implementation detail belongs in `docs/SPEC.md` for
   behavior and here for working knowledge, and the user must be consulted before
   technical detail is added to the README.

@@ -42,6 +42,14 @@ pub mod overlay;
 // The long-lived probe tasks and their bounded sample buffers.
 pub mod probes;
 
+// Which network adapters are attached and which one a host's probe leaves
+// through. Enumeration is Win32, but the rule that decides what is listed is
+// a pure function over one raw row, so the filter is testable without the
+// machine that has the adapters — the same split `monitors` uses. A host
+// stores an adapter's GUID; the address it binds to is read back at probe
+// time, so a DHCP lease change heals on the next sample.
+pub mod adapters;
+
 // Which displays are attached, and which one an overlay belongs on. Enumeration
 // is Win32, but the rule that picks a display is a pure function over a list, so
 // the multi-monitor behaviour is testable on a machine with one monitor — which
