@@ -26,7 +26,7 @@ Status: shipped (v0.2.39) · Read when: changing `overlay.rs` or `render.rs`, th
 - `Series`, `SamplePoint`; `draw_series` (one host's polyline), `draw_sample_cursor`, `line_y_at_x`, `stroke_run`, `LinePass`; `TimeoutIndicator`, `TIMEOUT_STUB_HEIGHT`.
 - `map_x` / `map_y` / `visible`; `transform_point` / `rotation` / `glow_direction`; `parse_hex_color`; the prefill generators.
 - `draw_background_grid` with `GRID_CELL_WIDTH_PX` / `GRID_CELL_HEIGHT_PX` / `GRID_STROKE_PX` — the grid, stroked into the graph's own frame before everything else.
-- Reserves: `line_glow_reserve_px`, `stroke_pad`, `sample_cursor_reserve_px`, `sample_cursor_room_px`; `SMOOTH_REVEAL_DELAY`, `SAMPLE_INTERVAL`.
+- Reserves: `line_glow_reserve_px`, `stroke_pad`, `leading_reserve_px`, `sample_cursor_room_px`; `SMOOTH_REVEAL_DELAY`, `SAMPLE_INTERVAL`.
 
 `crates/core/src/border.rs` — `BorderAnimator`, `draw_border`, the manual premultiplied `blend_pixel`, `border_frame_interval`.
 

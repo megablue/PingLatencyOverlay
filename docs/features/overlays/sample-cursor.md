@@ -15,12 +15,14 @@ Colors rows.
   nearest sample's value.
 - It eases (~150 ms) to a new value instead of jumping, and asks for repaints
   while it moves, so it animates in index mode too.
-- When a live timeout reaches the point it is drawn from, it leaves the line
-  for the top of the graph: the whole triangle rests against the box's top
-  edge, its topmost pixel flush with it, it bounces (a decaying dip into the
-  graph) for ~0.9 s, and it waits there until a value arrives. Each further
-  timeout in the run restarts the shake, so a host that
-  keeps failing keeps shaking rather than shaking once and parking. A *stale*
+- When the break of a live run reaches the cursor — the line's end has
+  scrolled back to the point the apex is drawn from, which at a long window
+  is seconds after the first failure, not the instant it was probed — it
+  leaves the line for the top of the graph: the whole triangle rests against
+  the box's top edge, its topmost pixel flush with it, it bounces (a decaying
+  dip into the graph) for ~0.9 s, and it waits there until a value arrives.
+  Each further timeout in the run restarts the shake, so a host that keeps
+  failing keeps shaking rather than shaking once and parking. A *stale*
   timeout — a host that stopped probing — holds the last drawn value instead,
   and during the startup prefill it rides the prefill head.
 - Default on, including a profile written before the setting existed (absent
@@ -33,8 +35,9 @@ Colors rows.
 ## Map
 - `render.rs`: `draw_sample_cursor` (with `CursorLook`), `line_y_at_x` (with
   its `cover` helper; the caller hands it the drawn cut), `drawn_samples`,
-  `CursorAnimation { y, at, active }` + `advance(now, target, shake)` /
-  `is_active`, `Series.cursor: Option<&'a mut CursorAnimation>`, the cursor
+  `CursorAnimation { y, at, active, bounce }` + `advance(now, target, shake)` /
+  `bounce_anchor(now, latest)` / `end_bounce` / `is_active`,
+  `Series.cursor: Option<&'a mut CursorAnimation>`, the cursor
   pass in `render_graph_into_internal`, `SAMPLE_CURSOR_FILL` /
   `SAMPLE_CURSOR_RIM` / `SAMPLE_CURSOR_RIM_WIDTH` / `SAMPLE_CURSOR_EDGE_GAP` /
   `SAMPLE_CURSOR_EDGE_MARGIN`,
@@ -85,30 +88,35 @@ Colors rows.
 
 ### The bounce
 
-- The trigger is the **drawn head**, not the probe: `head = reveal.unwrap_or(now)`,
-  and the run is read from `drawn_samples(samples, reveal)` — the same cut the
-  line is drawn to — so the cursor leaves the line when the break reaches it.
-  The blink deliberately does the opposite, reading the raw samples at the wall
-  clock; [smooth-rendering.md](smooth-rendering.md) keeps both rules.
+- The trigger is the **apex**, not the probe: the run is read from
+  `drawn_samples(samples, reveal)` — the same cut the line is drawn to — and
+  fires only once the line's end, the newest drawn value, has scrolled to the
+  apex's x. A fresh failure is announced by the blink the moment it is probed
+  but bounced only when the cursor reaches it — seconds later at a long
+  window. The blink deliberately does the opposite, reading the raw samples at
+  the wall clock; [smooth-rendering.md](smooth-rendering.md) keeps both rules.
 - The liveness rule is the age check: the newest drawn sample must be a failure
-  no older than `max_sample_gap` (`timeout_run_latest`), and the walk back over
-  contiguous failures gives the run's first timestamp (`timeout_run_anchor`,
-  which the blink counts from). A host that stopped probing (profile switched
-  away, Pause on) fails the check, and the cursor goes back to holding the last
-  drawn value.
-- The shake's clock is `head − latest`, where `latest` is the newest failure the
-  drawn head has reached (`timeout_run_latest`), not the run's first: zero on
-  the frame a failure arrives, and restarted by each further failure so a run
-  that keeps failing keeps shaking. It is the same number in index and smooth
-  mode. The blink keeps `timeout_run_anchor`'s oldest timestamp, so its pulse
-  does not reset mid-run. `cursor_shake_offset` is a decaying
+  no older than `max_sample_gap` (`timeout_run_latest`, asked at
+  `head = reveal.unwrap_or(now)`, so smooth mode's hold still applies), and the
+  walk back over contiguous failures gives the run's first timestamp
+  (`timeout_run_anchor`, which the blink counts from). A host that stopped
+  probing (profile switched away, Pause on) fails the check, and the cursor
+  goes back to holding the last drawn value.
+- The shake counts from the frame the break reached the cursor — the arrival —
+  not from the failure's timestamp: at a long window the failure is seconds
+  old by then and a shake keyed to it would already be over. The anchor lives
+  in the series' `CursorAnimation` (`bounce_anchor(now, latest)`, dropped by
+  `end_bounce` when the cursor is back on the line), and `latest` — the newest
+  failure the drawn head has reached (`timeout_run_latest`) — is its key:
+  each further failure restarts the shake, so a run that keeps failing keeps
+  shaking. The blink keeps `timeout_run_anchor`'s oldest timestamp, so its
+  pulse does not reset mid-run. `cursor_shake_offset` is a decaying
   one-sided wave — `0.6 · half-height · (1 − t / 0.9 s) · (1 − cos(2π · 4.5 Hz
   · t)) / 2` — zero at both ends, so starting or stopping it cannot step the
   cursor, and never negative, so the cursor can only dip into the graph and
-  never rise above its rest. A run already in
-  progress when the cursor appears (a hidden overlay shown mid-run, the cursor
-  switched on) shakes only for what is left of the newest failure's window;
-  once that has passed it is drawn parked.
+  never rise above its rest. A run already in progress when the cursor appears
+  (a hidden overlay shown mid-run, the cursor switched on) starts its shake on
+  the frame the gate first opens and parks once the window has passed.
 - **The shake's numbers are unexciting on purpose.** Shipped first at 12 Hz and
   2 px, it was invisible in the running app: a 30 fps overlay samples a 12 Hz
   wave on unrelated phases, so it reads as a twitch, and 2 px against a 12 px
@@ -124,7 +132,7 @@ Colors rows.
   while the bounce alone parks whole.
 - The shake rides on top of the ease and sets `active`, which is why
   `cursor_due` and `cursor_repaint_interval` needed no new term: the ease
-  settles in ~150 ms while the shake runs for 600 ms, and both gates already
+  settles in ~150 ms while the shake runs for 900 ms, and both gates already
   read that flag.
 
 ### The reserves, and the draw order
@@ -159,6 +167,8 @@ The bounce has no key of its own: it is part of the cursor and follows
 `the_sample_cursor_keeps_its_gap_at_the_leading_edge`,
 `the_sample_cursor_apex_moves_with_its_size`,
 `the_cursor_bounces_off_the_top_when_the_timeout_reaches_it`,
+`a_fresh_timeout_does_not_bounce_the_cursor`,
+`a_timeout_that_reached_the_cursor_bounces`,
 `the_bounced_cursor_shakes_then_settles_at_the_top`,
 `a_second_timeout_in_a_row_restarts_the_shake`,
 `a_value_sample_brings_the_cursor_back_onto_the_line`,

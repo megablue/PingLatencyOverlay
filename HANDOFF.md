@@ -9,36 +9,42 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the sample cursor's gap against the graph — 2026-10-12. The cursor's
-base now keeps its gap from the graph's leading edge (the axis's end), not the
-box's: the rim's outer edge sits 2px inside the grid's last column, so the gap
-is visible; the leading reserve became the stroke's pad (5 → 2px) and the box
-returned to 314×136 while the time axis kept its length. The bounce still
-parks whole against the box's top edge — its topmost pixel flush — while a
-value clamped at the ceiling still hangs half out, apex on the line. The gate
-is green; the look is pending, so nothing is committed yet. The per-host
-adapter binding shipped as `1bc1705`; the compression bands and the background
-grid as `55dfdb2`, both bundled and pushed to `origin/split/renderer-process`.
-The ramp-and-growth design was rejected and replaced by discrete bands inside
-the canvas the config names.
+As of the sample cursor's bounce reaching the cursor — 2026-10-12. The bounce
+no longer fires the instant a timeout is probed: it fires when the break of a
+live run has scrolled back to the cursor — the line's end at or behind the
+apex — which at the live 125 s × 2 window takes about six seconds. The shake
+now counts from that arrival, anchored in the series' `CursorAnimation` and
+keyed to the newest failure so a run that keeps failing keeps shaking; the
+blink is unchanged and still pulses the moment the failure is recorded. The
+gate is green (253 core tests); the look is pending, so this change is not
+committed yet. The cursor's gap against the graph's leading edge, the box at
+314×136 and the bounce's whole rest shipped as `a84c133`; the per-host adapter
+binding as `1bc1705`; the compression bands and the background grid as
+`55dfdb2` — all pushed to `origin/split/renderer-process`. The ramp-and-growth
+design was rejected and replaced by discrete bands inside the canvas the
+config names.
 
 ## State
 
-- **The sample cursor keeps a 2px gap from the graph's leading edge, and the
-  bounce parks whole at the top.** The base is anchored to the axis's end, not
-  the box's (`base_x = axis_long - SAMPLE_CURSOR_EDGE_GAP - rim / 2`), so the
-  rim's outer edge sits 2px inside the grid's last column and the gap reads
-  against the grid instead of an invisible box edge — the line's newest few
-  pixels run on past the cursor's flat side. The leading reserve is no longer
-  the cursor's: it is `leading_reserve_px`, `stroke_pad` of the line's width
-  (2px for the default stroke), the same pad the other edges keep, so the box
-  hugs the graph — the user's overlay is 314×136 at 125% DPI and the time axis
-  keeps its length. The ceiling end still keeps no room (just the stroke's
-  pad): a *value* clamped there still centres on the ceiling line, apex on it,
-  half out — but the *bounce* rests whole, its topmost pixel flush with the
-  box's top edge, and `cursor_shake_offset` stays one-sided (dips into the
-  graph), because an upswing would push the cursor past the edge and slice it
-  again. The zero-line cursor stays whole. Read
+- **The sample cursor's bounce waits for the break to reach it.** The gate is
+  the apex, not the drawn head: the run must be live at the drawn head
+  (`timeout_run_latest`) *and* the line's end — the newest drawn value — must
+  have scrolled to or behind the apex's x (`axis_long - EDGE_MARGIN - size`),
+  so the cursor leaves the line only when it points at the timeout indicator.
+  At the live 125 s × 2 window (312 px axis) that is ~6 s into a run; a 1 s
+  blip never bounces, while the blink still pulses the instant the failure is
+  recorded. The shake counts from the frame the break reached the cursor — the
+  anchor lives in the series' `CursorAnimation` (`bounce_anchor(now, latest)`,
+  dropped by `end_bounce` when the cursor is back on the line) and `latest` is
+  its restart key, so each further failure re-shakes. The rest is unchanged:
+  whole against the box's top edge (topmost pixel flush), one-sided shake
+  (dips into the graph), a *value* clamped at the ceiling still hangs half
+  out. The base keeps its 2px gap from the graph's leading edge
+  (`base_x = axis_long - SAMPLE_CURSOR_EDGE_GAP - rim / 2`); the leading
+  reserve is `leading_reserve_px` (`stroke_pad` of the line's width, 2px for
+  the default stroke), so the box hugs the graph — 314×136 at 125% DPI — and
+  the zero-line cursor stays whole. Uncommitted: `render.rs`, `SPEC.md`,
+  `sample-cursor.md`, `rendering.md`, this file. Read
   `docs/features/overlays/sample-cursor.md`.
 - **A host can pick the network adapter its probes leave through.** Per host:
   `TargetConfig.adapter` (an adapter GUID; absent = Automatic), with a
@@ -79,11 +85,10 @@ the canvas the config names.
   `docs/features/overlays/rendering.md` for the drawing.
 - **The sample-cursor bounce ships with its revised shake.** `ce1ab95` shipped
   the bounce; `e8efedb` moved the shake to 4.5 Hz / 0.6 × the cursor's
-  half-height / 0.9 s and made its clock the *newest* failure
-  (`timeout_run_latest`) instead of the run's first, so a run that keeps
-  failing restarts the shake with every timeout instead of shaking once and
-  parking. The tip commit then removed the ceiling room and moved the rest onto
-  the axis top (the first bullet above); no new config key.
+  half-height / 0.9 s. The current (uncommitted) change reworked the trigger
+  and the shake's clock — see the first bullet above; no new config key.
+  `a_fresh_timeout_does_not_bounce_the_cursor`,
+  `a_timeout_that_reached_the_cursor_bounces`,
   `a_second_timeout_in_a_row_restarts_the_shake` and
   `the_bounced_cursor_shakes_then_settles_at_the_top` are the regression tests.
   Read `git log -1` for the tip and `git rev-list --count HEAD` for the commit

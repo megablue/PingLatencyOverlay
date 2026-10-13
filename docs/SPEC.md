@@ -186,16 +186,17 @@
     its apex points back along the line, so how far back it reaches is the
     cursor's size; the apex sits on the line itself, interpolated between
     samples — including a spike's flank or the jog where a line resumes after a
-    timeout — and it eases to a new value instead of jumping. When a live
-    timeout reaches the point it is drawn from — the break arriving on the same
-    three-second hold the line itself is drawn with — the cursor leaves the line
-    and is flung to the top of the latency axis, where it rests whole against
-    the overlay's top edge — its topmost pixel flush with it — and bounces —
-    dipping into the graph — for about a second before settling there, with
-    each further timeout in the run restarting the shake so a host that keeps
-    failing keeps shaking; it eases back onto the line when a value arrives. A
-    host that has stopped being probed is not a live timeout, and the cursor
-    stays on the last value the line
+    timeout — and it eases to a new value instead of jumping. When the break of
+    a live run of timeouts reaches the cursor — the line has scrolled back far
+    enough that the point the apex is drawn from sits in the break, which at a
+    long window is seconds after the failure was probed — the cursor leaves the
+    line and is flung to the top of the latency axis, where it rests whole
+    against the overlay's top edge — its topmost pixel flush with it — and
+    bounces — dipping into the graph — for about a second before settling
+    there, with each further timeout in the run restarting the shake so a host
+    that keeps failing keeps shaking; it eases back onto the line when a value
+    arrives. A host that has stopped being probed is not a live timeout, and
+    the cursor stays on the last value the line
     drew. It rotates and mirrors with the graph, so "the top" is the high-latency
     end of its own axis. Size is configurable
     (`sampleCursorSizePx`, 4–20 px, default 10). With the timeout blink on
