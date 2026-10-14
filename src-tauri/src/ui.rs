@@ -26,6 +26,7 @@ use ping_latency_overlay_core::rules::{
     self, AutoRules, Combine, Condition, MatchMode, Part, Rule, Scope, Snapshot, WindowInfo,
 };
 use ping_latency_overlay_core::transport::{Client, Message};
+use ping_latency_overlay_core::updater;
 use ping_latency_overlay_core::winwatch::{self, WindowShape};
 
 use crate::theme::{self, windows_app_mode, Mode, Theme, ThemeMode};
@@ -137,6 +138,14 @@ const ABOUT_TOP_GAP: f32 = 12.0;
 /// Extra air before a new group of lines, so the name, tagline and version read
 /// as one block and the link and copyright read as another.
 const ABOUT_GROUP_GAP: f32 = 10.0;
+/// Air between the About page's facts and its update row, so the row reads as
+/// a block of its own rather than as a stray extra line.
+const ABOUT_UPDATE_GAP: f32 = 16.0;
+/// The update row's button. Sized rather than `ui.button(..)` because the
+/// label is short and the default button would sit lopsided in a full-width
+/// row.
+const ABOUT_UPDATE_BUTTON_WIDTH: f32 = 160.0;
+const ABOUT_UPDATE_BUTTON_HEIGHT: f32 = 32.0;
 
 /// The app version as the About page shows it, in the `v0.1.x` form.
 ///
@@ -289,6 +298,29 @@ fn about_page_column(ui: &mut Ui, logo: &egui::TextureHandle) {
         }
     });
 }
+
+/// What the About page's update row says, for the state it is in.
+///
+/// A free function over the two pieces of state rather than a method that
+/// draws, so the wording is held by a test instead of by a screenshot: three of
+/// the four answers come back from network I/O that a test must not perform.
+fn update_status_line(busy: bool, answer: Option<&updater::Outcome>) -> String {
+    match answer {
+        Some(updater::Outcome::Available(release)) => {
+            // The tag on its own, not `label()`: that carries "is available"
+            // as the tray's standalone caption, and building a sentence out of
+            // it reads "Update available: v9.9.9 is available."
+            format!("Update available: {}.", release.tag)
+        }
+        Some(updater::Outcome::UpToDate) => "PingLatencyOverlay is up to date.".to_string(),
+        Some(updater::Outcome::Unknown(error)) => {
+            format!("Could not check for updates: {error}.")
+        }
+        None if busy => "Checking for updates...".to_string(),
+        None => String::new(),
+    }
+}
+
 /// The address an egui output command wants opened, if it wants one opened.
 ///
 /// `egui::Hyperlink` does not open anything itself. On a click it emits
@@ -1618,6 +1650,27 @@ pub struct PingApp {
     shutdown_state: ShutdownState,
     /// The app icon, decoded once and shown above the About page's text.
     about_logo: egui::TextureHandle,
+    /// What the last update check answered, if one has.
+    ///
+    /// Window-local state that never reaches disk: `updates.json` has exactly
+    /// one writer, the tray, so the two ends cannot disagree about what the
+    /// last check said. Losing it on close costs nothing — the tray still asks
+    /// every day on its own, which is how the answer survives anyway.
+    update_answer: Option<updater::Outcome>,
+    /// The channel a running check's answer arrives on.
+    ///
+    /// `updater::check` blocks for seconds on a bad connection, so it runs on a
+    /// thread of its own and this is how it talks back. The window never blocks
+    /// a frame: `sync_update_check` tries a receive and otherwise gets on with
+    /// the pass.
+    update_in_flight: Option<std::sync::mpsc::Receiver<updater::Outcome>>,
+    /// Set when the About page's button is clicked, and cleared once the check
+    /// it asked for has started.
+    ///
+    /// A flag rather than an immediate spawn, because the click happens while
+    /// the UI is being built and the driving tests drive `frame_ui`: a thread
+    /// started in there would be a call to GitHub under `cargo test`.
+    update_wanted: bool,
 }
 
 /// The three theme choices, in the order they are offered, with their labels.
@@ -1796,6 +1849,22 @@ fn set_background_tracking(
 ) {
     draft.ui.background_tracking = enabled;
     prefs.ui.background_tracking = enabled;
+}
+
+/// Stage the update-check toggle, and make it the live value at the same time.
+///
+/// The same both-halves rule as `set_background_tracking`, and for the same
+/// reason: `sync_update_check` reads the live preference when it decides whether
+/// arriving on the About page may ask on its own, so a draft-only write left
+/// the window checking anyway after the box was unticked — which is the one
+/// outcome the preference exists to prevent.
+fn set_check_for_updates(
+    prefs: &mut config::GlobalPrefs,
+    draft: &mut config::GlobalPrefs,
+    enabled: bool,
+) {
+    draft.ui.check_for_updates = enabled;
+    prefs.ui.check_for_updates = enabled;
 }
 
 impl PingApp {
@@ -2003,6 +2072,11 @@ impl PingApp {
             system_mode,
             shutdown_state: ShutdownState::Running,
             about_logo: about_logo_texture(ctx),
+            // Both `None` rather than a remembered answer: this window has not
+            // asked anything yet, and the persisted state belongs to the tray.
+            update_answer: None,
+            update_in_flight: None,
+            update_wanted: false,
         };
         app.sync_window_title(ctx);
         if attach {
@@ -2609,6 +2683,62 @@ impl PingApp {
         sync_profile_cache(last_page, page, profiles, counts, || {
             read_profile_snapshot(&self.store)
         });
+    }
+
+    /// Ask for a newer release, and collect the answer when it lands.
+    ///
+    /// Two halves, and the order matters. Arriving on the About page is the
+    /// signal, which is why `frame_logic` runs this before `sync_profiles` —
+    /// that pass is the one that advances `last_page`, so an arrival read after
+    /// it is an arrival already consumed.
+    ///
+    /// The check itself is blocking network I/O measured in seconds, so it can
+    /// never run on the frame path: it goes on a thread, the answer comes back
+    /// on a channel, and this only drains that channel. The window
+    /// deliberately never writes `updates.json` — the tray is the single writer
+    /// there — because two writers of one state is how the two ends come to
+    /// disagree about what the last check said.
+    fn sync_update_check(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
+        // Collected into a local before anything is assigned, so the receiver
+        // is not borrowed while `update_in_flight` is written to.
+        let landed = match self.update_in_flight.as_ref() {
+            Some(reply) => match reply.try_recv() {
+                Ok(answer) => Some(Some(answer)),
+                Err(TryRecvError::Disconnected) => Some(Some(updater::Outcome::Unknown(
+                    "the check could not be completed".to_string(),
+                ))),
+                Err(TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        if let Some(answer) = landed {
+            self.update_in_flight = None;
+            if let Some(answer) = answer {
+                self.update_answer = Some(answer);
+            }
+        }
+        if self.update_in_flight.is_some() {
+            return;
+        }
+        let asked = std::mem::take(&mut self.update_wanted);
+        let arrived = self.page == Page::About && self.last_page != Page::About;
+        // The preference gates the arrival, not the click: opening a page is
+        // not the same as asking, and unticking the box is supposed to stop
+        // exactly this much. A click is a user asking, so it always goes
+        // through, whether the preference is on or off.
+        if !asked && (!arrived || !self.prefs.ui.check_for_updates) {
+            return;
+        }
+        let (reply, waiting) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Blocking network I/O of several seconds, which is the entire
+            // reason for the thread: the window's frame path must never wait
+            // on it.
+            let _ = reply.send(updater::check(env!("APP_BUILD_VERSION")));
+        });
+        self.update_in_flight = Some(waiting);
     }
 
     /// Re-resolve the theme, and repaint the window when it changed.
@@ -3620,6 +3750,29 @@ impl PingApp {
             self.prefs_dirty = true;
         }
 
+        // The one place the update checker is switched off, and the wording is
+        // deliberately "in the background": it gates the checks this app makes
+        // on its own — the tray's once-a-day ask, and this window's check when
+        // the About page is opened. A click on the About page's button is a
+        // user asking, which is not background and is never gated.
+        ui.add_space(4.0);
+        let mut check_for_updates = self.prefs_draft.ui.check_for_updates;
+        if ui
+            .checkbox(
+                &mut check_for_updates,
+                "Check for updates in the background",
+            )
+            .on_hover_text(
+                "Once a day, the app asks GitHub whether a newer release exists and says so in \
+                 the tray menu. Untick this and it never asks on its own. The Check for updates \
+                 button on the About page still works whenever you use it.",
+            )
+            .changed()
+        {
+            set_check_for_updates(&mut self.prefs, &mut self.prefs_draft, check_for_updates);
+            self.prefs_dirty = true;
+        }
+
         // An unreadable file is never rewritten silently, so the error stays
         // visible until the user either fixes the file or edits a rule and
         // saves over it.
@@ -3658,17 +3811,67 @@ impl PingApp {
 
     /// Pane 3 of the About page: what this is, which version, and who wrote it.
     ///
-    /// Read-only, and it has no list pane, so it gets the full width like the
-    /// Global page. It is one centred column rather than a labelled table,
-    /// because the page used to read as settings instead of as an About box.
-    /// The facts come from `about_page_lines` so they can be tested; the
-    /// centring deliberately uses `with_layout`, see the note there.
+    /// It has no list pane, so it gets the full width like the Global page. It
+    /// is one centred column rather than a labelled table, because the page
+    /// used to read as settings instead of as an About box. The facts come from
+    /// `about_page_lines` so they can be tested; the centring deliberately
+    /// uses `with_layout`, see the note there.
+    ///
+    /// The facts above stay read-only. The update row underneath is the one
+    /// part of the page that acts, and it is drawn as its own block for that
+    /// reason rather than becoming a line the facts list has to know about.
     fn show_about_page(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 about_page_column(ui, &self.about_logo);
+                self.update_row(ui);
             });
+    }
+
+    /// The About page's update row: a check that answers in place.
+    ///
+    /// A second centred block rather than an `AboutLine`, because the row has
+    /// state the facts list cannot hold — the answer, the thread that is still
+    /// running, and a click that asks for one. `with_layout` twice in a row is
+    /// the shape this file already uses: see the note on `about_page_column`
+    /// about not growing a child min rect.
+    ///
+    /// The row only ever *asks*. The thread itself is started by
+    /// `sync_update_check` in `frame_logic`, which the driving tests do not
+    /// run, so a click under `cargo test` never reaches GitHub.
+    fn update_row(&mut self, ui: &mut Ui) {
+        ui.add_space(ABOUT_UPDATE_GAP);
+        ui.with_layout(Layout::top_down(Align::Center), |ui| {
+            let busy = self.update_in_flight.is_some();
+            let clicked = ui
+                .add_enabled_ui(!busy, |ui| {
+                    ui.add_sized(
+                        [ABOUT_UPDATE_BUTTON_WIDTH, ABOUT_UPDATE_BUTTON_HEIGHT],
+                        egui::Button::new("Check for updates"),
+                    )
+                })
+                .inner
+                .clicked();
+            if clicked {
+                self.update_wanted = true;
+            }
+            let line = update_status_line(busy, self.update_answer.as_ref());
+            if !line.is_empty() {
+                ui.add_space(2.0);
+                ui.label(RichText::new(line).color(UI_TEXT_SECONDARY()));
+            }
+            // A found release's page, as a link rather than as a button, so it
+            // opens through the same `OpenUrl` drain as the repository link
+            // above and the status bar reports it the same way.
+            if let Some(updater::Outcome::Available(release)) = &self.update_answer {
+                ui.add_space(2.0);
+                ui.add(egui::Hyperlink::from_label_and_url(
+                    RichText::new("Open the release page"),
+                    release.url.clone(),
+                ));
+            }
+        });
     }
 
     /// Opens any URL the frame's widgets asked for.
@@ -5748,6 +5951,10 @@ impl PingApp {
             ctx.request_repaint();
         }
         self.sync_border_preview();
+        // Before `sync_profiles`, and the order is load-bearing: that pass is
+        // the one that advances `last_page`, so it has to run after the About
+        // arrival has been read or the arrival is one this pass consumed.
+        self.sync_update_check();
         self.sync_profiles();
         self.sync_monitors();
         self.sync_adapters();
@@ -7202,18 +7409,18 @@ mod tests {
         set_sticky_value, sticky_value, sync_adapter_list, sync_auto_preview_text,
         sync_monitor_list, sync_profile_cache, sync_theme, theme, theme_choice_hint, theme_choices,
         theme_tile_label_size, theme_tile_side, theme_tiles, toggled_selection, ui_text_size,
-        window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page, PingApp, ProfileSnapshot,
-        ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS, ABOUT_REPOSITORY, ABOUT_SUPPORT,
-        ADAPTER_REFRESH_INTERVAL, DETAIL_FOOTER_BUTTON_HEIGHT, DETAIL_FOOTER_BUTTON_WIDTH,
-        DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS, GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF,
-        LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL, OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP,
-        PANE_MARGIN, PICK_ICON_RADIUS, PICK_ICON_STROKE, PICK_ICON_TICK_INNER,
-        PICK_ICON_TICK_OUTER, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING, RAIL_ROW_HEIGHT,
-        RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
-        TARGET_ROW_HEIGHT, THEME_ICON_STROKE, THEME_MOON_BITE_OFFSET, THEME_MOON_BITE_RADIUS,
-        THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS, THEME_SUN_RAYS, THEME_SUN_RAY_OUTER,
-        THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND, WINDOW_HEIGHT, WINDOW_MIN_HEIGHT,
-        WINDOW_MIN_WIDTH, WINDOW_WIDTH,
+        update_status_line, updater, window_title, AboutKind, AutoSwitchStep, Frame, Mode, Page,
+        PingApp, ProfileSnapshot, ThemeMode, ABOUT_ICON_DOT_RADIUS, ABOUT_ICON_ROWS,
+        ABOUT_REPOSITORY, ABOUT_SUPPORT, ADAPTER_REFRESH_INTERVAL, DETAIL_FOOTER_BUTTON_HEIGHT,
+        DETAIL_FOOTER_BUTTON_WIDTH, DETAIL_FOOTER_HEIGHT, GLOBAL_ICON_KNOB_RADIUS,
+        GLOBAL_ICON_ROWS, GLOBAL_ICON_TRACK_HALF, LIST_PANE_INSET, MONITOR_REFRESH_INTERVAL,
+        OVERLAY_ROW_HEIGHT, PAGES, PANE_GAP, PANE_MARGIN, PICK_ICON_RADIUS, PICK_ICON_STROKE,
+        PICK_ICON_TICK_INNER, PICK_ICON_TICK_OUTER, PROFILE_ROW_HEIGHT, PROFILE_ROW_TRAILING,
+        RAIL_ROW_HEIGHT, RAIL_WIDTH, ROW_MARGIN, SCROLL_BAR_RESERVE, SIDEBAR_WIDTH,
+        STATUS_BAR_HEIGHT, TARGET_ROW_HEIGHT, THEME_ICON_STROKE, THEME_MOON_BITE_OFFSET,
+        THEME_MOON_BITE_RADIUS, THEME_MOON_RADIUS, THEME_SUN_CORE_RADIUS, THEME_SUN_RAYS,
+        THEME_SUN_RAY_OUTER, THEME_SYSTEM_RADIUS, THEME_TILE_GAP, UI_BACKGROUND, WINDOW_HEIGHT,
+        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH,
     };
     use eframe::egui;
     use ping_latency_overlay_core::adapters::NetworkAdapter;
@@ -10051,6 +10258,135 @@ mod tests {
                 .read_global_prefs()
                 .ui
                 .selection_border_animation,
+            "Save did not write the preference"
+        );
+    }
+
+    /// The About page's update row, in every state a check can be in.
+    ///
+    /// Pure and thread-free on purpose: three of the five answers only ever
+    /// come back from network I/O, so the one thing that can be checked without
+    /// a request is the wording — and the wording is the whole user-visible
+    /// half. `busy` with no answer is the row's state while a check is running,
+    /// which the About-page test below cannot produce because it never lets
+    /// `frame_logic` run.
+    #[test]
+    fn the_update_row_says_what_it_found() {
+        let up_to_date = updater::Outcome::UpToDate;
+        let available = updater::Outcome::Available(updater::Release {
+            tag: "v9.9.9".to_string(),
+            url: "https://github.com/megablue/PingLatencyOverlay/releases/tag/v9.9.9".to_string(),
+        });
+        let failed = updater::Outcome::Unknown("no network".to_string());
+
+        assert!(
+            update_status_line(false, None).is_empty(),
+            "nothing has been asked yet, so there is nothing to say"
+        );
+        assert_eq!(
+            update_status_line(true, None),
+            "Checking for updates...",
+            "a running check must say so rather than leaving the row blank"
+        );
+        assert_eq!(
+            update_status_line(false, Some(&up_to_date)),
+            "PingLatencyOverlay is up to date.",
+            "the good news must name the app, not just say 'up to date'"
+        );
+        assert_eq!(
+            update_status_line(false, Some(&available)),
+            "Update available: v9.9.9.",
+            "the row must name the version, because that is what makes it worth clicking"
+        );
+        assert_eq!(
+            update_status_line(false, Some(&failed)),
+            "Could not check for updates: no network.",
+            "a failure must say what went wrong, not just that something did"
+        );
+    }
+
+    /// Clicking the About page's button asks for a check and nothing more.
+    ///
+    /// The ask is a flag: `frame_logic` is what turns it into a thread, and the
+    /// tests drive the frame path without the logic pass. So this asserts the
+    /// click stops exactly there — a test that reached GitHub here would be a
+    /// test that hangs on a plane.
+    #[test]
+    fn the_about_page_button_only_asks_for_a_check() {
+        let root = driving_root("plo-drive-about-check");
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+
+        click_text(&mut app, &ctx, "About");
+        click_text(&mut app, &ctx, "Check for updates");
+
+        assert!(
+            app.update_wanted,
+            "the click did not ask for a check, so nothing would ever run"
+        );
+        assert!(
+            app.update_in_flight.is_none(),
+            "the click spawned a check, so `cargo test` would reach GitHub"
+        );
+        assert!(
+            app.update_answer.is_none(),
+            "a check answered without anything having run"
+        );
+    }
+
+    /// The update toggle is staged and live at once, like the two Appearance
+    /// checkboxes: Discard puts both halves back, Save writes the sandbox file.
+    ///
+    /// The live half is what `sync_update_check` reads when it decides whether
+    /// arriving on the About page may ask on its own, so a control that only
+    /// staged would look live and only take effect at Save.
+    #[test]
+    fn the_update_check_toggle_is_staged_and_live() {
+        let root = driving_root("plo-drive-updates");
+        let ctx = egui::Context::default();
+        let mut app = PingApp::for_test(&ctx, &root);
+        click_text(&mut app, &ctx, "Global");
+
+        click_text(&mut app, &ctx, "Check for updates in the background");
+        assert!(
+            !app.prefs_draft.ui.check_for_updates,
+            "the box did not stage the preference"
+        );
+        assert!(
+            !app.prefs.ui.check_for_updates,
+            "the live value did not follow the box, so the About page would keep asking"
+        );
+        assert!(
+            app.prefs_dirty,
+            "the box did not mark the preferences dirty"
+        );
+
+        click_text(&mut app, &ctx, "Discard");
+        assert!(
+            app.prefs_draft.ui.check_for_updates,
+            "Discard did not restore the draft"
+        );
+        assert!(
+            app.prefs.ui.check_for_updates,
+            "Discard did not restore the live value"
+        );
+        assert!(!app.prefs_dirty, "Discard left the preferences dirty");
+        assert!(
+            config::Store::new(root.clone())
+                .read_global_prefs()
+                .ui
+                .check_for_updates,
+            "Discard wrote the abandoned draft to the sandbox"
+        );
+
+        click_text(&mut app, &ctx, "Check for updates in the background");
+        click_text(&mut app, &ctx, "Save");
+        assert!(!app.prefs_dirty, "Save left the preferences dirty");
+        assert!(
+            !config::Store::new(root.clone())
+                .read_global_prefs()
+                .ui
+                .check_for_updates,
             "Save did not write the preference"
         );
     }

@@ -71,6 +71,16 @@ pub mod rules;
 // test runs.
 pub mod sticky;
 
+// Whether a newer release exists, and when that was last looked up. The split
+// is the same one `adapters` uses: the version comparison and the cadence
+// decision are pure functions over the answer's data, and the one thing that
+// touches the network is a `#[cfg(windows)]` WinHTTP block, so there is no
+// HTTP client in the dependency graph of the process that must never open a
+// GPU context. It lives here rather than in the shell because the tray and the
+// configuration window both check, and the request is not the sort of thing two
+// processes should each get to rewrite.
+pub mod updater;
+
 // One snapshot of the desktop's windows, for `rules` and `sticky`. Win32, and
 // deliberately the only impure part: the split is what lets the matching be
 // tested with synthetic window lists.

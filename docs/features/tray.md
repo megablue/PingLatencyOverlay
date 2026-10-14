@@ -8,8 +8,10 @@ auto profile switching, or anything the tray supervises.
 - `plo-tray.exe` is the only resident process and the one a user launches; it
   owns the notification-area icon and its native menu.
 - A left-click opens the Config window; a right-click opens the menu
-  (Pause/Resume, Exit). Exit is the only thing that ends the app — closing the
-  Config window never does.
+  (Pause/Resume, Check for updates / Update available: v…, Exit). Exit is the
+  only thing that ends the app — closing the Config window never does. The
+  update item asks GitHub for a newer release and, when one is found, opens its
+  page; nothing is downloaded or installed (updates.md).
 - It starts whatever is missing when it launches, supervises the renderer
   through the pipe, and restarts it after a crash — but only a process it
   started itself is ever stopped.
@@ -22,11 +24,14 @@ auto profile switching, or anything the tray supervises.
 
 - `crates/tray/src/lib.rs` — `TrayState`, `create()`, `tray_icon()`,
   `show_menu` / `show_native_menu` (a native `HMENU`), the icon-event loop,
-  `wide()`.
+  `wide()`; `TrayState.update` (`Mutex<Option<Release>>`), `set_known_update`,
+  the update menu item's caption and `open_url`.
 - `crates/tray/src/main.rs` — the loop and `App`: `new`, `step`, `on_action`,
   `open_config`, `send`, `renderer_is_gone`, `supervise`, `finish_starting`,
   `auto_switch`, `reload_rules_if_changed`, `apply_auto_profile`,
-  `note_auto_error`; helpers `file_stamp`, `read_rules_file`, `forget_expired`.
+  `note_auto_error`, `reload_prefs`, `check_for_updates`; helpers `file_stamp`,
+  `read_rules_file`, `forget_expired`. The update check runs on its own thread
+  and answers over an `mpsc` channel — see updates.md.
 - `crates/core/src/rules.rs` — the pure half, shared with the Config window:
   `AutoRules`, `Rule`, `Condition`, `CompiledMatcher`, `MatchMode`, `Scope`,
   `Combine`, `Snapshot`, `WindowInfo`, `Decision`, `Engine` (`step`, `resume`,
@@ -86,9 +91,9 @@ auto profile switching, or anything the tray supervises.
   (`all`/`any`), `when[]` conditions (part: process/title/class, a match mode,
   a value) and a target profile id. An absent field takes its documented
   default.
-- The menu: Pause/Resume and Exit.
-- A preference that rides every push: `ui.backgroundTracking`
-  (config/storage.md).
+- The menu: Pause/Resume, the update item, and Exit.
+- Preferences that ride every push: `ui.backgroundTracking`
+  and `ui.checkForUpdates` (config/storage.md, updates.md).
 
 ## Tests that pin it
 
@@ -109,6 +114,11 @@ auto profile switching, or anything the tray supervises.
 - Wiring: `a_crash_loop_is_stopped_and_a_rare_failure_is_not` (the tray's
   supervision test), `the_window_engine_holds_a_switch_until_the_drafts_are_resolved`
   (ui.rs), and the background-tracking quartet listed in probes.md.
+- The tray's update wiring has no test of its own — the loop, the thread, the
+  menu caption and the menu item are not covered by the tray crate's suite. The
+  pure half (version compare, the state file, the answeredness of an outcome)
+  is pinned in `updater.rs` and the About page's half in `ui.rs`, both in
+  updates.md.
 
 ## Related
 
@@ -119,3 +129,4 @@ auto profile switching, or anything the tray supervises.
 - probes.md — background tracking and what the tray retires (nothing).
 - config/storage.md — profiles, `globalconfig.json`, `rules.json`.
 - config/window.md — the window's own engine and its preview.
+- updates.md — the once-a-day check, the menu item and the About page's row.

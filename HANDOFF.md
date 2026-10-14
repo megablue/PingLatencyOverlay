@@ -9,23 +9,70 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the sample cursor's bounce reaching the cursor — 2026-10-12. The bounce
-no longer fires the instant a timeout is probed: it fires when the break of a
-live run has scrolled back to the cursor — the line's end at or behind the
-apex — which at the live 125 s × 2 window takes about six seconds. The shake
-now counts from that arrival, anchored in the series' `CursorAnimation` and
-keyed to the newest failure so a run that keeps failing keeps shaking; the
-blink is unchanged and still pulses the moment the failure is recorded. The
-gate is green (253 core tests); the look is pending, so this change is not
-committed yet. The cursor's gap against the graph's leading edge, the box at
-314×136 and the bounce's whole rest shipped as `a84c133`; the per-host adapter
-binding as `1bc1705`; the compression bands and the background grid as
-`55dfdb2` — all pushed to `origin/split/renderer-process`. The ramp-and-growth
-design was rejected and replaced by discrete bands inside the canvas the
-config names.
+As of the update checker — 2026-10-13. The app now asks GitHub once a day
+whether a newer release exists and says so in the tray menu, names a found
+release's page, and carries the same check on the Config window's About page.
+`ui.checkForUpdates` is on by default and stops only the tray's daily ask: a
+click on the menu item or the About page's button is a user asking, and that
+is never gated. The last answer is kept in `updates.json` beside the config,
+written by the tray alone, so a restart does not buy another check. **The first
+check on a live machine stalled with `ERROR_WINHTTP_TIMEOUT` (12002):** the
+session opened with `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`, whose WPAD
+auto-discovery (DHCP option 252, then a `wpad` DNS lookup) cannot complete on a
+machine with virtual adapters, a tunnel and no DNS suffix, and the timeouts
+bite before a byte is sent. Measured repeatedly: access type 4 died, types 0
+and 1 answered. It now opens with `DEFAULT_PROXY`. The endpoint also moved from
+the `api.github.com` JSON to `github.com/{slug}/releases/latest`, whose
+redirect WinHTTP follows and whose final URL `WinHttpQueryOption`
+(`WINHTTP_OPTION_URL`) reads back — so the tag and the page to open are one
+string, nothing is parsed, and the shared WARP egress address that had spent
+the API's sixty-an-hour is not a factor. A failure is now `describe()`'s
+sentence (`the request timed out`, `the secure connection failed`, `GitHub is
+rate-limiting this network; try again later`) rather than
+`OS Error 12002 (FormatMessageW() returned error 317)`. The gate is
+green (`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo test --all-features` — 100 shell tests, up from 97, 269 in core, 6 + 2
++ 3 + 1 elsewhere) and `cargo build --release` succeeded (1m56s), so the three
+release exes carry all three fixes; nothing is committed yet. The sample
+cursor's bounce reaching the cursor shipped as `8ac13ea` and was pushed, along
+with the per-host adapter binding as `1bc1705` and the compression bands and
+the background grid as `55dfdb2` — all on `origin/split/renderer-process`. The
+ramp-and-growth design was rejected and replaced by discrete bands inside the
+canvas the config names.
 
 ## State
 
+- **The update checker is new and uncommitted.** `crates/core/src/updater.rs` is
+  the one statement of it: `parse_version` / `Version` compare by number (a tag
+  reads the same with or without the `v`, and only three numbers are a
+  version), `decide` offers only a release *behind* the running one so a local
+  build never reads "downgrade available", and `check` is one blocking request
+  of `github.com/{slug}/releases/latest` through a module-local `extern "system"`
+  block — no new dependency, in the project's own-FFI style. WinHTTP follows
+  the redirect and `WinHttpQueryOption` (`WINHTTP_OPTION_URL`) reads back the
+  final URL, so the tag and the page to open are one string: `release_from_url`
+  takes the tag after `/releases/tag/`, and a page that is not a release says
+  so instead of reading "up to date". `describe()` turns a WinHTTP failure into
+  a sentence (`the request timed out`, the address could not be resolved, the
+  connection could not be made, the secure connection failed), because Rust
+  cannot read winhttp.dll's message table and would otherwise show
+  `OS Error 12002 (FormatMessageW() returned error 317)`. The session opens
+  with `DEFAULT_PROXY` — **never `AUTOMATIC_PROXY` again**: its WPAD discovery
+  stalls past the 5 s timeouts on this machine and the check dies before a byte
+  is sent. The body is never read.
+  The tray ticks it on its one-second loop but runs the check on its own thread
+  and answers over an `mpsc` channel, so a bad connection cannot freeze the
+  pump, the supervision or the menu; the 24 h cadence is `updater::due` reading
+  `checkedAt` from `updates.json`, so a restart does not buy another check.
+  `crates/tray/build.rs` sets `APP_BUILD_VERSION` (the tray's own manifest says
+  `0.2.0`), and the tray is the only writer of `updates.json`. The Config
+  window checks for itself when the About page is opened: `sync_update_check`
+  must run *before* `sync_profiles`, because that pass is what advances
+  `last_page` and the About arrival is read off that transition. `ui.checkFor-
+  Updates` (default on) stops the tray's daily ask and the window's arrival
+  check only — a click on the menu item or the About page's
+  **Check for updates** is a user asking and is never gated, and the window
+  never writes the state file. Read `docs/features/updates.md`.
 - **The sample cursor's bounce waits for the break to reach it.** The gate is
   the apex, not the drawn head: the run must be live at the drawn head
   (`timeout_run_latest`) *and* the line's end — the newest drawn value — must
@@ -43,8 +90,7 @@ config names.
   (`base_x = axis_long - SAMPLE_CURSOR_EDGE_GAP - rim / 2`); the leading
   reserve is `leading_reserve_px` (`stroke_pad` of the line's width, 2px for
   the default stroke), so the box hugs the graph — 314×136 at 125% DPI — and
-  the zero-line cursor stays whole. Uncommitted: `render.rs`, `SPEC.md`,
-  `sample-cursor.md`, `rendering.md`, this file. Read
+  the zero-line cursor stays whole. Shipped as `8ac13ea` and pushed. Read
   `docs/features/overlays/sample-cursor.md`.
 - **A host can pick the network adapter its probes leave through.** Per host:
   `TargetConfig.adapter` (an adapter GUID; absent = Automatic), with a

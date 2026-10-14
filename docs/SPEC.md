@@ -596,16 +596,19 @@ from the program, so a theme can be written, shared and edited without a build.
   is written only on Save.
   The About page
   has no list either, so its detail pane spans the same full width, and is
-  read-only and centred: the app icon, then one column of lines — the app name
+  centred: the app icon, then one column of lines — the app name
   large, the tagline under it, the version, then the repository, the support
   link (a "Buy me a coffee" PayPal link), the copyright
-  and the licence. Nothing on it can be edited, and it carries no Save/Discard
-  footer because it stages nothing. No line on it is smaller than the rest of
+  and the licence. The facts above are read-only. No line on it is smaller than
+  the rest of
   the window's body text. The repository and support lines are the clickable
   ones: each opens its address in the user's default browser, and the full
   address is in the hover tooltip. The copyright
   carries no year, so it cannot go stale between releases. The licence is named
   in words and not linked, because the licence text is not bundled with the app.
+  Below them sits an update row — a **Check for updates** button and a line
+  that says what came back — and a **Check for updates in the background**
+  checkbox on the Global page, described under *Checking for updates*.
 - The **detail pane** ends in a sticky footer holding **Discard** and **Save**,
   right aligned with Save as the filled primary action, under a scrolling detail.
   Both are enabled while **either** draft has something to write - the profile
@@ -650,6 +653,34 @@ from the program, so a theme can be written, shared and edited without a build.
   room for the rail, the list pane and a usable detail pane at the same time.
   `AGENTS.md` records the layout traps behind these proportions; every one of
   them first shipped as a visible misalignment.
+
+## Checking for updates
+
+- The tray asks GitHub once a day whether a newer release exists, and the tray
+  menu items names it — `Update available: v0.2.72` — from the moment one is
+  found until a newer answer replaces it. The check is silent otherwise: there
+  is no popup, no download and no installer spawned by anything in this app.
+- Choosing a menu item or the About page's link that a menu item or the About
+  page offers opens the release page in the user's default browser, and nothing
+  else. This app never installs itself; it points at the page a person would
+  download from, and stops there.
+- The cadence is once a day, counted from the last check rather than from when
+  the process started, so restarting the tray does not buy another check. The
+  last answer is kept in `updates.json` beside the config and survives a
+  restart, which is what keeps the menu honest without asking on every launch.
+- Checking is **on by default** and can be switched off with **Check for
+  updates in the background** on the Global page. Switching it off stops the
+  tray's daily ask only: the menu item and the About page's **Check for
+  updates** button still work, because a click is a user asking rather than a
+  background phone-home.
+- The Config window checks for itself when the About page is opened, and the
+  row under the version facts says what came back: the version that is
+  available with a link to its page, that the app is up to date, that the check
+  could not be completed, or that a check is running. A button asks again. The
+  window never writes `updates.json`, so the tray stays the only writer.
+- Only the release the running version is behind is offered, never a newer
+  version than the one published: a locally built or newer install reads "up to
+  date" rather than being told to downgrade.
 
 ## Installer and build
 - Target architectures: x64 and ARM64.

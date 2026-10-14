@@ -63,6 +63,12 @@ Status: shipped (v0.2.39) · Read when: touching `config.rs`, persistence, migra
 - `write_global_prefs` replaces only the `ui` key, so the active-profile pointer
   and any key a future version adds survive. Never write that file as a whole
   object.
+- `updates.json` sits beside the config and is the one file that is **not**
+  globals: it is the update checker's own state (`checkedAt`, `release`),
+  written by the tray alone after a check answers, and read by whoever needs to
+  know when the last ask was (updates.md). A missing or broken file reads as
+  "never checked" rather than as an error, because the answer to a check is
+  worth less than the cadence it powers.
 
 ### Targets
 
@@ -111,6 +117,7 @@ Status: shipped (v0.2.39) · Read when: touching `config.rs`, persistence, migra
 | `globalconfig.json` | `ui.railCollapsed` | navigation rail |
 | `globalconfig.json` | `ui.selectionBorderAnimation` | preview border on selection |
 | `globalconfig.json` | `ui.backgroundTracking` | keep departed probes alive |
+| `globalconfig.json` | `ui.checkForUpdates` | ask GitHub once a day (updates.md) |
 | env | `PLO_CONFIG_DIR` | config root override (all three processes) |
 | env | `PLO_LOG` | release builds log only when set |
 

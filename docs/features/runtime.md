@@ -87,6 +87,13 @@ matrix, the window message pump, or which process owns what.
   process. The wait is `min(deadline, cap)` via `wait_before`, and a pipe
   command resets the deadline. Only a user can confirm Windows stops calling
   the process hung.
+- **A blocking check must never run on the tray's loop.** The tray's
+  one-second loop *is* that loop, so a check on it freezes the message pump,
+  the supervision and the menu at the same time — and a thread blocked in a
+  network call looks exactly like a wedged app from outside. `updater::check`
+  therefore runs on its own thread and answers over an `mpsc` channel the loop
+  polls, which is the same rule as the pump above: a thread that sleeps in a
+  call receives *nothing* (updates.md).
 - **Letting the default handler run can be worse than ignoring the message.**
   `DefWindowProcW` on `WM_CLOSE` *destroys* the window and the loop rebuilds
   it, so Task Manager's "End task" concludes its graceful close worked and

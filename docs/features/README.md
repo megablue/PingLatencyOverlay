@@ -21,6 +21,7 @@ refactors with no behavior, mechanism, config or test change need no edit.
 | Supervision | [supervision.md](supervision.md) | the tray's restart and storm guard, `App::starting` |
 | Live edits | [live-edits.md](live-edits.md) | `sync_runtime_config`, `push_config`, `persist_current` |
 | Tray | [tray.md](tray.md) | tray icon and menu, resident loop, auto profile switching |
+| Updates | [updates.md](updates.md) | the once-a-day check, the tray's menu item, the About page's update row |
 | Config — window | [window.md](config/window.md) | the egui window: `ui.rs`, panes, drafts, pickers, test seams |
 | Config — storage | [storage.md](config/storage.md) | `config.rs`: schema, profiles, globals, `rules.json`, migrations |
 | Probes | [probes.md](probes.md) | `probe.rs` / `probes.rs`: ICMP and TCP, the address cache, cadence |

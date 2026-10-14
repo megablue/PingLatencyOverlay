@@ -33,6 +33,10 @@ wondering where a process's output goes.
   return is invisible forever, and from outside a wedged loop and a feature that
   was never written look identical — which is what the tray heartbeat exists to
   separate.
+- **The update check is traceable in the same file.** The tray logs the check's
+  outcome — a found release and its tag, or the reason an answer could not be
+  read — so `grep` over `pinglatencyoverlay.log` says what the last ask saw even
+  after the menu caption has been replaced by a newer answer (updates.md).
 - **In a release build a log line is silent, so anything the user must see has
   to be a `fatal`.** `PLO_LOG=1` is the support switch; it is the same
   `log_enabled` decision a test drives directly.

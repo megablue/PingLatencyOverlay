@@ -1139,6 +1139,14 @@ pub struct UiPrefs {
     /// immediately, which is the behavior before this preference existed.
     #[serde(default = "default_true")]
     pub background_tracking: bool,
+    /// Whether the tray looks for a newer release once a day.
+    ///
+    /// On by default: a latency overlay that knows a new build exists is one
+    /// the user does not have to go looking for. Off stops the *automatic*
+    /// check only — the tray menu's item and the About page's still work,
+    /// because a check the user asked for is not a background phone-home.
+    #[serde(default = "default_true")]
+    pub check_for_updates: bool,
     /// Which of a theme's two files the window uses.
     ///
     /// `System` by default, so the window and the native tray menu agree without
@@ -1161,6 +1169,7 @@ impl Default for UiPrefs {
             show_version_in_title: false,
             selection_border_animation: true,
             background_tracking: true,
+            check_for_updates: true,
             theme: ThemeMode::System,
         }
     }
@@ -2125,7 +2134,11 @@ pub fn load() -> ConfigLoad {
 
 /// Write `contents` through a temporary file so a reader never observes a
 /// partially written configuration.
-fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+///
+/// `pub(crate)` rather than private because the update state in `updater` is
+/// written with the same guarantee, and half an atomic write is the one thing
+/// this dance exists to prevent.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let file_name = path
@@ -3640,6 +3653,41 @@ mod tests {
         std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
         assert!(
             store.read_global_prefs().ui.background_tracking,
+            "a ui key without the preference must fall back to the default"
+        );
+    }
+
+    /// The update preference is on for a config written before it existed, and
+    /// a written `false` survives the round trip.
+    #[test]
+    fn the_check_for_updates_preference_defaults_on_and_round_trips() {
+        let root = TestDir::new("prefs-check-for-updates");
+        let store = store_at(root.path());
+        store.load(&root.path().join("missing-legacy"));
+
+        assert!(
+            store.read_global_prefs().ui.check_for_updates,
+            "updates are looked for unless the setting is turned off"
+        );
+
+        let prefs = GlobalPrefs {
+            ui: UiPrefs {
+                check_for_updates: false,
+                ..UiPrefs::default()
+            },
+        };
+        store.write_global_prefs(&prefs).expect("write prefs");
+        assert!(
+            !store.read_global_prefs().ui.check_for_updates,
+            "the preference did not survive a round trip"
+        );
+
+        // A file written before the preference existed must not fail to load,
+        // and must not silently stop the daily check either.
+        let raw = store.global_config_path().to_string_lossy().to_string();
+        std::fs::write(&raw, "{\"ui\":{\"railCollapsed\":true}}").expect("write a partial ui key");
+        assert!(
+            store.read_global_prefs().ui.check_for_updates,
             "a ui key without the preference must fall back to the default"
         );
     }

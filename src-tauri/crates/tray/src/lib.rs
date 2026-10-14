@@ -4,6 +4,7 @@ use std::sync::{
     mpsc, Arc,
 };
 
+use ping_latency_overlay_core::updater::Release;
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[cfg(windows)]
@@ -52,6 +53,21 @@ pub mod win {
         ) -> u32;
     }
 
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        /// The "open this in whatever program owns it" entry point, which for
+        /// an http URL is the browser the user chose. Returns a value above 32
+        /// on success.
+        pub fn ShellExecuteW(
+            hwnd: HWND,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> *mut c_void;
+    }
+
     pub const MF_STRING: u32 = 0x0000;
     /// A horizontal rule, used to group the two exit commands.
     pub const MF_SEPARATOR: u32 = 0x0800;
@@ -61,6 +77,43 @@ pub mod win {
     pub const TPM_RIGHTBUTTON: u32 = 0x0002;
     pub const WS_POPUP: u32 = 0x8000_0000;
     pub const WM_NULL: u32 = 0x0000;
+    /// `SW_SHOWNORMAL`: show a window the ordinary way.
+    pub const SW_SHOWNORMAL: i32 = 1;
+    /// A `ShellExecute` return value at or below this is an error, not a
+    /// handle. Windows says so by convention and nothing checks it for you.
+    pub const SHELL_EXECUTE_SUCCESS_MIN: usize = 32;
+}
+
+/// Hand a URL to the operating system, which opens it in whatever the user
+/// chose for that scheme.
+///
+/// The tray has no window of its own and no way to draw a browser, so "open a
+/// page" means exactly this: ask Windows to do it. A failure is logged rather
+/// than shown, because a tray with a dialog on every failed click is a tray
+/// nobody wants, and the log is where a real failure belongs.
+#[cfg(windows)]
+pub fn open_url(url: &str) {
+    let file = wide(url);
+    let operation = wide("open");
+    let result = unsafe {
+        win::ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            win::SW_SHOWNORMAL,
+        )
+    };
+    let handle = result as usize;
+    if handle <= win::SHELL_EXECUTE_SUCCESS_MIN {
+        // SAFETY of the cast: this is the API's own contract — a value above
+        // 32 is an HINSTANCE, anything else is an error code.
+        diagnostics::log_line(
+            "tray",
+            &format!("the browser could not be opened for {url}: error {handle}"),
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +123,9 @@ pub enum TrayAction {
     /// Close the tray, leave the renderer and its overlays running.
     Detach,
     Exit,
+    /// Ask about updates now: run a check, and open the release page if one is
+    /// already known. The caption tells the user which of the two it will do.
+    CheckUpdate,
 }
 
 /// Owns the tray icon and relays menu actions into the eframe thread.
@@ -84,6 +140,13 @@ pub struct TrayState {
     /// than accepting a click it cannot honour.
     #[cfg(windows)]
     connected: AtomicBool,
+    /// What the last update check found newer than the running build.
+    ///
+    /// A `Mutex` rather than an atomic because the caption is a whole release —
+    /// a tag and a page — and the menu thread reads it as one value rather than
+    /// as two halves that could disagree. `None` means nothing newer is known,
+    /// which is also what it says before the first check has answered.
+    update: std::sync::Mutex<Option<Release>>,
     #[cfg(windows)]
     tray_hwnd: isize,
     #[cfg(windows)]
@@ -93,6 +156,19 @@ pub struct TrayState {
 impl TrayState {
     pub fn set_running(&self, running: bool) {
         self.running.store(running, Ordering::Release);
+    }
+
+    /// Remember what a check found, so the menu can say so.
+    ///
+    /// A poisoned lock is a panic on purpose: the alternative is a menu that
+    /// quietly forgets the update, which is the exact outcome this feature
+    /// exists to prevent. Nothing while holding it can panic, so the panic is
+    /// a "this should be impossible" marker rather than a real path.
+    pub fn set_known_update(&self, release: Option<Release>) {
+        *self
+            .update
+            .lock()
+            .expect("the known-update lock was poisoned") = release;
     }
 
     /// Say, in the menu itself, whether there is a renderer to talk to.
@@ -139,8 +215,16 @@ impl TrayState {
         }
         let menu_open = Arc::clone(&self.menu_open);
         let connected = self.renderer_connected();
+        // Read here rather than in the spawned thread: the lock is the tray's,
+        // and holding it across a thread boundary is the sort of thing that
+        // turns one slow menu into a wedged lock.
+        let update = self
+            .update
+            .lock()
+            .expect("the known-update lock was poisoned")
+            .clone();
         std::thread::spawn(move || {
-            show_native_menu(x, y, running, connected, action_tx);
+            show_native_menu(x, y, running, connected, update, action_tx);
             menu_open.store(false, Ordering::Release);
         });
     }
@@ -196,6 +280,7 @@ fn show_native_menu(
     y: i32,
     running: bool,
     connected: bool,
+    update: Option<Release>,
     action_tx: mpsc::Sender<TrayAction>,
 ) {
     let class_name = wide("STATIC");
@@ -248,6 +333,15 @@ fn show_native_menu(
         "Resume".to_string()
     });
     let config_text = wide("Config");
+    // The update item's caption is its own action, so the menu says what a
+    // click will do: ask GitHub when nothing newer is known, open the release
+    // page when one is. The tray has no window of its own, so a page in the
+    // browser is the only thing it can offer — which is why the caption has
+    // to decide what the click means rather than leaving it to a second guess.
+    let update_text = wide(&match &update {
+        Some(release) => format!("Update available: {}", release.tag),
+        None => "Check for updates".to_owned(),
+    });
     // `MF_GRAYED` is 0x0001; declared here rather than in the shared `win`
     // module, which is the renderer's and the probe's and has no menu in it.
     #[allow(non_upper_case_globals)]
@@ -269,6 +363,7 @@ fn show_native_menu(
     let appended = unsafe {
         win::AppendMenuW(menu, toggle_flags, 1, toggle_text.as_ptr()) != 0
             && win::AppendMenuW(menu, win::MF_STRING, 2, config_text.as_ptr()) != 0
+            && win::AppendMenuW(menu, win::MF_STRING, 5, update_text.as_ptr()) != 0
             && win::AppendMenuW(menu, win::MF_SEPARATOR, 0, std::ptr::null()) != 0
             && win::AppendMenuW(menu, win::MF_STRING, 3, detach_text.as_ptr()) != 0
             && win::AppendMenuW(menu, win::MF_STRING, 4, exit_text.as_ptr()) != 0
@@ -325,6 +420,9 @@ fn show_native_menu(
                 }
                 Some(2) => {
                     let _ = action_tx.send(TrayAction::Config);
+                }
+                Some(5) => {
+                    let _ = action_tx.send(TrayAction::CheckUpdate);
                 }
                 Some(3) => {
                     let _ = action_tx.send(TrayAction::Detach);
@@ -383,6 +481,7 @@ pub fn create() -> Result<TrayState, Box<dyn Error + Send + Sync>> {
         running: AtomicBool::new(true),
         #[cfg(windows)]
         connected: AtomicBool::new(false),
+        update: std::sync::Mutex::new(None),
         #[cfg(windows)]
         tray_hwnd,
         #[cfg(windows)]

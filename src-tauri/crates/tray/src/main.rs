@@ -18,6 +18,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::process::Child;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ping_latency_overlay_core::config;
@@ -26,6 +27,7 @@ use ping_latency_overlay_core::rules::{self, Engine, Tick};
 use ping_latency_overlay_core::transport::{
     self, Client, Message, Role, SingleInstance, CONFIG_EXE,
 };
+use ping_latency_overlay_core::updater::{self, Outcome, UpdateState};
 use ping_latency_overlay_core::winwatch;
 use ping_latency_overlay_tray::{TrayAction, TrayState};
 
@@ -67,6 +69,17 @@ const RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// free, and a profile switch is a human-scale event: a second of latency on
 /// a game launching is not something anyone can perceive.
 const AUTO_SWITCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often the tray asks whether it is time to look for a newer release.
+///
+/// Once a second, like the auto-switch cadence, and deliberately far shorter
+/// than the thing it gates. The interval itself — a day — is
+/// `updater::CHECK_INTERVAL_SECS`, asked through `updater::due` against the
+/// persisted `checkedAt`, so this const is only how closely the tray watches
+/// and never what it waits. A timer measured from launch would lose the answer
+/// across a restart and charge a user who relaunches after an hour a fresh
+/// full day; asking the state instead is what makes the cadence survive one.
+const UPDATE_DUE_POLL: Duration = Duration::from_secs(1);
 
 /// How a restart history expired.
 ///
@@ -219,6 +232,32 @@ struct App {
     /// The last auto-switch failure, for the same reason `rules_error`
     /// exists: a retry every second must not be a log line every second.
     auto_error: Option<String>,
+    /// The newest release, and when it was last found out.
+    ///
+    /// Held here rather than asked for fresh each time because the check
+    /// costs a network round trip, and a user has no way to tell "no update"
+    /// from "not checked yet" — so the menu says one or the other from the
+    /// first right-click, and the answer survives a restart.
+    update_state: UpdateState,
+    /// The running check, and where its answer arrives.
+    ///
+    /// `updater::check` blocks for seconds, and this loop services tray
+    /// clicks: one check on this thread is a tray that stops responding with
+    /// no log line to say why. So the check runs on a thread of its own and
+    /// this is the channel its answer comes back down, drained once a pass.
+    update_check: Option<mpsc::Receiver<Outcome>>,
+    /// Accumulated time since the last check.
+    since_update: Duration,
+    /// Whether the window's preference allows the automatic check, and the
+    /// stamp the prefs were read at.
+    ///
+    /// A manual check is always allowed: this is the timer only, because a
+    /// background network call the user did not ask for is the one thing a
+    /// preference is entitled to switch off.
+    check_for_updates: bool,
+    /// When the global config was last read, on the `rules_stamp` pattern: a
+    /// stamp per file, because "did it change" is a question about a file.
+    prefs_stamp: Option<FileStamp>,
 }
 
 impl App {
@@ -239,6 +278,15 @@ impl App {
                 &format!("rules.json could not be read ({message}); auto profile switching is off"),
             );
         }
+        // A release found by an earlier session is put back in the menu at
+        // once, rather than discovered again: the state file outlives the
+        // process, so a user who restarts still sees what was worth seeing.
+        let update_state = updater::load_state();
+        if let Some(release) = update_state.release.clone() {
+            tray.set_known_update(Some(release));
+        }
+        let prefs_stamp = file_stamp(&config::global_config_path());
+        let check_for_updates = config::read_global_prefs().ui.check_for_updates;
         Ok(Self {
             tray,
             client,
@@ -257,6 +305,11 @@ impl App {
             auto_paused: false,
             since_auto: Duration::ZERO,
             auto_error: None,
+            update_state,
+            update_check: None,
+            since_update: Duration::ZERO,
+            check_for_updates,
+            prefs_stamp,
         })
     }
 
@@ -296,6 +349,35 @@ impl App {
             self.since_auto = Duration::ZERO;
             self.auto_switch();
         }
+        // The window writes the global config, not the tray, so the flag that
+        // stops the daily check is read on the stamp pattern the rules file
+        // already uses rather than assumed to have been set at launch.
+        self.reload_prefs();
+        // Updates are also on their own clock, and a slow one: the check blocks
+        // for seconds, so it runs on a thread of its own and its answer is
+        // collected here. See `UPDATE_INTERVAL`.
+        if let Some(outcome) = self
+            .update_check
+            .take()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.apply_update_outcome(outcome);
+        }
+        if self.update_check.is_none() {
+            self.since_update += PUMP_INTERVAL;
+            if self.since_update >= UPDATE_DUE_POLL {
+                self.since_update = Duration::ZERO;
+                // Two separate questions, deliberately: whether the preference
+                // allows a background call, and whether it is time for one. The
+                // second is asked of the state file rather than of a timer
+                // that began at launch, because a user who starts the tray an
+                // hour after the last check is owed the remaining twenty-three
+                // hours, not a fresh day. See `UPDATE_DUE_POLL`.
+                if self.check_for_updates && updater::due(&self.update_state, updater::now_secs()) {
+                    self.start_update_check();
+                }
+            }
+        }
         // 16ms rather than TICK: `pump_messages` peeks rather than waits, so on
         // its own this loop would spin a core. Sixteen milliseconds keeps a click
         // feeling instant while costing one `PeekMessage` on an empty queue sixty
@@ -334,6 +416,19 @@ impl App {
                     }
                 }
                 self.tray.set_running(self.running);
+            }
+            // Ask GitHub now, whatever the timer says — and open the release
+            // page when one is already known, rather than asking a question
+            // whose answer is already in the state. The preference stops the
+            // daily check, not this item: a click is not a background
+            // phone-home, and it is the one action left to a user who has
+            // turned the timer off.
+            TrayAction::CheckUpdate => {
+                if let Some(release) = self.update_state.release.clone() {
+                    ping_latency_overlay_tray::open_url(&release.url);
+                } else {
+                    self.start_update_check();
+                }
             }
             // Close the tray, leave the overlays on the screen. This is the
             // minimum-footprint mode: the renderer keeps running with nobody
@@ -666,6 +761,92 @@ impl App {
                         ),
                     );
                     self.rules_error = Some(message);
+                }
+            }
+        }
+    }
+
+    /// Re-read the window's global preferences when the file's stamp moved.
+    ///
+    /// The `reload_rules_if_changed` pattern, and for the same reason: the flag
+    /// is polled on the clock, and "did it change" is a question about a file
+    /// rather than about a value. The window writes this file and the tray only
+    /// reads it, so what the flag was at launch is not what it is now.
+    fn reload_prefs(&mut self) {
+        let stamp = file_stamp(&config::global_config_path());
+        if stamp == self.prefs_stamp {
+            return;
+        }
+        self.prefs_stamp = stamp;
+        // A missing file is the defaults, which is what `read_global_prefs`
+        // already returns — so there is no deleted-file branch here, unlike
+        // the rules, where a missing file means something was turned off.
+        self.check_for_updates = config::read_global_prefs().ui.check_for_updates;
+    }
+
+    /// Run a check on a thread of its own, unless one is already running.
+    ///
+    /// `updater::check` blocks for seconds, and this is the thread that
+    /// services tray clicks: a check on it is a tray that stops responding with
+    /// nothing in the log to say why. So the check runs on a thread and its
+    /// answer comes back down `update_check`, which `step` drains.
+    ///
+    /// No preference is consulted here on purpose. The flag stops the daily
+    /// timer and nothing else — see the call in `step` — so a menu click still
+    /// works for a user who has switched the timer off.
+    fn start_update_check(&mut self) {
+        if self.update_check.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.update_check = Some(receiver);
+        // The version this build reports, from the resource the build script
+        // writes and the same value the About page shows. Compared against what
+        // is running, not against what the newest build would say.
+        let current = env!("APP_BUILD_VERSION").to_owned();
+        std::thread::spawn(move || {
+            // A closed receiver means the loop is gone. There is nobody to
+            // tell, and nothing to clean up, so the error is dropped here
+            // rather than routed into a log line about a process ending.
+            let _ = sender.send(updater::check(&current));
+        });
+    }
+
+    /// Take a check's answer: remember it, put it in the menu, and say so.
+    ///
+    /// The state is written on every answer, including a failed one, because a
+    /// check that could not reach GitHub has still answered the question "when
+    /// was this last attempted" — and an app that retries a failed check on
+    /// every launch is the app whose users turn the feature off. That is the
+    /// whole reason the state outlives the process.
+    fn apply_update_outcome(&mut self, outcome: Outcome) {
+        self.update_check = None;
+        // Captured before the release is moved, so the message survives the
+        // match below without borrowing the outcome twice.
+        let failure = outcome.error().map(str::to_owned);
+        if let Some(release) = outcome.release() {
+            self.update_state.release = Some(release.clone());
+        }
+        self.update_state.checked_at = Some(updater::now_secs());
+        if let Err(error) = updater::save_state(&self.update_state) {
+            diagnostics::log_line(
+                "tray",
+                &format!("the update state could not be saved ({error}); the check will run again"),
+            );
+        }
+        match self.update_state.release.clone() {
+            Some(release) => {
+                self.tray.set_known_update(Some(release.clone()));
+                diagnostics::log_line("tray", &format!("update available: {}", release.label()));
+            }
+            None => {
+                self.tray.set_known_update(None);
+                match failure {
+                    Some(message) => diagnostics::log_line(
+                        "tray",
+                        &format!("the update check failed ({message}); it runs again tomorrow"),
+                    ),
+                    None => diagnostics::log_line("tray", "no newer release is published"),
                 }
             }
         }
