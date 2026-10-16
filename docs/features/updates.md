@@ -112,6 +112,17 @@ the tray's update menu item, or the About page's update row.
   table for a winhttp.dll code is not the one it can read. `describe()` maps
   the four codes this request can produce into a sentence; anything it did not
   keep the code, so a person can still search for it.
+- **A wrong modifier bit is a different query, not a wrong answer.** The status
+  query asks for a number with
+  `WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER`. The flag was
+  declared `0x0002`, and `19 | 2` is 21 — `WINHTTP_QUERY_RAW_HEADERS` — so the
+  call asked for every response header as NUL-separated text into a 4-byte
+  buffer and WinHTTP correctly answered `ERROR_INSUFFICIENT_BUFFER` (122). The
+  modifier flags are the **high** bits (`0x2000_0000`); a low bit silently
+  becomes another attribute, which is exactly why the constant carries its trap
+  in a comment. No observable symptom pointed at the query — the stall it was
+  found beside was the WPAD one — so this is worth re-reading before touching
+  the headers call.
 
 ## Config keys / UI
 

@@ -9,9 +9,10 @@ disagrees with the code, the code is right. `AGENTS.md` is the process doc,
 This file is the volatile one — it exists so a new session knows *where things
 stand*, not *how they work*.
 
-As of the update checker — 2026-10-13. The app now asks GitHub once a day
-whether a newer release exists and says so in the tray menu, names a found
-release's page, and carries the same check on the Config window's About page.
+As of the update checker shipping — 2026-10-16. The app now asks GitHub once
+a day whether a newer release exists and says so in the tray menu, names a
+found release's page, and carries the same check on the Config window's About
+page.
 `ui.checkForUpdates` is on by default and stops only the tray's daily ask: a
 click on the menu item or the About page's button is a user asking, and that
 is never gated. The last answer is kept in `updates.json` beside the config,
@@ -29,11 +30,20 @@ string, nothing is parsed, and the shared WARP egress address that had spent
 the API's sixty-an-hour is not a factor. A failure is now `describe()`'s
 sentence (`the request timed out`, `the secure connection failed`, `GitHub is
 rate-limiting this network; try again later`) rather than
-`OS Error 12002 (FormatMessageW() returned error 317)`. The gate is
-green (`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`OS Error 12002 (FormatMessageW() returned error 317)`. Chasing a second,
+stall-adjacent failure (`122`, `ERROR_INSUFFICIENT_BUFFER`) turned up a wrong
+constant: `WINHTTP_QUERY_FLAG_NUMBER` was declared `0x0002`, and
+`WINHTTP_QUERY_STATUS_CODE | 2` is 21, which is `WINHTTP_QUERY_RAW_HEADERS` —
+so the status query asked for every header as text into a 4-byte buffer and was
+told, correctly, that the buffer was too small. It is `0x2000_0000` now; the
+modifier flags live in the high bits. Shipped as `a650adb`: the gate green
+(`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`,
 `cargo test --all-features` — 100 shell tests, up from 97, 269 in core, 6 + 2
-+ 3 + 1 elsewhere) and `cargo build --release` succeeded (1m56s), so the three
-release exes carry all three fixes; nothing is committed yet. The sample
++ 3 + 1 elsewhere), `cargo build --release` exit 0, and the bundle wrote
+`PingLatencyOverlay_0.2.72_x64-setup.exe`, agreeing with the 0.2.72 the three
+exes report. Pushed to `origin/split/renderer-process` and restarted on the
+live config. **0.2.72 is unpublished** (GitHub's latest is `v0.2.70`), so the
+check honestly reads "up to date" until a release is published. The sample
 cursor's bounce reaching the cursor shipped as `8ac13ea` and was pushed, along
 with the per-host adapter binding as `1bc1705` and the compression bands and
 the background grid as `55dfdb2` — all on `origin/split/renderer-process`. The
@@ -42,7 +52,7 @@ canvas the config names.
 
 ## State
 
-- **The update checker is new and uncommitted.** `crates/core/src/updater.rs` is
+- **The update checker ships in `a650adb`.** `crates/core/src/updater.rs` is
   the one statement of it: `parse_version` / `Version` compare by number (a tag
   reads the same with or without the `v`, and only three numbers are a
   version), `decide` offers only a release *behind* the running one so a local
@@ -131,8 +141,8 @@ canvas the config names.
   `docs/features/overlays/rendering.md` for the drawing.
 - **The sample-cursor bounce ships with its revised shake.** `ce1ab95` shipped
   the bounce; `e8efedb` moved the shake to 4.5 Hz / 0.6 × the cursor's
-  half-height / 0.9 s. The current (uncommitted) change reworked the trigger
-  and the shake's clock — see the first bullet above; no new config key.
+  half-height / 0.9 s. `8ac13ea` reworked the trigger and the shake's clock —
+  see the cursor bullet above; no new config key.
   `a_fresh_timeout_does_not_bounce_the_cursor`,
   `a_timeout_that_reached_the_cursor_bounces`,
   `a_second_timeout_in_a_row_restarts_the_shake` and
